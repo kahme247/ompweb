@@ -21,7 +21,7 @@ import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterrup
 import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
-import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
+import { BLOCKING_UI_METHODS, createNotificationDetector, DIALOG_UI_METHODS } from "./notification-events";
 import { publishNotification, publishNotificationDismiss, publishNotificationForgotten } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { eventWithToolResultImageUrls } from "./media-cache";
@@ -1531,6 +1531,13 @@ export class AgentSessionWrapper {
     const pending = this.pendingUiRequests.get(id);
     if (!pending) return "alreadySettled";
     const method = typeof pending.method === "string" ? pending.method : "";
+    // `open_url` (and anything else that is not a dialog) is stored as pending
+    // only so it is replayed; omp registers no resolver for it, so an
+    // "answer" would be dropped there while this server reported success and
+    // retracted the notification. Only DIALOG_UI_METHODS are answerable.
+    if (!DIALOG_UI_METHODS.has(method)) {
+      throw new WebRpcError("This request does not take an answer", "invalid_dialog_answer");
+    }
     if (method === "ask") {
       // A pending ask accepts only its answers or a cancel; the answers
       // themselves are checked against this dialog's questions in

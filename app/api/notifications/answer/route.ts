@@ -44,7 +44,8 @@ function parseResponse(value: unknown): ExtensionUiResponse | null {
  * 200 {status:"answered"}      routed through the shared extension_ui_response command
  * 200 {status:"alreadySettled"} the request id is not pending
  * 200 {status:"sessionGone"}    no live wrapper for the session
- * 400 on an invalid body or an answer the pending dialog does not take
+ * 400 on an invalid body, an answer the pending dialog does not take, or a
+ *     request that is not a dialog at all (`open_url` takes no answer)
  * 400 session_restarting / 503 {hostOffline: true} when it cannot be delivered
  */
 export async function POST(req: Request) {

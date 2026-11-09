@@ -47,8 +47,8 @@ export interface NotificationPresence {
  * A toast/system notification, or the retraction of a session's `input`
  * notification once its dialog was answered, cancelled, expired or its omp
  * child went away. The retraction reaches a tab as `type: "notification-dismiss"`
- * (lib/event-stream-hub.ts wraps it) and a device as a `type: "dismiss"` push
- * (public/sw.js).
+ * (lib/event-stream-hub.ts wraps it); it is never pushed (see
+ * `publishNotificationDismiss`).
  */
 export type NotificationMessage =
   | { kind: "toast" | "os"; event: NotificationEvent }
@@ -182,37 +182,6 @@ function stillSubscribed(deviceId: string, endpoint: string): boolean {
   }
 }
 
-/** Never throws: a failed push must not break delivery to anyone else. */
-async function sendPushPayload(
-  device: NotificationDevice,
-  payload: unknown,
-  urgency: "high" | "normal",
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const subscription = device.subscription;
-  if (!subscription) return { ok: false, error: "no push subscription" };
-  try {
-    const { publicKey, privateKey } = getVapidKeys(webpush.generateVAPIDKeys);
-    await webpush.sendNotification(subscription, JSON.stringify(payload), {
-      TTL: PUSH_TTL_SECONDS,
-      urgency,
-      timeout: PUSH_TIMEOUT_MS,
-      vapidDetails: { subject: VAPID_SUBJECT, publicKey, privateKey },
-    });
-    return { ok: true };
-  } catch (error) {
-    const status = error instanceof webpush.WebPushError ? error.statusCode : undefined;
-    try {
-      // 404/410: the browser unsubscribed or the subscription expired.
-      if (status === 404 || status === 410) dropDeviceSubscription(device.deviceId, subscription.endpoint);
-    } catch {
-      // A store write failure only delays the cleanup to the next push.
-    }
-    const message = status ? `push service answered ${status}` : describePushError(error);
-    console.warn("[notifications] push failed:", message);
-    return { ok: false, error: message };
-  }
-}
-
 /**
  * True while this dialog's retraction still covers a push retry. Every path
  * that settles a dialog (answer, cancel, expiry, process exit) records one,
@@ -275,22 +244,6 @@ async function sendPush(device: NotificationDevice, event: NotificationEvent, re
   }
 }
 
-/**
- * Apple's push service is the one endpoint where a push that displays nothing
- * costs the permission itself: iOS revokes Web Push for the site. Dismiss
- * pushes therefore never go there; the app clears the notification when its
- * own answer reaches the server, or the stale one is replaced by the next
- * `input` push of the same tag.
- */
-export function isApplePushEndpoint(endpoint: string): boolean {
-  try {
-    const host = new URL(endpoint).hostname.toLowerCase();
-    return host === "web.push.apple.com" || host.endsWith(".push.apple.com");
-  } catch {
-    return false;
-  }
-}
-
 /** Never throws: callers publish from the RPC frame path, and a store failure must not cost them the frame. */
 export function publishNotification(event: NotificationEvent): void {
   const state = hub();
@@ -334,9 +287,14 @@ export function publishNotification(event: NotificationEvent): void {
 /**
  * Retract a session's `input` notification: its dialog was answered by any
  * client, cancelled, expired, or its omp child went away. Every reachable tab
- * gets the retraction on its stream, and subscribed devices get a dismiss push
- * unless the endpoint is Apple's (see `isApplePushEndpoint`). The history entry
- * becomes read because the question is settled.
+ * gets the retraction on its stream, and the history entry becomes read
+ * because the question is settled.
+ *
+ * No push goes out: a push that displays nothing counts as a silent push, and
+ * Chromium and Firefox answer one with a browser-substituted card ("This site
+ * has been updated in the background") and eventually mute the origin, exactly
+ * as iOS revokes the permission. A device that is not reachable keeps the stale
+ * card until the next `input` push replaces it by tag or the app syncs.
  *
  * Never throws: callers run on the RPC frame path.
  */
@@ -396,20 +354,6 @@ function retract(sessionId: string, requestId: string, kind: "permanent" | "temp
         // A closing stream must not break delivery to the others.
       }
     }
-  }
-  let devices: NotificationDevice[] = [];
-  try {
-    devices = listDevices();
-  } catch (error) {
-    console.warn("[notifications] store unavailable:", error);
-  }
-  for (const device of devices) {
-    // A retraction is not an alert: a device that turned notifications off
-    // after receiving the question still has the old one on screen.
-    if (!device.subscription) continue;
-    if (isApplePushEndpoint(device.subscription.endpoint)) continue;
-    // urgency "normal": a retraction must not wake a phone like a question.
-    void sendPushPayload(device, { type: "dismiss", tag, sessionId, requestId }, "normal");
   }
 }
 

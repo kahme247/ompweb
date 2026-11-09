@@ -38,8 +38,14 @@ Rules:
   to Opus, rate limits, provider failures). A fallback still held at
   `auto_retry_end`, `prompt_result` or `session_settled` is sent without one.
 - Every notification has tag `<sessionId>:<type>`, so a repeat replaces the
-  previous one instead of stacking. Notifications are not retracted when they
-  stop applying.
+  previous one instead of stacking. An `input` notification is retracted when
+  the dialog behind it settles (answered, cancelled, expired, or its omp child
+  went away): every reachable tab gets a `notification-dismiss` frame naming
+  the tag and request id. No push carries the retraction — a push that
+  displays nothing is a silent push, which browsers punish — so a device that
+  is not reachable keeps the stale card until the next `input` push replaces
+  it by tag. The request id rides on every delivery, so a retraction closes
+  only its own dialog and never the next one of the same tag.
 
 ## Architecture
 
@@ -183,7 +189,10 @@ exactly one response variant: `{confirmed}`, `{value}`, `{cancelled: true}`, or
 - The answer is checked against the pending dialog first, so a payload the
   dialog cannot take is a 400 and leaves the question answerable: a `select`
   takes one of its own labels, a `confirm` a confirmation, an `input`/`editor`
-  a value, and an `ask` its answers. An `ask` payload is validated with omp's
+  a value, and an `ask` its answers. A request whose method is not a dialog
+  takes no answer at all: `open_url` is fire-and-forget (omp registers no
+  resolver for it), so any response to it is a 400 `invalid_dialog_answer`
+  before anything is sent. An `ask` payload is validated with omp's
   own rules (`parseAskDialogResponse` in `rpc-mode.ts`): one answer per
   question in request order, each answer naming its own question id, only
   labels that question offers, no label twice, and a single-select question
@@ -194,12 +203,15 @@ exactly one response variant: `{confirmed}`, `{value}`, `{cancelled: true}`, or
   the offline/restarting gate: a host that is offline answers 503
   `{hostOffline: true}` and a restarting session 400 `session_restarting`,
   never `answered`. The dialog is settled only after the answer was admitted.
-- Settling a dialog retracts its notification everywhere: every reachable tab
-  gets `{type: "notification-dismiss", tag, sessionId, requestId}`, subscribed
-  devices get a `dismiss` push (never to Apple's endpoint, which revokes the
-  permission for a push that shows nothing), and the history entry of exactly
-  that request becomes read. A newer dialog of the same tag keeps its own
-  unread entry. A push retry that wakes after the settlement delivers nothing.
+- Settling a dialog retracts its notification on every reachable tab:
+  `{type: "notification-dismiss", tag, sessionId, requestId}`, and the history
+  entry of exactly that request becomes read. A newer dialog of the same tag
+  keeps its own unread entry. A push retry that wakes after the settlement
+  delivers nothing. No push carries the retraction: a push that displays
+  nothing is a silent push (iOS revokes the permission, Chromium and Firefox
+  substitute a generic card and mute the origin), so a device that is not
+  reachable keeps the stale card until the next `input` push replaces it by
+  tag or the app syncs.
 - A resync that dropped a dialog (a linked host discarding buffered output)
   retracts it too, but as a *forgotten* settlement: the retraction is
   temporary, so if the host replays the same request id the question is
