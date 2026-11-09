@@ -325,7 +325,7 @@ export function walkXml(
     const spaceIdx = rawTag.search(/\s/);
     if (spaceIdx !== -1) {
       name = rawTag.slice(0, spaceIdx);
-      attrs = rawTag.slice(spaceIdx + 1).trim();
+      attrs = rawTag.slice(spaceIdx + 1, spaceIdx + 1 + 8192).trim();
     }
 
     if (onTag(name, isClose, selfClosing, attrs) === false) {
@@ -473,10 +473,18 @@ function parseCMap(cmapStr: string, cmapBudget: DecompressBudget): PdfCMap {
     const block = cmapStr.slice(contentStart, endIdx);
     pos = endIdx + "endcodespacerange".length;
 
-    const pairRegex = /<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g;
-    let pm: RegExpExecArray | null;
-    while ((pm = pairRegex.exec(block)) !== null) {
-      if (pm[1].length >= 4) codeBytes = 2;
+    let cPos = 0;
+    while (cPos < block.length) {
+      const lt1 = block.indexOf("<", cPos);
+      if (lt1 === -1) break;
+      const gt1 = block.indexOf(">", lt1 + 1);
+      if (gt1 === -1) break;
+      const lt2 = block.indexOf("<", gt1 + 1);
+      if (lt2 === -1) break;
+      const gt2 = block.indexOf(">", lt2 + 1);
+      if (gt2 === -1) break;
+      if (gt1 - lt1 - 1 >= 4) codeBytes = 2;
+      cPos = gt2 + 1;
     }
   }
 
@@ -490,11 +498,23 @@ function parseCMap(cmapStr: string, cmapBudget: DecompressBudget): PdfCMap {
     const block = cmapStr.slice(contentStart, endIdx);
     pos = endIdx + "endbfchar".length;
 
-    const pairRegex = /<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g;
-    let pm: RegExpExecArray | null;
-    while ((pm = pairRegex.exec(block)) !== null && --cmapBudget.remaining >= 0 && ++totalEntries <= MAX_CMAP_ITERATIONS) {
-      if (pm[1].length >= 4) codeBytes = 2;
-      map.set(parseInt(pm[1], 16), decodeCMapTargetHex(pm[2]));
+    let cPos = 0;
+    while (cPos < block.length && cmapBudget.remaining > 0 && totalEntries < MAX_CMAP_ITERATIONS) {
+      const lt1 = block.indexOf("<", cPos);
+      if (lt1 === -1) break;
+      const gt1 = block.indexOf(">", lt1 + 1);
+      if (gt1 === -1) break;
+      const lt2 = block.indexOf("<", gt1 + 1);
+      if (lt2 === -1) break;
+      const gt2 = block.indexOf(">", lt2 + 1);
+      if (gt2 === -1) break;
+      const srcHex = block.slice(lt1 + 1, gt1).trim();
+      const dstHex = block.slice(lt2 + 1, gt2).trim();
+      cPos = gt2 + 1;
+      if (!srcHex || !dstHex) continue;
+      if (--cmapBudget.remaining < 0 || ++totalEntries > MAX_CMAP_ITERATIONS) break;
+      if (srcHex.length >= 4) codeBytes = 2;
+      map.set(parseInt(srcHex, 16), decodeCMapTargetHex(dstHex));
     }
   }
 
@@ -653,23 +673,201 @@ function bytesToBinaryString(bytes: Uint8Array): string {
   return out;
 }
 
+function isPdfAsciiWhitespace(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d || code === 0x0c || code === 0x00;
+}
+
+function isPdfAsciiDigit(code: number): boolean {
+  return code >= 0x30 && code <= 0x39;
+}
+
+function isPdfAsciiWord(code: number): boolean {
+  return (code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a) || code === 0x5f;
+}
+
+/** Linear O(N) scan for `<id> <gen> obj` headers using indexOf("obj") with bounded lookbehind. */
+function findNextPdfObjHeader(latin1: string, fromIndex: number): { id: number; bodyStart: number } | null {
+  const len = latin1.length;
+  let pos = fromIndex;
+  while (pos < len) {
+    const objIdx = latin1.indexOf("obj", pos);
+    if (objIdx === -1) return null;
+    const bodyStart = objIdx + 3;
+    pos = bodyStart;
+    if (bodyStart < len && isPdfAsciiWord(latin1.charCodeAt(bodyStart))) continue;
+    let cur = objIdx - 1;
+    if (cur < fromIndex || !isPdfAsciiWhitespace(latin1.charCodeAt(cur))) continue;
+    let ws1 = 0;
+    while (cur >= fromIndex && ws1 < 32 && isPdfAsciiWhitespace(latin1.charCodeAt(cur))) {
+      cur--;
+      ws1++;
+    }
+    if (cur >= fromIndex && isPdfAsciiWhitespace(latin1.charCodeAt(cur))) continue;
+    let genDigits = 0;
+    while (cur >= fromIndex && genDigits <= 10 && isPdfAsciiDigit(latin1.charCodeAt(cur))) {
+      cur--;
+      genDigits++;
+    }
+    if (genDigits === 0 || genDigits > 10) continue;
+    if (cur < fromIndex || !isPdfAsciiWhitespace(latin1.charCodeAt(cur))) continue;
+    let ws2 = 0;
+    while (cur >= fromIndex && ws2 < 32 && isPdfAsciiWhitespace(latin1.charCodeAt(cur))) {
+      cur--;
+      ws2++;
+    }
+    if (cur >= fromIndex && isPdfAsciiWhitespace(latin1.charCodeAt(cur))) continue;
+    const idEnd = cur;
+    let idDigits = 0;
+    while (cur >= fromIndex && idDigits <= 10 && isPdfAsciiDigit(latin1.charCodeAt(cur))) {
+      cur--;
+      idDigits++;
+    }
+    if (idDigits === 0 || idDigits > 10) continue;
+    if (cur >= 0 && isPdfAsciiWord(latin1.charCodeAt(cur))) continue;
+    const id = parseInt(latin1.slice(cur + 1, idEnd + 1), 10);
+    if (!Number.isFinite(id)) continue;
+    return { id, bodyStart };
+  }
+  return null;
+}
+
+const PDF_STREAM_OPS = new Set([
+  "BT", "ET", "Tf", "Tm", "Td", "TD", "TL", "Tc", "Tw", "Tz", "cm", "q", "Q", "Tj", "TJ", "T*", "'", '"',
+]);
+
+type PdfStreamToken =
+  | { kind: "name"; value: string; nextPos: number }
+  | { kind: "literal"; value: string; nextPos: number }
+  | { kind: "hex"; value: string; nextPos: number }
+  | { kind: "bracket"; value: "[" | "]"; nextPos: number }
+  | { kind: "number"; value: string; nextPos: number }
+  | { kind: "op"; value: string; nextPos: number }
+  | { kind: "other"; value: string; nextPos: number };
+
+/** Strictly linear O(N) PDF content stream tokenizer; never backtracks on unclosed strings or hex blocks. */
+function nextPdfStreamToken(s: string, startPos: number): PdfStreamToken | null {
+  const len = s.length;
+  let pos = startPos;
+  while (pos < len) {
+    const ch = s.charCodeAt(pos);
+    if (ch <= 0x20) {
+      pos++;
+      continue;
+    }
+    if (ch === 0x25) {
+      pos++;
+      while (pos < len && s.charCodeAt(pos) !== 0x0a && s.charCodeAt(pos) !== 0x0d) pos++;
+      continue;
+    }
+    if (ch === 0x2f) {
+      const nameStart = ++pos;
+      while (pos < len) {
+        const c = s.charCodeAt(pos);
+        if (
+          (c >= 0x30 && c <= 0x39)
+          || (c >= 0x41 && c <= 0x5a)
+          || (c >= 0x61 && c <= 0x7a)
+          || c === 0x5f || c === 0x2e || c === 0x2d
+        ) {
+          pos++;
+        } else {
+          break;
+        }
+      }
+      return { kind: "name", value: s.slice(nameStart, pos), nextPos: pos };
+    }
+    if (ch === 0x28) {
+      const bodyStart = ++pos;
+      let depth = 1;
+      while (pos < len && depth > 0) {
+        const c = s.charCodeAt(pos++);
+        if (c === 0x5c) {
+          if (pos < len) pos++;
+        } else if (c === 0x28) {
+          depth++;
+        } else if (c === 0x29) {
+          depth--;
+        }
+      }
+      if (depth > 0) return null;
+      return { kind: "literal", value: s.slice(bodyStart, pos - 1), nextPos: pos };
+    }
+    if (ch === 0x3c) {
+      if (pos + 1 < len && s.charCodeAt(pos + 1) === 0x3c) {
+        pos += 2;
+        continue;
+      }
+      const hexStart = pos + 1;
+      const gt = s.indexOf(">", hexStart);
+      if (gt === -1) return null;
+      return { kind: "hex", value: s.slice(hexStart, gt), nextPos: gt + 1 };
+    }
+    if (ch === 0x3e) {
+      pos += pos + 1 < len && s.charCodeAt(pos + 1) === 0x3e ? 2 : 1;
+      continue;
+    }
+    if (ch === 0x5b || ch === 0x5d) {
+      return { kind: "bracket", value: ch === 0x5b ? "[" : "]", nextPos: pos + 1 };
+    }
+    if (ch === 0x27 || ch === 0x22) {
+      return { kind: "op", value: s[pos], nextPos: pos + 1 };
+    }
+    if (ch === 0x2b || ch === 0x2d || ch === 0x2e || (ch >= 0x30 && ch <= 0x39)) {
+      const numStart = pos;
+      if (ch === 0x2b || ch === 0x2d) pos++;
+      let digits = 0;
+      while (pos < len && s.charCodeAt(pos) >= 0x30 && s.charCodeAt(pos) <= 0x39) {
+        pos++;
+        digits++;
+      }
+      if (pos < len && s.charCodeAt(pos) === 0x2e) {
+        pos++;
+        while (pos < len && s.charCodeAt(pos) >= 0x30 && s.charCodeAt(pos) <= 0x39) {
+          pos++;
+          digits++;
+        }
+      }
+      if (digits > 0) {
+        return { kind: "number", value: s.slice(numStart, pos), nextPos: pos };
+      }
+      pos = numStart + 1;
+      continue;
+    }
+    if ((ch >= 0x41 && ch <= 0x5a) || (ch >= 0x61 && ch <= 0x7a) || ch === 0x2a) {
+      const opStart = pos++;
+      while (pos < len) {
+        const c = s.charCodeAt(pos);
+        if ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || c === 0x2a) {
+          pos++;
+        } else {
+          break;
+        }
+      }
+      const word = s.slice(opStart, pos);
+      return { kind: PDF_STREAM_OPS.has(word) ? "op" : "other", value: word, nextPos: pos };
+    }
+    pos++;
+  }
+  return null;
+}
+
 /** Extracts text streams and character mappings from PDF file buffer. */
 async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
   const budget: DecompressBudget = { remaining: MAX_DECOMPRESSED_BYTES };
   const latin1 = bytesToBinaryString(new Uint8Array(buf));
-  const objHeaderRegex = /(\d+)\s+\d+\s+obj\b/g;
   const streamMarkerRe = />>\s*stream(?:\r?\n|\r)/g;
   const nonTextStreamRe = /\/Subtype\s*\/(?:Image|Type1C|CIDFontType0C|OpenType)\b|\/Length[123]\b|\/Type\s*\/(?:XRef|Metadata|EmbeddedFile)\b|\/BitsPerComponent\b/;
   const objects = new Map<number, { dict: string; streamText: string | null; body: string }>();
   let totalObjStmBytes = 0;
-  let m: RegExpExecArray | null;
-  while ((m = objHeaderRegex.exec(latin1)) !== null) {
+  let searchPos = 0;
+  while (searchPos < latin1.length) {
     if (objects.size >= MAX_PDF_OBJECTS) break;
-    const id = parseInt(m[1], 10);
-    const bodyStart = m.index + m[0].length;
+    const header = findNextPdfObjHeader(latin1, searchPos);
+    if (!header) break;
+    const { id, bodyStart } = header;
     const endObjIdx = latin1.indexOf("endobj", bodyStart);
     if (endObjIdx === -1) break;
-    objHeaderRegex.lastIndex = endObjIdx + 6;
+    searchPos = endObjIdx + 6;
     const body = latin1.slice(bodyStart, endObjIdx);
     const endStreamIdx = body.indexOf("endstream");
     const dictStart = endStreamIdx !== -1 ? body.indexOf("<<") : -1;
@@ -837,9 +1035,6 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
   const lines: string[] = [];
   let globalSeq = 0;
   let globalBtId = 0;
-  const streamTokenRe =
-    /\/([A-Za-z0-9_.-]+)|\((?:\\[\s\S]|[^\\()])*\)|<([0-9a-fA-F\s]+)>|(\[|\])|([-+]?(?:\d+\.?\d*|\.\d+))|(\b(?:BT|ET|Tf|Tm|Td|TD|TL|Tc|Tw|Tz|cm|q|Q|Tj|TJ)\b|\bT\*|['"])|\b([A-Za-z*]+)\b/g;
-
   let totalStreamTokens = 0;
   for (const [, obj] of objects) {
     if (totalStreamTokens >= MAX_PDF_STREAM_TOKENS) break;
@@ -898,32 +1093,33 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
       tmMat = mulMat([1, 0, 0, 1, advText, 0], tmMat);
     };
 
-    streamTokenRe.lastIndex = 0;
-    let tok: RegExpExecArray | null;
-    while ((tok = streamTokenRe.exec(obj.streamText)) !== null) {
+    let streamPos = 0;
+    let tok: PdfStreamToken | null;
+    while ((tok = nextPdfStreamToken(obj.streamText, streamPos)) !== null) {
+      streamPos = tok.nextPos;
       if (++totalStreamTokens > MAX_PDF_STREAM_TOKENS) break;
-      if (tok[1] !== undefined) {
-        pendingName = tok[1];
-      } else if (tok[0].startsWith("(")) {
+      if (tok.kind === "name") {
+        pendingName = tok.value;
+      } else if (tok.kind === "literal") {
         if (inText) {
-          const bytes = decodePdfLiteralBytes(tok[0].slice(1, -1));
+          const bytes = decodePdfLiteralBytes(tok.value);
           appendDecodedText(decodeBytesWithPdfCMap(bytes, resolveFontCMap(currentFont)));
         }
-      } else if (tok[2] !== undefined) {
+      } else if (tok.kind === "hex") {
         if (inText) {
-          const bytes = decodePdfHexBytes(tok[2]);
+          const bytes = decodePdfHexBytes(tok.value);
           appendDecodedText(decodeBytesWithPdfCMap(bytes, resolveFontCMap(currentFont)));
         }
-      } else if (tok[3] !== undefined) {
-        if (tok[3] === "[") {
+      } else if (tok.kind === "bracket") {
+        if (tok.value === "[") {
           inTjArray = true;
           numStack.length = 0;
         } else {
           inTjArray = false;
           numStack.length = 0;
         }
-      } else if (tok[4] !== undefined) {
-        const num = parseFloat(tok[4]);
+      } else if (tok.kind === "number") {
+        const num = parseFloat(tok.value);
         if (Number.isFinite(num)) {
           if (inText && inTjArray) {
             if (num <= -150) {
@@ -936,8 +1132,8 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
             if (numStack.length > 6) numStack.shift();
           }
         }
-      } else if (tok[5] !== undefined) {
-        const op = tok[5];
+      } else if (tok.kind === "op") {
+        const op = tok.value;
         if (op === "BT") {
           flushRun();
           inText = true;
@@ -1007,7 +1203,7 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
         }
         numStack.length = 0;
         pendingName = null;
-      } else if (tok[6] !== undefined) {
+      } else if (tok.kind === "other") {
         numStack.length = 0;
         pendingName = null;
       }
@@ -1271,36 +1467,40 @@ async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>, stat
   const relsFn = entries.get("xl/_rels/workbook.xml.rels");
   const relMap = new Map<string, string>();
   if (relsFn) {
-    const relBuf = await relsFn();
-    const relXml = new TextDecoder("utf-8").decode(relBuf);
-    const relRegex = /<Relationship\b([^>]*)\/>/g;
-    let m: RegExpExecArray | null;
-    while ((m = relRegex.exec(relXml)) !== null) {
-      const idMatch = m[1].match(/\bId="([^"]+)"/);
-      const targetMatch = m[1].match(/\bTarget="([^"]+)"/);
-      if (idMatch && targetMatch) {
-        const target = targetMatch[1];
-        relMap.set(idMatch[1], target.startsWith("/") ? target.slice(1) : (target.startsWith("xl/") ? target : `xl/${target}`));
+    const relsBuf = await relsFn();
+    const relsXml = new TextDecoder("utf-8").decode(relsBuf);
+    const ok = walkXml(relsXml, tagBudget, (tagName, isClose, _selfClosing, attrs) => {
+      if (!isClose && (tagName === "Relationship" || tagName.endsWith(":Relationship"))) {
+        const idMatch = attrs.match(/\bId="([^"]+)"/);
+        const targetMatch = attrs.match(/\bTarget="([^"]+)"/);
+        if (idMatch && targetMatch) {
+          let t = targetMatch[1].replace(/^\//, "");
+          if (!t.startsWith("xl/")) t = "xl/" + t;
+          relMap.set(idMatch[1], t);
+        }
       }
-    }
+    });
+    if (!ok) return null;
   }
 
   const wbFn = entries.get("xl/workbook.xml");
-  const sheets: Array<{ name: string; target: string | null }> = [];
+  const sheets: Array<{ name: string; target: string }> = [];
   if (wbFn) {
     const wbBuf = await wbFn();
     const wbXml = new TextDecoder("utf-8").decode(wbBuf);
-    const sheetRegex = /<sheet\b([^>]*)\/>/g;
-    let m: RegExpExecArray | null;
-    while ((m = sheetRegex.exec(wbXml)) !== null) {
-      const nameMatch = m[1].match(/\bname="([^"]+)"/);
-      const rIdMatch = m[1].match(/\br:id="([^"]+)"/);
-      const name = nameMatch ? decodeXmlEntities(nameMatch[1]) : "Sheet";
-      const target = rIdMatch ? relMap.get(rIdMatch[1]) || null : null;
-      sheets.push({ name, target });
-    }
+    const ok = walkXml(wbXml, tagBudget, (tagName, isClose, _selfClosing, attrs) => {
+      if (!isClose && (tagName === "sheet" || tagName.endsWith(":sheet"))) {
+        const nameMatch = attrs.match(/\bname="([^"]+)"/);
+        const rIdMatch = attrs.match(/\br:id="([^"]+)"/);
+        if (nameMatch) {
+          const name = decodeXmlEntities(nameMatch[1]);
+          const target = rIdMatch ? relMap.get(rIdMatch[1]) || "" : "";
+          sheets.push({ name, target });
+        }
+      }
+    });
+    if (!ok) return null;
   }
-
   const sections: string[] = [];
   const visitedSheets = new Set<string>();
   const encoder = new TextEncoder();
@@ -1677,13 +1877,19 @@ async function extractOdf(entries: Map<string, () => Promise<Uint8Array>>, state
 
 /** Extracts chapter text from EPUB archive spine in reading order. */
 async function extractEpub(entries: Map<string, () => Promise<Uint8Array>>): Promise<string | null> {
+  const tagBudget: XmlTagBudget = { tags: 0, maxTags: MAX_XML_TAGS };
   let rootFile = "OEBPS/content.opf";
   const containerFn = entries.get("META-INF/container.xml");
   if (containerFn) {
     const cBuf = await containerFn();
     const cXml = new TextDecoder("utf-8").decode(cBuf);
-    const m = cXml.match(/full-path="([^"]+)"/);
-    if (m) rootFile = m[1];
+    const ok = walkXml(cXml, tagBudget, (tagName, isClose, _selfClosing, attrs) => {
+      if (!isClose && (tagName === "rootfile" || tagName.endsWith(":rootfile"))) {
+        const m = attrs.match(/\bfull-path="([^"]+)"/);
+        if (m) rootFile = m[1];
+      }
+    });
+    if (!ok) return null;
   }
 
   const opfFn = entries.get(rootFile);
@@ -1693,27 +1899,30 @@ async function extractEpub(entries: Map<string, () => Promise<Uint8Array>>): Pro
   const basePath = rootFile.includes("/") ? rootFile.replace(/\/[^/]*$/, "/") : "";
 
   const manifest = new Map<string, string>();
-  const itemRegex = /<item\b([^>]*)\/>/g;
-  let im: RegExpExecArray | null;
-  while ((im = itemRegex.exec(opfXml)) !== null) {
-    const idMatch = im[1].match(/\bid="([^"]+)"/);
-    const hrefMatch = im[1].match(/\bhref="([^"]+)"/);
-    if (idMatch && hrefMatch) {
-      manifest.set(idMatch[1], hrefMatch[1]);
+  const spineRefs: string[] = [];
+  const opfOk = walkXml(opfXml, tagBudget, (tagName, isClose, _selfClosing, attrs) => {
+    if (isClose) return;
+    if (tagName === "item" || tagName.endsWith(":item")) {
+      const idMatch = attrs.match(/\bid="([^"]+)"/);
+      const hrefMatch = attrs.match(/\bhref="([^"]+)"/);
+      if (idMatch && hrefMatch) {
+        manifest.set(idMatch[1], hrefMatch[1]);
+      }
+    } else if (tagName === "itemref" || tagName.endsWith(":itemref")) {
+      const idrefMatch = attrs.match(/\bidref="([^"]+)"/);
+      if (idrefMatch) {
+        spineRefs.push(idrefMatch[1]);
+      }
     }
-  }
+  });
+  if (!opfOk) return null;
 
   const spine: string[] = [];
-  const itemrefRegex = /<itemref\b([^>]*)\/>/g;
-  let irMatch: RegExpExecArray | null;
-  while ((irMatch = itemrefRegex.exec(opfXml)) !== null) {
-    const idrefMatch = irMatch[1].match(/\bidref="([^"]+)"/);
-    if (idrefMatch && manifest.has(idrefMatch[1])) {
-      spine.push(manifest.get(idrefMatch[1])!);
+  for (const idref of spineRefs) {
+    if (manifest.has(idref)) {
+      spine.push(manifest.get(idref)!);
     }
   }
-
-  const tagBudget: XmlTagBudget = { tags: 0, maxTags: MAX_XML_TAGS };
   const chapters: string[] = [];
   const visitedChapters = new Set<string>();
 

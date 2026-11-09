@@ -41,6 +41,16 @@ export function textFileToDraftFile(file: AttachedTextFile): ChatDraftFile {
   };
 }
 
+export function attachedTextFilesToDraftFiles(
+  files: AttachedTextFile[],
+  uploads: Array<{ id: string; status: string }>,
+): ChatDraftFile[] {
+  const doneUploadIds = new Set(uploads.filter((upload) => upload.status === "done").map((upload) => upload.id));
+  return files
+    .filter((file) => !file.uploadId || doneUploadIds.has(file.uploadId))
+    .map(textFileToDraftFile);
+}
+
 /** Recovery and Edit relocation can merge individually valid drafts past picker
  *  budgets. Keep every well-formed file; sending validates the composed request,
  *  not the picker file-count or text-byte limits. */

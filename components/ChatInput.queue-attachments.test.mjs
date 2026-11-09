@@ -1778,96 +1778,291 @@ test("removing an upload chip also removes paired extracted text file from draft
   });
 });
 
-test("removing a document chip while text extraction is in flight discards the extracted text when it resolves", async () => {
+test("removing secret.docx while extraction is pending excludes its text on Enter while keeping retained batch member", async () => {
   setupUploadFetchMock();
+  const sentMessages = [];
   const ref = React.createRef();
   render(React.createElement(ChatInput, {
     ref,
     draftKey: KEY,
     isStreaming: false,
     onAbort() {},
-    onSend: async () => ({ status: "accepted" }),
+    onSend: async (msg) => {
+      sentMessages.push(msg);
+      return { status: "accepted" };
+    },
   }));
 
-  const docxBuf = createDocxBuffer("Slow extracted text");
-  let resolveBuffer;
-  const slowFile = new File([docxBuf], "slow-remove.docx", {
+  const secretBuf = createDocxBuffer("SECRET-PENDING-A1");
+  const keepBuf = createDocxBuffer("KEEP-BATCH-MEMBER");
+  let resolveSecret;
+  const secretFile = new File([secretBuf], "secret.docx", {
     type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   });
-  slowFile.arrayBuffer = () => new Promise((resolve) => {
-    resolveBuffer = () => resolve(docxBuf.buffer.slice(docxBuf.byteOffset, docxBuf.byteOffset + docxBuf.byteLength));
+  secretFile.arrayBuffer = () => new Promise((resolve) => {
+    resolveSecret = () => resolve(secretBuf.buffer.slice(secretBuf.byteOffset, secretBuf.byteOffset + secretBuf.byteLength));
+  });
+  const keepFile = new File([keepBuf], "keep.docx", {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   });
 
   await act(async () => {
-    ref.current.addFiles([slowFile]);
+    ref.current.addFiles([secretFile, keepFile]);
   });
 
-  // Upload chip is visible while extraction is still pending; remove it before extraction resolves.
-  const removeBtn = await screen.findByLabelText(/chatInput\.removeFile|Remove file/i);
-  fireEvent.click(removeBtn);
+  const removeBtns = await screen.findAllByLabelText(/chatInput\.removeFile|Remove file/i);
+  assert.equal(removeBtns.length, 2);
+  fireEvent.click(removeBtns[0]);
 
   await act(async () => {
-    resolveBuffer();
+    resolveSecret();
     await new Promise((resolve) => setImmediate(resolve));
   });
-
-  const draft = getDraft(KEY);
-  assert.equal(draft?.uploads?.length ?? 0, 0, "upload remains removed");
-  assert.equal(draft?.files?.length ?? 0, 0, "late-resolving extracted text is discarded");
-});
-
-test("410 upload replacement updates uploadId on paired extracted document text", async () => {
-  let postCount = 0;
-  let putCount = 0;
-  const previousFetch = globalThis.fetch;
-  override(globalThis, "fetch", async (url, init = {}) => {
-    const method = init.method ?? "GET";
-    const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-    if (url === "/api/uploads" && method === "POST") {
-      postCount += 1;
-      return json({ received: 0 });
-    }
-    if (String(url).startsWith("/api/uploads/") && method === "PUT") {
-      putCount += 1;
-      if (putCount === 1) {
-        return json({ error: "expired" }, 410);
-      }
-      const offset = Number(new URL(String(url), "https://omp.test/").searchParams.get("offset") ?? 0);
-      return json({ received: offset + (init.body?.size ?? 0), done: true });
-    }
-    if (previousFetch) return previousFetch(url, init);
-    return json({});
-  });
-
-  const ref = React.createRef();
-  render(React.createElement(ChatInput, {
-    ref,
-    draftKey: KEY,
-    isStreaming: false,
-    onAbort() {},
-    onSend: async () => ({ status: "accepted" }),
-  }));
-
-  const docxBuf = createDocxBuffer("410 recovered text");
-  await act(async () => {
-    ref.current.addFiles([
-      new File([docxBuf], "retry-410.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
-    ]);
-  });
-
-  // After 410, the upload settles to error with a newly minted id; the paired text file's uploadId is updated immediately,
-  // so there is still only 1 deduplicated chip. Clicking Retry completes the upload under the new id.
-  const retryBtn = await screen.findByLabelText(/chatInput\.retryUpload|Retry upload/i);
-  assert.equal(screen.getAllByText("retry-410.docx").length, 1, "single chip during 410 error state");
-  fireEvent.click(retryBtn);
 
   await waitFor(() => {
     const draft = getDraft(KEY);
     assert.equal(draft?.uploads?.length, 1);
     assert.equal(draft?.files?.length, 1);
-    assert.equal(draft?.files[0]?.uploadId, draft?.uploads[0]?.id, "extracted text uploadId matches replacement upload id");
   });
-  assert.ok(postCount >= 2, "retried POST /api/uploads after 410");
-  const chips = screen.getAllByText("retry-410.docx");
-  assert.equal(chips.length, 1, "still renders a single deduplicated chip after 410 ID replacement");
+
+  const textarea = screen.getByRole("textbox");
+  fireEvent.change(textarea, { target: { value: "Submit after pending removal" } });
+  await act(async () => {
+    fireEvent.keyDown(textarea, { key: "Enter" });
+  });
+
+  assert.equal(sentMessages.length, 1);
+  assert.ok(!sentMessages[0].includes("SECRET-PENDING-A1"), "removed secret.docx text must not be submitted");
+  assert.ok(sentMessages[0].includes("KEEP-BATCH-MEMBER"), "retained batch member text must be submitted");
+});
+
+test("410 upload replacement relinks extracted text across all 3 variants so removing the chip never submits SECRET-A2 on Enter", async () => {
+  for (const variant of ["complete-before-410", "retry-before-remove", "pending-across-410"]) {
+    let putCount = 0;
+    let resolveFirstPut;
+    const previousFetch = globalThis.fetch;
+    override(globalThis, "fetch", async (url, init = {}) => {
+      const method = init.method ?? "GET";
+      const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      if (url === "/api/uploads" && method === "POST") {
+        return json({ received: 0 });
+      }
+      if (String(url).startsWith("/api/uploads/") && method === "PUT") {
+        putCount += 1;
+        if (putCount === 1) {
+          if (variant === "complete-before-410") {
+            return await new Promise((resolve) => {
+              resolveFirstPut = () => resolve(json({ error: "expired" }, 410));
+            });
+          }
+          return json({ error: "expired" }, 410);
+        }
+        const offset = Number(new URL(String(url), "https://omp.test/").searchParams.get("offset") ?? 0);
+        return json({ received: offset + (init.body?.size ?? 0), done: true });
+      }
+      if (String(url).startsWith("/api/uploads/") && method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      if (previousFetch) return previousFetch(url, init);
+      return json({});
+    });
+
+    const sentMessages = [];
+    const ref = React.createRef();
+    const view = render(React.createElement(ChatInput, {
+      ref,
+      draftKey: `${KEY}-${variant}`,
+      isStreaming: false,
+      onAbort() {},
+      onSend: async (msg) => {
+        sentMessages.push(msg);
+        return { status: "accepted" };
+      },
+    }));
+
+    const docxBuf = createDocxBuffer("SECRET-A2");
+    let resolveExtract;
+    const file = new File([docxBuf], "secret.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    if (variant === "pending-across-410") {
+      file.arrayBuffer = () => new Promise((resolve) => {
+        resolveExtract = () => resolve(docxBuf.buffer.slice(docxBuf.byteOffset, docxBuf.byteOffset + docxBuf.byteLength));
+      });
+    }
+
+    await act(async () => {
+      ref.current.addFiles([file]);
+      await new Promise((resolve) => setImmediate(resolve));
+    });
+
+    if (variant === "complete-before-410") {
+      await act(async () => {
+        resolveFirstPut();
+        await new Promise((resolve) => setImmediate(resolve));
+      });
+    }
+
+    await screen.findByLabelText(/chatInput\.retryUpload|Retry upload/i);
+
+    if (variant === "pending-across-410") {
+      await act(async () => {
+        resolveExtract();
+        await new Promise((resolve) => setImmediate(resolve));
+      });
+    }
+
+    if (variant === "retry-before-remove") {
+      const retryBtn = await screen.findByLabelText(/chatInput\.retryUpload|Retry upload/i);
+      await act(async () => {
+        fireEvent.click(retryBtn);
+      });
+      await waitFor(() => {
+        assert.equal(getDraft(`${KEY}-${variant}`)?.uploads?.length, 1);
+      });
+    }
+
+    const removeBtn = await screen.findByLabelText(/chatInput\.removeFile|Remove file/i);
+    fireEvent.click(removeBtn);
+    assert.equal(screen.queryAllByLabelText(/chatInput\.removeFile|Remove file/i).length, 0);
+
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: `Prompt ${variant}` } });
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: "Enter" });
+    });
+
+    assert.equal(sentMessages.length, 1, `Expected message sent in ${variant}`);
+    assert.ok(!sentMessages[0].includes("SECRET-A2"), `SECRET-A2 must not be sent after removing chip in ${variant}`);
+    view.unmount();
+  }
+});
+
+test("extraction finishing before upload does not leak hidden SECRET-A3 across draftKey navigation or remount", async () => {
+  for (const mode of ["navigate", "remount"]) {
+    const previousFetch = globalThis.fetch;
+    override(globalThis, "fetch", async (url, init = {}) => {
+      const method = init.method ?? "GET";
+      const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      if (url === "/api/uploads" && method === "POST") {
+        return json({ received: 0 });
+      }
+      if (String(url).startsWith("/api/uploads/") && method === "PUT") {
+        // Never finishes before navigation/remount
+        return await new Promise(() => {});
+      }
+      if (previousFetch) return previousFetch(url, init);
+      return json({});
+    });
+
+    const draftKey = `${KEY}-a3-${mode}`;
+    const sentMessages = [];
+    const ref = React.createRef();
+    const baseProps = {
+      ref,
+      draftKey,
+      isStreaming: false,
+      onAbort() {},
+      onSend: async (msg) => {
+        sentMessages.push(msg);
+        return { status: "accepted" };
+      },
+    };
+    let view = render(React.createElement(ChatInput, baseProps));
+
+    const docxBuf = createDocxBuffer("SECRET-A3");
+    await act(async () => {
+      ref.current.addFiles([
+        new File([docxBuf], "secret.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
+      ]);
+      await new Promise((resolve) => setImmediate(resolve));
+    });
+
+    if (mode === "navigate") {
+      view.rerender(React.createElement(ChatInput, { ...baseProps, draftKey: `${draftKey}-other` }));
+      view.rerender(React.createElement(ChatInput, baseProps));
+    } else {
+      view.unmount();
+      view = render(React.createElement(ChatInput, baseProps));
+    }
+
+    assert.equal(screen.queryAllByLabelText(/chatInput\.removeFile|Remove file/i).length, 0);
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: `Hello after ${mode}` } });
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: "Enter" });
+    });
+
+    assert.equal(sentMessages.length, 1);
+    assert.ok(!sentMessages[0].includes("SECRET-A3"), `SECRET-A3 must not be sent after ${mode}`);
+    view.unmount();
+  }
+});
+
+test("blocks Enter while extraction is pending with warning and clears outbox draft cleanly once acknowledged", async () => {
+  setupUploadFetchMock();
+  const sentMessages = [];
+  let resolveOutbox;
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, {
+    ref,
+    draftKey: `${KEY}-outbox-race`,
+    isStreaming: false,
+    outbox: true,
+    onAbort() {},
+    onSend: (msg) => {
+      sentMessages.push(msg);
+      return new Promise((resolve) => {
+        resolveOutbox = () => resolve({ status: "accepted" });
+      });
+    },
+  }));
+
+  const docxBuf = createDocxBuffer("OUTBOX-DOC-TEXT");
+  let resolveExtract;
+  const slowDoc = new File([docxBuf], "report.docx", {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+  slowDoc.arrayBuffer = () => new Promise((resolve) => {
+    resolveExtract = () => resolve(docxBuf.buffer.slice(docxBuf.byteOffset, docxBuf.byteOffset + docxBuf.byteLength));
+  });
+
+  await act(async () => {
+    ref.current.addFiles([slowDoc]);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  const textarea = screen.getByRole("textbox");
+  fireEvent.change(textarea, { target: { value: "Send with doc" } });
+
+  // Pressing Enter while extraction is still pending must warn and block sending
+  await act(async () => {
+    fireEvent.keyDown(textarea, { key: "Enter" });
+  });
+  assert.equal(sentMessages.length, 0, "must not send before extraction finishes");
+  assert.ok(screen.getByRole("alert"), "shows waiting warning when sending before extraction finishes");
+
+  // Now finish extraction and submit via outbox
+  await act(async () => {
+    resolveExtract();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  await act(async () => {
+    fireEvent.keyDown(textarea, { key: "Enter" });
+  });
+  assert.equal(sentMessages.length, 1);
+  assert.ok(sentMessages[0].includes("OUTBOX-DOC-TEXT"), "includes extracted document text on send");
+
+  await act(async () => {
+    resolveOutbox();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  assert.equal(textarea.value, "", "composer cleared after outbox storage acknowledgement");
+  // A second Enter on the cleared composer must not resubmit the already-sent draft
+  await act(async () => {
+    fireEvent.keyDown(textarea, { key: "Enter" });
+  });
+  assert.equal(sentMessages.length, 1, "second Enter does not resubmit already-sent draft");
 });

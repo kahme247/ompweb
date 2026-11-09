@@ -19,11 +19,11 @@ import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, get
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
+  attachedTextFilesToDraftFiles,
   draftFilesToAttachedFiles,
   draftImagesToAttachedImages,
   imageToDraftImage,
   revokeImagePreview,
-  textFileToDraftFile,
 } from "./ChatInput-draft-attachments";
 import {
   attachedUploadsToDraftUploads,
@@ -561,6 +561,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const pendingTextFileCountRef = useRef(0);
   const pendingTextFileBytesRef = useRef(0);
   const pendingImageBytesRef = useRef(0);
+  const inFlightTextReadsRef = useRef<Map<File, { bytes: number; revision: number }>>(new Map());
+  const settleInFlightTextRead = useCallback((file: File) => {
+    const entry = inFlightTextReadsRef.current.get(file);
+    if (!entry) return;
+    inFlightTextReadsRef.current.delete(file);
+    if (attachmentRevisionRef.current === entry.revision) {
+      pendingTextFileCountRef.current = Math.max(0, pendingTextFileCountRef.current - 1);
+      pendingTextFileBytesRef.current = Math.max(0, pendingTextFileBytesRef.current - entry.bytes);
+      setPendingTextReadCount((count) => Math.max(0, count - 1));
+    }
+  }, []);
   const attachedUploadsRef = useRef(attachedUploads);
   /** Uploads in flight, by id: a chip's removal aborts its handle. */
   const uploadHandlesRef = useRef(new Map<string, UploadHandle>());
@@ -834,6 +845,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const revision = attachmentRevisionRef.current;
     const identityRevision = attachmentIdentityRevisionRef.current;
     const reservedBytes = preSelection.accepted.reduce((total, candidate) => total + candidate.size, 0);
+    for (const candidate of preSelection.accepted) {
+      inFlightTextReadsRef.current.set(candidate.file, { bytes: candidate.size, revision });
+    }
     pendingTextFileCountRef.current += acceptedFiles.length;
     pendingTextFileBytesRef.current += reservedBytes;
     setPendingTextReadCount((count) => count + acceptedFiles.length);
@@ -983,6 +997,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           if (commitNotice) setAttachNotice(commitNotice);
         }
         const next = [...prev, ...finalAccepted.map((c) => c.attachedFile)];
+        if (
+          attachedTextFilesRef.current.length === next.length
+          && attachedTextFilesRef.current.every((item, idx) => item === next[idx])
+        ) {
+          return attachedTextFilesRef.current;
+        }
         attachedTextFilesRef.current = next;
         return next;
       });
@@ -992,13 +1012,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } catch {
       setAttachError(t("chatInput.attachmentTextReadFailed"));
     } finally {
-      if (attachmentRevisionRef.current === revision) {
-        pendingTextFileCountRef.current = Math.max(0, pendingTextFileCountRef.current - acceptedFiles.length);
-        pendingTextFileBytesRef.current = Math.max(0, pendingTextFileBytesRef.current - reservedBytes);
-        setPendingTextReadCount((count) => Math.max(0, count - acceptedFiles.length));
+      for (const file of acceptedFiles) {
+        settleInFlightTextRead(file);
       }
     }
-  }, [attachAsFiles, markInputEdited, t]);
+  }, [attachAsFiles, markInputEdited, settleInFlightTextRead, t]);
 
   const processFiles = useCallback((files: File[]) => {
     const imageFiles = files.filter((file) => isImageAttachmentFile(file));
@@ -1084,7 +1102,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     markInputEdited();
     const handle = uploadHandlesRef.current.get(id);
     uploadHandlesRef.current.delete(id);
-    const hostId = attachedUploadsRef.current.find((upload) => upload.id === id)?.hostId;
+    const removedUpload = attachedUploadsRef.current.find((upload) => upload.id === id);
+    const hostId = removedUpload?.hostId;
+    if (removedUpload?.file) {
+      settleInFlightTextRead(removedUpload.file);
+    }
     if (handle) handle.abort();
     else if (hostId !== undefined) discardUpload(id, hostId);
     attachedUploadsRef.current = attachedUploadsRef.current.filter((upload) => upload.id !== id);
@@ -1097,7 +1119,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachedTextFiles((prev) => prev.filter((file) => file.uploadId !== id));
     setAttachError(null);
     setAttachNotice(null);
-  }, [markInputEdited]);
+  }, [markInputEdited, settleInFlightTextRead]);
 
   const retryUpload = useCallback((id: string) => {
     const upload = attachedUploadsRef.current.find((each) => each.id === id);
@@ -1167,6 +1189,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     clearTextFiles();
     clearUploads();
     setAttachNotice(null);
+    inFlightTextReadsRef.current.clear();
     pendingImageCountRef.current = 0;
     pendingImageBytesRef.current = 0;
     pendingTextFileCountRef.current = 0;
@@ -1192,7 +1215,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setDraft(key, {
         value: valueRef.current,
         images: images.map(imageToDraftImage),
-        files: files.map(textFileToDraftFile),
+        files: attachedTextFilesToDraftFiles(files, uploads),
         uploads: attachedUploadsToDraftUploads(uploads),
       });
     }
@@ -1219,7 +1242,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const current: ChatDraft = {
       value: valueRef.current,
       images: attachedImagesRef.current.map(imageToDraftImage),
-      files: attachedTextFilesRef.current.map(textFileToDraftFile),
+      files: attachedTextFilesToDraftFiles(attachedTextFilesRef.current, attachedUploadsRef.current),
       ...(uploads.length ? { uploads } : {}),
     };
     if (JSON.stringify(current) === JSON.stringify(snapshot)) clearInput();
@@ -1232,7 +1255,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const draft = {
       value,
       images: attachedImages.map(imageToDraftImage),
-      files: attachedTextFiles.map(textFileToDraftFile),
+      files: attachedTextFilesToDraftFiles(attachedTextFiles, attachedUploads),
       uploads: attachedUploadsToDraftUploads(attachedUploads),
     };
     persistedDraftRef.current = draft;
@@ -1302,6 +1325,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     // they cannot append onto the new session's composer, and drop any stale
     // validation banner along with the old draft.
     attachmentRevisionRef.current += 1;
+    inFlightTextReadsRef.current.clear();
     pendingImageCountRef.current = 0;
     pendingImageBytesRef.current = 0;
     pendingTextFileCountRef.current = 0;
@@ -1316,7 +1340,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setDraft(previousDraftKey, {
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
-        files: attachedTextFilesRef.current.map(textFileToDraftFile),
+        files: attachedTextFilesToDraftFiles(attachedTextFilesRef.current, attachedUploadsRef.current),
         uploads: attachedUploadsToDraftUploads(attachedUploadsRef.current),
       });
     }
