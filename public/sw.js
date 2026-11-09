@@ -15,6 +15,27 @@ self.addEventListener("push", (event) => {
   } catch {
     // Unreadable payload: still show something (iOS revokes silent pushes).
   }
+  // A settled dialog is retracted by tag. This branch never displays anything,
+  // which is why the server sends dismiss pushes only to endpoints that are not
+  // Apple's: iOS revokes Web Push permission for a push that shows no notification.
+  if (data.type === "dismiss") {
+    const dismissTag = typeof data.tag === "string" ? data.tag : "";
+    const dismissRequest = typeof data.requestId === "string" ? data.requestId : "";
+    event.waitUntil((async () => {
+      // Web Push is not ordered and can be buffered while the device is
+      // offline: a late retraction must not close the next dialog's
+      // notification of the same tag, so only the matching request closes.
+      if (!dismissTag || !dismissRequest || typeof self.registration.getNotifications !== "function") return;
+      const shown = await self.registration.getNotifications({ tag: dismissTag });
+      for (const notification of shown) {
+        if (notification.data && notification.data.requestId === dismissRequest) notification.close();
+      }
+    })());
+    return;
+  }
+  const requestId = typeof data.requestId === "string"
+    ? data.requestId
+    : typeof data.dialog?.requestId === "string" ? data.dialog.requestId : "";
   const shown = {
     type: data.type === "error" ? "error" : "info",
     title: data.title || "omp web",
@@ -30,7 +51,7 @@ self.addEventListener("push", (event) => {
         badge: "/badge-96.png",
         tag: shown.tag || undefined,
         renotify: Boolean(shown.tag),
-        data: { url: data.url || "/", sessionId: shown.sessionId },
+        data: { url: data.url || "/", sessionId: shown.sessionId, ...(requestId ? { requestId } : {}) },
       });
       // Open tabs list it in their Notifications tab, like a notification the page showed itself.
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });

@@ -397,7 +397,15 @@ function openRunningChannel(handle: SubscriptionHandle): SubscribeResult {
 // as reachable for toasts and in-page system notifications while this is open.
 function openNotificationsChannel(clientId: string, handle: SubscriptionHandle): SubscribeResult {
   handle.open();
-  handle.setDetach(attachNotificationClient(clientId, (message) => handle.send({ type: "notification", ...message })));
+  handle.setDetach(attachNotificationClient(clientId, (message) => {
+    // A retraction is its own frame type: the client's notification branch
+    // accepts only the toast/os kinds, so a wrapped dismiss would be dropped.
+    if (message.kind === "dismiss") {
+      handle.send({ type: "notification-dismiss", tag: message.tag, sessionId: message.sessionId, requestId: message.requestId });
+      return;
+    }
+    handle.send({ type: "notification", ...message });
+  }));
   return SUBSCRIBED;
 }
 

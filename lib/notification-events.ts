@@ -8,6 +8,34 @@ import { isRecord } from "./type-guards";
 export const NOTIFICATION_TYPES = ["completed", "input", "error", "modelSwitch"] as const;
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
+/** One question of an `ask` dialog, reduced to what a notification can answer. */
+export interface NotificationDialogQuestion {
+  id: string;
+  question: string;
+  /** Option labels (the web dialog sends labels back as `selectedOptions`). */
+  options?: string[];
+  multi?: boolean;
+  /** The web dialog always offers an "Other" free-text field unless omp forbids it. */
+  allowCustom?: boolean;
+}
+
+/**
+ * The blocking extension dialog behind an `input` notification. Carried in the
+ * SSE frame, the history entry and the push body so the native app can render
+ * Yes/No/option buttons or a reply field without an open chat tab.
+ */
+export interface NotificationDialog {
+  requestId: string;
+  method: "select" | "confirm" | "input" | "editor" | "ask";
+  title?: string;
+  message?: string;
+  options?: string[];
+  questions?: NotificationDialogQuestion[];
+  placeholder?: string;
+  /** Wall-clock expiry (ms), present when omp set a timeout. */
+  expiresAt?: number;
+}
+
 export interface NotificationEvent {
   /** `test` is only sent by the settings "Send test notification" button. */
   type: NotificationType | "test";
@@ -19,6 +47,10 @@ export interface NotificationEvent {
   to?: string;
   /** Earlier ids of this conversation (omp moved it to a new file); tabs may still show one. */
   aliases?: string[];
+  /** `input` only: the id a retraction (`publishNotificationDismiss`) matches. */
+  requestId?: string;
+  /** `input` only: the dialog waiting for an answer, when it fits a push payload. */
+  dialog?: NotificationDialog;
 }
 
 /** One entry of the persisted notification history; `id` is the replace-tag `<sessionId>:<type>`. */
@@ -130,6 +162,126 @@ export function isValidNotificationId(value: unknown): value is string {
 
 const str = (value: unknown): string | undefined => (typeof value === "string" && value.trim() ? value : undefined);
 
+// Push payloads must stay well under the 4 KB Web Push limit. A dialog that
+// cannot be represented within these caps is omitted entirely so the app falls
+// back to "Open" instead of showing a partial question.
+const DIALOG_TEXT = { title: 160, message: 480, placeholder: 80, option: 160, question: 240, questionOption: 120 };
+const DIALOG_COUNTS = { options: 12, questions: 5, questionOptions: 9 };
+const DIALOG_ID_CHARS = 128;
+const MAX_DIALOG_BYTES = 1800;
+const DIALOG_METHODS: Record<string, true> = { select: true, confirm: true, input: true, editor: true, ask: true };
+const encoder = new TextEncoder();
+
+/** Flatten and clip one line of dialog text that is only displayed. */
+function clipDialogText(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const flat = value.replace(/\s+/g, " ").trim();
+  if (!flat) return undefined;
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
+ * Option labels travel back to omp as the answer and are compared verbatim
+ * (`extension_ui_response.selectedOptions`), so they are never trimmed,
+ * flattened or clipped. A set that has to be altered to fit the notification
+ * makes the whole dialog unrepresentable: the notification then only opens
+ * the session instead of sending an answer omp would not match.
+ */
+function exactDialogOptions(value: unknown, maxCount: number, maxChars: number): string[] | undefined {
+  if (!Array.isArray(value) || value.length > maxCount) return undefined;
+  const labels: string[] = [];
+  for (const entry of value) {
+    const label = typeof entry === "string" ? entry : isRecord(entry) ? entry.label : undefined;
+    if (typeof label !== "string" || label.length === 0 || label.length > maxChars) return undefined;
+    labels.push(label);
+  }
+  return labels.length > 0 ? labels : undefined;
+}
+
+/** `ask` questions: ids must be unique and complete, or the whole dialog is unusable. */
+function dialogQuestions(value: unknown): NotificationDialogQuestion[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > DIALOG_COUNTS.questions) return undefined;
+  const questions: NotificationDialogQuestion[] = [];
+  const ids = new Set<string>();
+  for (const raw of value) {
+    if (!isRecord(raw)) return undefined;
+    // The id is the key omp matches the answer against; trimming it could
+    // answer a different question, so a padded id makes the dialog unusable.
+    const id = typeof raw.id === "string" ? raw.id : "";
+    const question = clipDialogText(raw.question, DIALOG_TEXT.question);
+    if (!id || id.trim() !== id || id.length > DIALOG_ID_CHARS || ids.has(id) || !question) return undefined;
+    ids.add(id);
+    const entry: NotificationDialogQuestion = { id, question };
+    // A non-empty list must survive exactly or the question would lose
+    // choices; an empty list is just a free-text question.
+    if (raw.options !== undefined && raw.options !== null) {
+      if (!Array.isArray(raw.options)) return undefined;
+      if (raw.options.length > 0) {
+        const options = exactDialogOptions(raw.options, DIALOG_COUNTS.questionOptions, DIALOG_TEXT.questionOption);
+        if (!options) return undefined;
+        entry.options = options;
+      }
+    }
+    if (raw.multi === true) entry.multi = true;
+    // Same rule as ExtensionDialog: every question may be answered with "Other".
+    if (raw.allowCustom !== false) entry.allowCustom = true;
+    questions.push(entry);
+  }
+  return questions;
+}
+
+/**
+ * Reduce a blocking `extension_ui_request` frame to the answerable dialog a
+ * notification carries. Returns undefined for `open_url` (no answer) and for
+ * frames whose payload would not fit a push payload.
+ */
+export function buildNotificationDialog(frame: Record<string, unknown>): NotificationDialog | undefined {
+  const method = typeof frame.method === "string" ? frame.method : "";
+  if (!DIALOG_METHODS[method]) return undefined;
+  // The id is echoed in the answer; never trim it into a different request.
+  const requestId = typeof frame.id === "string" ? frame.id : "";
+  if (!requestId || requestId.trim() !== requestId || requestId.length > DIALOG_ID_CHARS) return undefined;
+
+  const dialog: NotificationDialog = { requestId, method: method as NotificationDialog["method"] };
+  const title = clipDialogText(frame.title, DIALOG_TEXT.title);
+  if (title) dialog.title = title;
+
+  switch (dialog.method) {
+    case "select": {
+      const options = exactDialogOptions(frame.options, DIALOG_COUNTS.options, DIALOG_TEXT.option);
+      if (!options) return undefined;
+      dialog.options = options;
+      break;
+    }
+    case "confirm": {
+      const message = clipDialogText(frame.message, DIALOG_TEXT.message);
+      if (message) dialog.message = message;
+      break;
+    }
+    case "input": {
+      const placeholder = clipDialogText(frame.placeholder, DIALOG_TEXT.placeholder);
+      if (placeholder) dialog.placeholder = placeholder;
+      break;
+    }
+    case "editor":
+      // The editor body (prefill) is not part of the notification contract: the
+      // app opens the session to edit it. The title is enough to name it.
+      break;
+    case "ask": {
+      const questions = dialogQuestions(frame.questions);
+      if (!questions) return undefined;
+      dialog.questions = questions;
+      break;
+    }
+  }
+
+  // Nothing user-visible to show: the notification body already carries detail.
+  if (!dialog.title && !dialog.message && !dialog.placeholder && !dialog.questions && !dialog.options) return undefined;
+  if (typeof frame.expiresAt === "number" && Number.isFinite(frame.expiresAt) && frame.expiresAt > 0) dialog.expiresAt = frame.expiresAt;
+  if (encoder.encode(JSON.stringify(dialog)).byteLength > MAX_DIALOG_BYTES) return undefined;
+  return dialog;
+}
+
 type Detect = (frame: Record<string, unknown>, session: { sessionId: string; sessionName: string | null }) => NotificationEvent[];
 
 /**
@@ -214,7 +366,14 @@ export function createNotificationDetector(): Detect {
         // auto-approved ones before they are emitted).
         if (typeof frame.method !== "string" || !BLOCKING_UI_METHODS.has(frame.method)) return [];
         const firstQuestion = Array.isArray(frame.questions) && isRecord(frame.questions[0]) ? str(frame.questions[0].question) : undefined;
-        return [{ ...base, type: "input", detail: str(frame.title) ?? firstQuestion ?? str(frame.message) ?? str(frame.instructions) }];
+        const event: NotificationEvent = { ...base, type: "input", detail: str(frame.title) ?? firstQuestion ?? str(frame.message) ?? str(frame.instructions) };
+        // Carried even without a dialog (open_url, oversized payload) so the
+        // matching retraction can still close this notification.
+        if (typeof frame.id === "string" && frame.id) event.requestId = frame.id;
+        // `open_url` has no answerable dialog; buildNotificationDialog rejects it.
+        const dialog = buildNotificationDialog(frame);
+        if (dialog) event.dialog = dialog;
+        return [event];
       }
       default:
         return [];
