@@ -71,7 +71,7 @@ export function noticeReducer(state: NoticeState, action: NoticeAction): NoticeS
       return { ...state, visible: markOldestNoticeExiting(state.visible) };
     case "remove": {
       const visible = state.visible.filter((notice) => notice.id !== action.id);
-      return fillPendingNotices(visible, state.pending);
+      return fillPendingNotices(visible, state.pending.filter((notice) => notice.id !== action.id));
     }
     default:
       return state;

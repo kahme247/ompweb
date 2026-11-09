@@ -10,7 +10,6 @@ import { copyText } from "@/lib/clipboard";
 import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
 import { SessionSearchMatches, type SearchMatchTarget } from "./SessionSearchMatches";
-import { remoteHostId } from "@/lib/project-ordering";
 import { hasDraft, subscribeDrafts } from "@/lib/draft-store";
 import {
   MAX_PROJECT_SESSIONS,
@@ -110,7 +109,7 @@ interface ProjectRowProps {
   onToggleExpand: (project: ManagedProject) => void;
   onRemoveProject: (project: ManagedProject) => void;
   onEditLaunchConfig: (project: ManagedProject) => void;
-  onUpdatePresentation: (project: ManagedProject, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => void;
+  onUpdatePresentation: (project: ManagedProject, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => Promise<void>;
   onDragProjectChange: (project: ManagedProject | null) => void;
   onDropProject: (project: ManagedProject) => void;
   onMoveProject: (project: ManagedProject, delta: -1 | 1) => void;
@@ -187,7 +186,8 @@ function ProjectRow({
     const alias = aliasValue.trim();
     setAliasEditing(false);
     if (alias === (project.alias ?? "")) return;
-    void onUpdatePresentation(project, { alias });
+    // The sidebar already reports failed presentation writes in a toast.
+    void onUpdatePresentation(project, { alias }).catch(() => {});
   }, [aliasValue, project, onUpdatePresentation]);
   const label = project.alias ?? projectLabel(project.path);
   const pinned = pinnable && project.pinOrder !== undefined;
@@ -757,9 +757,8 @@ const SessionItem = memo(function SessionItem({
  toast.error(t("sessionSidebar.archiveFailed"));
  }
  }, [session.id, onDeleted, t]);
-  // The Archived Sessions browser lists this machine's archive only, so a remote archive could not be restored.
-  const archiveBlocked = hasChildren || remoteHostId(session.hostId) !== undefined;
-  const archiveTitle = hasChildren ? t("sessionSidebar.archiveLeafOnly") : archiveBlocked ? t("hosts.notAvailableRemote") : t("sessionSidebar.archive");
+  const archiveBlocked = hasChildren;
+  const archiveTitle = hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive");
 
   const handleDelete = useCallback(async () => {
     if (deleting) return;

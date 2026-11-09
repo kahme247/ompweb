@@ -1067,7 +1067,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const handleUpdateProjectPresentation = useCallback(async (project: ManagedProject, updates: { alias?: string | null; sortOrder?: number | null; pinOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => {
     try {
       const response = await fetch("/api/projects", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: project.path, hostId: remoteHostId(hostOf(project)), ...updates }) });
-      if (!response.ok) throw new Error(t("projects.updateFailed"));
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string; code?: string };
+        throw new Error(body.error || body.code ? formatApiError(body) : t("projects.updateFailed"));
+      }
       await loadProjects();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));

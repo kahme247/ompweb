@@ -13,9 +13,11 @@ import { promisify } from "util";
 import { comparableProjectPath } from "../comparable-path";
 import { mediaFilePath } from "../media-cache";
 import { resolveOmpBin } from "../omp/omp-cli";
+import { listArchivedSessionInfos, restoreArchivedSession, restoreFailureStatus } from "../omp/archive";
 import {
   archiveSessionFileWithArtifacts,
   buildSessionTree,
+  listSessionIdsForRestore,
   deleteSessionFileWithArtifacts,
   getLeafEntryId,
   loadSessionFile,
@@ -56,7 +58,7 @@ import type { SessionHistoryCursor } from "../session-sync";
 import { extractSubagentHistory, readCompletionArtifact, readSubagentTranscriptPage, resolveSubagentArtifact, subagentTranscriptPath } from "../subagent-history";
 import { SUBAGENT_ID_RE } from "../subagent-types";
 import { isRecord } from "../type-guards";
-import type { ManagedProject, ProjectLaunchConfig, SessionContext, SessionInfo, SessionTitleSource } from "../types";
+import type { ArchivedSessionInfo, ManagedProject, ProjectLaunchConfig, SessionContext, SessionInfo, SessionTitleSource } from "../types";
 import { resolveProject } from "../worktree";
 
 export type OpResult<T> = { ok: true; value: T } | { ok: false; status: number; code: string; error: string };
@@ -94,6 +96,8 @@ export interface ProjectUpdate {
 
 export interface SessionOps {
   listSessions(): Promise<SessionInfo[]>;
+  /** Strict, uncached active-ID inventory for restore conflict checks; errors mean absence cannot be established. */
+  listSessionIdsForRestore(): Promise<string[]>;
   readSession(id: string, options: SessionReadOptions): Promise<OpResult<SessionReadValue>>;
   readContext(id: string, leafId: string | undefined, options: ContextReadOptions): Promise<OpResult<unknown>>;
   readThinking(id: string, entryId: string, block: number): Promise<OpResult<unknown>>;
@@ -104,6 +108,18 @@ export interface SessionOps {
   /** `liveSessionIds`: sessions main has a live omp process for; their files are never rewritten. */
   deleteSession(id: string, liveSessionIds: string[]): Promise<OpResult<{ skippedChildren?: Array<{ id: string; reason: string }> }>>;
   archiveSession(id: string): Promise<OpResult<{ archivedPath: string }>>;
+  /** This host's archive, newest first (browser entries; no hostId). */
+  listArchives(): Promise<ArchivedSessionInfo[]>;
+  /** Admit one restore: `restoreArchive` starts only under a claim token reserved here and not fenced since. `instance`
+   * names this daemon process; main keeps it with the claim, since only this process can revoke the token. */
+  restoreReserve(claim: string): Promise<OpResult<{ instance: string }>>;
+  /** Restore one archived session on this host under a reserved `claim`; `sessionId` is the restored session's id. */
+  restoreArchive(key: string, claim: string): Promise<OpResult<{ sessionId: string }>>;
+  /** Forbid any restore under `claim` from starting in this process, now or whenever its request arrives, and say whether one
+   * is running here. `instance` names the answering process: a restore reserved in another process (a replaced or restarted
+   * daemon, which may still be running it) was not fenced by this, so main takes a claim over only when `instance` is the
+   * one that reserved it and `running` is false. */
+  restoreFence(claim: string): Promise<OpResult<{ instance: string; running: boolean }>>;
   exportSession(id: string): Promise<OpResult<{ html: string; fileName: string }>>;
   readMedia(hash: string): Promise<OpResult<Uint8Array>>;
   /** Raw registry entries, hidden ones included (main merges session-discovered projects). */
@@ -120,6 +136,16 @@ const ok = <T>(value: T): OpResult<T> => ({ ok: true, value });
 const fail = (status: number, code: string, error: string): OpResult<never> => ({ ok: false, status, code, error });
 const sessionNotFound = () => fail(404, "session_not_found", "Session not found");
 const sessionTooLarge = () => fail(413, "session_file_too_large", "Session file is too large to open in omp-web");
+
+/** This daemon process, as restore claims see it. Fresh per process, never stored: the token sets below die with the process,
+ * so a claim reserved under another value was reserved by a process this one cannot speak for. */
+const RESTORE_INSTANCE = randomUUID();
+/** Restore claim tokens main reserved that no restore has spent and no fence has revoked, oldest first. The cap drops the
+ * oldest, whose restore is then refused, never run. */
+const reservedRestores = new Set<string>();
+const MAX_RESERVED_RESTORES = 256;
+/** Claim tokens whose restore is running in this process, set before its first await. */
+const runningRestores = new Set<string>();
 
 const SUBAGENT_ID_MAX_LENGTH = 100;
 
@@ -287,6 +313,7 @@ async function runOmpExport(filePath: string, outputPath: string): Promise<void>
 /** This machine's session and project files. */
 export const sessionOps: SessionOps = {
   listSessions: () => listAllSessions(),
+  listSessionIdsForRestore: async () => listSessionIdsForRestore(),
 
   async readSession(id, { deferThinking, deferMedia: deferToolResultImages }) {
     const filePath = await resolveSessionPath(id);
@@ -540,6 +567,43 @@ export const sessionOps: SessionOps = {
     // The file is gone: full flush is correct (drops its caches + refreshes list).
     invalidateSessionListCache();
     return ok({ archivedPath });
+  },
+
+  async listArchives() {
+    return listArchivedSessionInfos();
+  },
+
+  async restoreReserve(claim) {
+    if (typeof claim !== "string" || !claim) return fail(400, "archive_claim_required", "Restore claim is required");
+    reservedRestores.add(claim);
+    if (reservedRestores.size > MAX_RESERVED_RESTORES) reservedRestores.delete(reservedRestores.values().next().value as string);
+    return ok({ instance: RESTORE_INSTANCE });
+  },
+
+  async restoreArchive(key, claim) {
+    if (typeof key !== "string" || !key.trim()) return fail(400, "archive_key_required", "Archive key is required");
+    // Spent before any await: a fence behind this request on the link sees the restore running, and one that came first
+    // already revoked it, whenever this request reached the daemon.
+    if (typeof claim !== "string" || !reservedRestores.delete(claim)) {
+      return fail(409, "archive_restore_not_admitted", "This restore was not admitted or was fenced; the archive was not consumed");
+    }
+    runningRestores.add(claim);
+    try {
+      const sessionId = await restoreArchivedSession(key);
+      invalidateSessionListCache();
+      return ok({ sessionId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return fail(restoreFailureStatus(message), "archive_restore_failed", message);
+    } finally {
+      runningRestores.delete(claim);
+    }
+  },
+
+  async restoreFence(claim) {
+    if (typeof claim !== "string" || !claim) return fail(400, "archive_claim_required", "Restore claim is required");
+    reservedRestores.delete(claim);
+    return ok({ instance: RESTORE_INSTANCE, running: runningRestores.has(claim) });
   },
 
   async exportSession(id) {

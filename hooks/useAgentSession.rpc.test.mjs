@@ -1358,6 +1358,310 @@ test("provider error on the assistant message is shown instead of ending silentl
   assert.ok(w.latest.notices.some((notice) => notice.message === providerError), "the provider error must be visible");
 });
 
+for (const terminal of ["rpc_frame_error", "turn_end", "agent_end"]) {
+  test(`${terminal} after assistant text remains visible without a duplicate toast`, async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Malformed RPC frame after assistant text";
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: { ...assistantMsg("a1", "Partial answer"), timestamp: 42 } });
+      if (terminal !== "agent_end") es.emit({ type: terminal, errorMessage: failure });
+      es.emit({ type: "agent_end", isTerminal: true, ...(terminal === "agent_end" ? { errorMessage: failure } : {}) });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.ok(w.latest.messages.some((m) => m.role === "assistant" && m.content[0]?.text === "Partial answer"));
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+    assert.equal(toastCalls.some((call) => call[0] === "error" && call[1] === "Request failed"), false);
+  });
+}
+
+for (const saved of ["same message", "different message", "no saved error"]) {
+  test(`a message-carried provider error with ${saved} after terminal reload`, async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", "Partial answer"), timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      const savedReply = saved === "same message" ? reply
+        : saved === "different message" ? { ...reply, timestamp: 43 }
+          : { ...assistantMsg("a1", "Partial answer"), timestamp: 42 };
+      saveSession("s1", [userMsg("u0", "old question"), userMsg("u1", "new question"), savedReply]);
+      es.emit({ type: "agent_end", isTerminal: true });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message),
+      saved === "same message" ? [] : [failure]);
+    if (saved === "same message") {
+      assert.equal(w.latest.messages.at(-1).errorMessage, failure);
+      const bubble = ownRoot(render(React.createElement(MessageView, { message: w.latest.messages.at(-1) }), { wrapper: TestRoot }));
+      assert.ok(bubble.getByText(failure), "the assistant actually renders the provider error");
+    }
+    assert.equal(toastCalls.some((call) => call[0] === "error" && call[1] === "Request failed"), false);
+  });
+}
+
+for (const location of ["saved", "not saved"]) {
+  test(`an error-only assistant message is deduplicated only when visible: ${location}`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      if (location !== "not saved") {
+        saveSession("s1", [userMsg("u0", "old question"), userMsg("u1", "new question"), reply]);
+      }
+      es.emit({ type: "agent_end", isTerminal: true });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message),
+      location === "saved" ? [] : [failure]);
+    if (location === "saved") {
+      const bubble = ownRoot(render(React.createElement(MessageView, { message: w.latest.messages.at(-1) }), { wrapper: TestRoot }));
+      assert.ok(bubble.getByText(failure), "the saved error-only message renders a banner");
+    }
+  });
+}
+
+test("a run started elsewhere keeps its error visible while an older branch is selected", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question")]);
+  const w = await mountSession("s1");
+  world.views.set("s1:branch:false", { leafId: "branch", messages: [userMsg("old", "selected branch")], entryIds: ["branch-entry"] });
+  await act(async () => { await w.changeLeaf("branch"); });
+  assert.deepEqual(w.latest.entryIds, ["branch-entry"], "the user is viewing the historical branch");
+  world.agents.set("s1", { running: true, state: { isStreaming: true, isPromptRunning: true } });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["s1"] }) });
+    await settle();
+    lastEs().open();
+    await settle();
+  });
+  const es = lastEs();
+  const failure = "Provider disconnected during generation";
+  const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+  await act(async () => {
+    es.emit({ type: "agent_start" });
+    es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+    es.emit({ type: "message_end", message: reply }, { persist: false });
+    saveSession("s1", [userMsg("u0", "old question"), userMsg("u1", "new question"), reply]);
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(w.latest.entryIds, ["branch-entry"], "the failed current-run message is not in the selected branch");
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+});
+
+for (const ending of ["message_end", "turn_end", "agent_end", "recovery"]) {
+  test(`${ending} error stays visible until its late saved assistant message replaces the notice`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      if (ending === "turn_end") es.emit({ type: "turn_end", message: reply });
+      if (ending === "recovery") es.emit({ type: "prompt_result", agentInvoked: false });
+      else es.emit({ type: "agent_end", isTerminal: true, ...(ending === "agent_end" ? { messages: [reply] } : {}) });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure],
+      "an unsaved error-only message cannot carry the error visibly");
+    await act(async () => {
+      appendEntry("s1", reply);
+      publishSessionsChanged(["s1"]);
+    });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), []);
+    const bubble = ownRoot(render(React.createElement(MessageView, { message: w.latest.messages.at(-1) }), { wrapper: TestRoot }));
+    assert.ok(bubble.getByText(failure), "the saved error banner replaces the notice");
+  });
+}
+
+for (const ending of ["agent_end", "recovery"]) {
+  test(`${ending} exposes an error-only failure while transcript loading is blocked`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    let release;
+    world.holds.push({
+      match: (method, url) => method === "GET" && url.startsWith("/api/sessions/s1?"),
+      produce: () => new Promise((resolve) => {
+        release = () => {
+          const fixture = world.sessions.get("s1");
+          resolve({ value: { sessionId: "s1", filePath: "/fixture/session.jsonl", tree: [],
+            leafId: fixture.leafId, context: { todoPhases: [], thinkingLevel: "off", model: null, ...fixture } } });
+        };
+      }),
+    });
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      if (ending === "recovery") es.emit({ type: "prompt_result", agentInvoked: false });
+      else es.emit({ type: "agent_end", isTerminal: true });
+      await sleep(20);
+    });
+    assert.ok(release, "the transcript request is held");
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+    await act(async () => { release(); });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+  });
+}
+
+test("a queued error notice is removed when its message appears without removing other notices", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question")]);
+  const { w, es } = await startRun("s1", "new question");
+  const failure = "Provider disconnected during generation";
+  const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+  await act(async () => {
+    for (let i = 0; i < 5; i++) es.emit({ type: "notice", level: "info", message: `Unrelated notice ${i}` });
+    es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+    es.emit({ type: "message_end", message: reply }, { persist: false });
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await act(async () => { appendEntry("s1", reply); publishSessionsChanged(["s1"]); });
+  await settle(30);
+  assert.ok(w.latest.notices.some((n) => n.message.startsWith("Unrelated notice")));
+  await act(async () => { for (const notice of w.latest.notices) w.latest.dismissNotice(notice.id); });
+  await settle();
+  assert.equal(w.latest.notices.some((n) => n.message === failure), false, "the pending duplicate cannot appear later");
+});
+
+for (const order of ["frame before message", "frame after message"]) {
+  test(`a late equal-looking saved assistant error cannot retract an independent error: ${order}`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      if (order === "frame before message") es.emit({ type: "rpc_frame_error", errorMessage: failure });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      if (order === "frame after message") es.emit({ type: "rpc_frame_error", errorMessage: failure });
+      es.emit({ type: "agent_end", isTerminal: true, messages: [reply] });
+    });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+    await act(async () => { appendEntry("s1", reply); publishSessionsChanged(["s1"]); });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+  });
+}
+
+for (const change of ["new run", "historical branch"]) {
+  test(`a late saved error cannot retract a notice in a ${change}`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      es.emit({ type: "agent_end", isTerminal: true });
+    });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+    if (change === "new run") {
+      await act(async () => { es.emit({ type: "agent_start" }); });
+    } else {
+      world.views.set("s1:branch:false", { leafId: "branch", messages: [userMsg("old", "selected branch")], entryIds: ["branch-entry"] });
+      await act(async () => { await w.changeLeaf("branch"); });
+    }
+    await act(async () => { appendEntry("s1", reply); publishSessionsChanged(["s1"]); });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+  });
+}
+
+test("an independent error is not hidden by an equal-looking assistant error", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question")]);
+  const { w, es } = await startRun("s1", "new question");
+  const failure = "Provider disconnected during generation";
+  const reply = { ...assistantMsg("a1", "Partial answer"), timestamp: 42, stopReason: "error", errorMessage: failure };
+  await act(async () => {
+    es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+    es.emit({ type: "message_end", message: reply });
+    es.emit({ type: "rpc_frame_error", errorMessage: failure });
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await settle();
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+});
+
+for (const previous of ["same turn", "previous turn"]) {
+  test(`recovery keeps an independent error despite an equal-looking ${previous} error`, async () => {
+    resetWorld();
+    const failure = "Provider disconnected during generation";
+    const oldReply = { ...assistantMsg("a0", "Old answer"), timestamp: 41, stopReason: "error", errorMessage: failure };
+    const history = [userMsg("u0", "old question"), ...(previous === "previous turn" ? [oldReply] : [])];
+    primeSession("s1", history);
+    const { w, es } = await startRun("s1", "new question");
+    const reply = previous === "same turn" ? { ...oldReply, timestamp: 42 } : assistantMsg("a1", "Partial answer");
+    saveSession("s1", [...history, userMsg("u1", "new question"), reply]);
+    await act(async () => {
+      es.emit({ type: "rpc_frame_error", errorMessage: failure });
+      es.emit({ type: "prompt_result", agentInvoked: false });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+  });
+}
+
+test("recovery does not use a previous turn's saved error as the current failure", async () => {
+  resetWorld();
+  const failure = "Provider disconnected during generation";
+  const oldReply = { ...assistantMsg("a0", "Old answer"), timestamp: 42, stopReason: "error", errorMessage: failure };
+  primeSession("s1", [userMsg("u0", "old question"), oldReply]);
+  const { w, es } = await startRun("s1", "new question");
+  await act(async () => {
+    es.emit({ type: "message_end", message: { ...oldReply, content: [{ type: "text", text: "New partial answer" }] } }, { persist: false });
+    es.emit({ type: "prompt_result", agentInvoked: false });
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+});
+
+test("recovery retains a frame error that differs from the saved assistant error", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question")]);
+  const { w, es } = await startRun("s1", "new question");
+  const reply = { ...assistantMsg("a1", "Partial answer"), timestamp: 42, stopReason: "error", errorMessage: "Earlier provider failure" };
+  saveSession("s1", [userMsg("u0", "old question"), userMsg("u1", "new question"), reply]);
+  await act(async () => {
+    es.emit({ type: "rpc_frame_error", errorMessage: "Malformed RPC frame" });
+    es.emit({ type: "prompt_result", agentInvoked: false });
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), ["Malformed RPC frame"]);
+  assert.equal(w.latest.messages.at(-1).errorMessage, "Earlier provider failure");
+});
+
 test("a silent idle transition shows a fallback error instead of disappearing", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
@@ -1452,7 +1756,8 @@ test("recovery preserves a saved provider failure even after partial response co
   });
   await settle();
   assert.equal(w.latest.agentRunning, false);
-  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [providerError]);
+  assert.equal(w.latest.messages.at(-1).errorMessage, providerError);
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), []);
 });
 
 test("a failed transcript reload is retried instead of being classified as an empty response", async () => {
@@ -1528,8 +1833,8 @@ for (const result of ["visible answer", "provider failure"]) {
     await settle();
     assert.equal(w.latest.agentRunning, false);
     assert.equal(w.latest.messages.at(-1).content[0].text, "Visible response");
-    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message),
-      result === "provider failure" ? ["Provider rejected the request"] : []);
+    if (result === "provider failure") assert.equal(w.latest.messages.at(-1).errorMessage, "Provider rejected the request");
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), []);
   });
 }
 
@@ -4926,9 +5231,11 @@ test("a saved provider failure still surfaces when its SSE completion arrives be
   });
   await settle();
   assert.equal(w.latest.agentRunning, false);
-  assert.ok(w.latest.notices.some((notice) => notice.type === "error" && notice.message === providerError));
+  assert.deepEqual(w.latest.notices.filter((notice) => notice.type === "error"), []);
   assert.deepEqual(w.latest.entryIds, ["e0", "e1", "e2"]);
   assert.equal(w.latest.messages.filter((message) => message.role === "assistant" && message.errorMessage === providerError).length, 1);
+  const bubble = ownRoot(render(React.createElement(MessageView, { message: w.latest.messages.at(-1) }), { wrapper: TestRoot }));
+  assert.ok(bubble.getByText(providerError), "the recovered saved message renders the failure to the user");
 });
 
 test("terminal full refresh updates branch metadata as well as cursor-owned history", async () => {
@@ -5300,24 +5607,140 @@ test("a held file snapshot cannot roll back a newer RPC model choice", async () 
   assert.equal(w.latest.thinkingLevel, "high");
 });
 
-test("a failed model switch is shown as a notice instead of failing silently (#277)", async () => {
+test("a model switch shows at once and rolls back with a notice when it fails (#277)", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
   Object.assign(world.sessions.get("s1"), { model: { provider: "test", modelId: "old-model" }, thinkingLevel: "low" });
   const w = await mountSession("s1");
   assert.equal(w.latest.displayModel.modelId, "old-model");
+  let fail;
   world.holds.push({
     match: (method, _url, body) => method === "POST" && body?.type === "set_model",
-    produce: async () => ({
+    produce: () => new Promise((resolve) => { fail = () => resolve({
       status: 500,
       value: { error: "omp exited (code 1, signal none): error: Could not restore model test/old-model" },
-    }),
+    }); }),
   });
-  await act(async () => { await w.latest.handleModelChange("test", "chosen-model"); });
+  let command;
+  await act(async () => { command = w.latest.handleModelChange("test", "chosen-model"); await sleep(20); });
+  assert.equal(w.latest.displayModel.modelId, "chosen-model", "the pick shows while omp starts");
+  await act(async () => { fail(); await command; });
   await settle();
   assert.equal(w.latest.displayModel.modelId, "old-model", "a failed switch must not claim the new model");
   assert.equal(w.latest.notices.at(-1)?.type, "error");
   assert.match(w.latest.notices.at(-1)?.message ?? "", /Could not restore model/);
+});
+
+test("an earlier model pick that fails does not undo a newer pick", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  Object.assign(world.sessions.get("s1"), { model: { provider: "test", modelId: "old-model" }, thinkingLevel: "low" });
+  const w = await mountSession("s1");
+  const replies = [];
+  for (let i = 0; i < 2; i++) {
+    world.holds.push({
+      match: (method, _url, body) => method === "POST" && body?.type === "set_model",
+      produce: () => new Promise((resolve) => { replies.push(resolve); }),
+    });
+  }
+  const failure = { status: 500, value: { error: "set_model failed" } };
+  let first;
+  let second;
+  await act(async () => { first = w.latest.handleModelChange("test", "model-a"); await sleep(20); });
+  await act(async () => { second = w.latest.handleModelChange("test", "model-b"); await sleep(20); });
+  assert.equal(w.latest.displayModel.modelId, "model-b");
+  await act(async () => { replies[0](failure); await first; });
+  assert.equal(w.latest.displayModel.modelId, "model-b", "the older failure keeps the newer pick");
+  await act(async () => { replies[1](failure); await second; });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "old-model", "with both failed, the running model shows again");
+});
+
+test("a refused pick after a successful one shows the model omp now runs", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  Object.assign(world.sessions.get("s1"), { model: { provider: "test", modelId: "old-model" }, thinkingLevel: "low" });
+  world.agents.set("s1", { running: true, state: { model: { provider: "test", id: "old-model" } } });
+  const w = await mountSession("s1");
+  await act(async () => { lastEs().open(); });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "old-model");
+  // A succeeds, but its state refresh is still out when B is picked.
+  let releaseStaleRefresh;
+  world.holds.push({
+    match: (method, url) => method === "GET" && /\/api\/sessions\/s1\/state/.test(url),
+    produce: () => new Promise((resolve) => { releaseStaleRefresh = resolve; }),
+  });
+  let failB;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "set_model" && body.modelId === "model-b",
+    produce: () => new Promise((resolve) => { failB = () => resolve({ status: 500, value: { error: "refused" } }); }),
+  });
+  world.agents.get("s1").state = { model: { provider: "test", id: "model-a" } };
+  let first;
+  let second;
+  await act(async () => { first = w.latest.handleModelChange("test", "model-a"); await sleep(20); });
+  await act(async () => { second = w.latest.handleModelChange("test", "model-b"); await sleep(20); });
+  await act(async () => { failB(); await second; });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "model-a", "omp runs A after B was refused");
+  await act(async () => { releaseStaleRefresh({ value: { running: true, state: { model: { provider: "test", id: "old-model" } } } }); await first; });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "model-a", "the superseded refresh cannot roll it back");
+});
+
+test("a delayed pick response preserves a newer runtime model when refresh fails", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  world.agents.set("s1", { running: true, state: { model: SLOW_MODEL, slowModeSupported: true } });
+  const w = await mountSession("s1");
+  await act(async () => { lastEs().open(); });
+  await settle();
+  assert.equal(w.latest.slowModeSupported, true);
+  let finishPick;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "set_model",
+    produce: () => new Promise((resolve) => { finishPick = resolve; }),
+  });
+  let command;
+  await act(async () => { command = w.latest.handleModelChange("test", "picked"); await sleep(20); });
+  assert.equal(w.latest.displayModel.modelId, "picked");
+  assert.equal(w.latest.slowModeSupported, false, "old model controls are unavailable during the switch");
+  await act(async () => { lastEs().emit({ type: "config_update", model: { provider: "test", id: "runtime" } }); });
+  world.holds.push({
+    match: (method, url) => method === "GET" && /\/api\/sessions\/s1\/state/.test(url),
+    produce: async () => ({ status: 503, value: {} }),
+  });
+  await act(async () => { finishPick({ value: {} }); await command; });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "runtime");
+});
+
+test("a failed pick cannot invalidate a newer cycle refresh", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const w = await mountSession("s1");
+  let failPick;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "set_model",
+    produce: () => new Promise((resolve) => { failPick = resolve; }),
+  });
+  let pick;
+  await act(async () => { pick = w.latest.handleModelChange("test", "picked"); await sleep(20); });
+  let finishRefresh;
+  world.holds.push({
+    match: (method, url) => method === "GET" && /\/api\/sessions\/s1\/state/.test(url),
+    produce: () => new Promise((resolve) => { finishRefresh = resolve; }),
+  });
+  let cycle;
+  await act(async () => { cycle = w.latest.handleCycleModel(); await sleep(20); });
+  await act(async () => { failPick({ status: 500, value: { error: "refused" } }); await pick; });
+  await act(async () => {
+    finishRefresh({ value: { running: true, state: { model: { provider: "test", id: "cycled" } } } });
+    await cycle;
+  });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "cycled");
 });
 
 test("idle catch-up cannot overwrite a pending thinking command", async () => {
@@ -5934,6 +6357,20 @@ test("a send to an offline host is accepted and held without a toast or recovere
   assert.deepEqual(toastCalls, []);
   assert.deepEqual(w.latest.notices, []);
   assert.deepEqual(callsTo("POST", "/api/agent/"), []);
+});
+
+test("a rejected saved profile is shown on a fresh chat and leaves the draft recoverable", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 400, value: { code: "stored_invalid_profile", error: "Invalid saved workspace profile" } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("keep this draft"); });
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "new:/workspace" });
+  assert.ok(w.latest.notices.some((notice) => notice.type === "error" && notice.message.includes(translate("errors.stored_invalid_profile"))));
+  assert.equal(world.calls.some((call) => call.body?.type === "prompt"), false);
 });
 
 test("a fresh chat on a remote host creates its session there and toasts when that host is offline", async () => {

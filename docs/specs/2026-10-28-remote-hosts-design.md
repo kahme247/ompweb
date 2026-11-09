@@ -450,6 +450,7 @@ parts of those routes stay on main.
 | Op | Moved from |
 |---|---|
 | `listSessions` | `listAllSessions()` (`lib/session-reader.ts`) |
+| `listSessionIdsForRestore` | Restore-only complete ID inventory (`lib/omp/session-files.ts`): uncached one-level walk and strict bounded header reads. Access/I/O failures, disappearance of an already-enumerated project, relevant symlinks and session replacement during open reject rather than omit sessions; only an initially absent root is empty. Malformed result entries reject the entire answer. Compatible addition: old daemons answer 501, and restore fails closed with 503 until those daemons update/restart; ordinary browsing still uses the unchanged best-effort `listSessions` |
 | `readSession {id, options}` | `GET /api/sessions/[id]` |
 | `readContext {id, leafId, options}` | `GET /api/sessions/[id]/context` |
 | `readThinking {id, entryId, block}` | `GET /api/sessions/[id]/entries/[entryId]/thinking` |
@@ -459,6 +460,7 @@ parts of those routes stay on main.
 | `renameSessionFile {id, title}` | `PATCH /api/sessions/[id]` on-disk fallback |
 | `deleteSession {id}` | `DELETE /api/sessions/[id]` |
 | `archiveSession {id}` | `POST /api/sessions/[id]/archive` |
+| `listArchives` / `restoreReserve {claim}` / `restoreArchive {key, claim}` / `restoreFence {claim}` | `/api/sessions/archive`: compatible additions (the link version is unchanged; older daemons answer 501 `unknown_op`). The daemon starts `restoreArchive` only under a `claim` it reserved in this process and nothing has spent or fenced. `restoreReserve` answers `{instance}` and `restoreFence` answers `{instance, running}`, `instance` being a random id of the daemon process: `restoreFence` revokes a claim, so a restore request still in a suspended sender is refused whenever it arrives, but only the process that reserved a claim can revoke it, so main takes a claim over only on an answer whose `instance` is the one that reserved it |
 | `exportSession {id}` | `GET /api/sessions/[id]/export` |
 | `readMedia {hash}` | `mediaFilePath()` (`lib/media-cache.ts`) |
 | `listProjects` / `addProject {path}` / `updateProject {path, updates}` / `hideProject {path}` | `/api/projects` |
@@ -469,6 +471,8 @@ parts of those routes stay on main.
 | `setUploadRetention {days}` | compatible addition (the link version is unchanged; older daemons answer 501 `unknown_op`, which main ignores): days to keep sent uploads, `null` = for ever; sent on every hello and when the web setting changes (`docs/specs/2026-11-02-file-uploads-design.md`, U6) |
 
 Op timeout: 30 s of silence (each result byte frame that arrives restarts it), then 504 naming the host; `uploadAttach` gets 10 minutes (a 2 GiB copy across file systems).
+
+A timeout (or a link lost after the op was sent) does not stop the daemon: the op may still run to completion, and its late result is dropped. A caller whose op can change state another host's checks read must not treat the timeout as "did not happen", nor a daemon's "not running" as proof it never will: the request may still be in a suspended sender, and the daemon answering may not be the process that has it (link replacement dials the same host id from another daemon process, which the replaced one outlives while it has another link). `restoreArchive` is such an op: the archive route reserves a claim token on the daemon and records its `instance`, holds the session's claim across the op, and a later restore fences the token (`restoreFence`) before taking the claim over, only on an answer from that same instance; a refusal to admit (`archive_restore_not_admitted`) never releases the claim, as another process may have given it (`AGENTS.md`, "Session archive is per host").
 
 ## Data flow
 

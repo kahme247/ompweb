@@ -285,7 +285,7 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
         const result = await run.apply(sessionOps, SESSION_OP_PARAMS[op].map(name => args[name]));
         if (op === "addProject" || op === "updateProject" || op === "hideProject") invalidateWorkspaceRoots();
-        if (["renameSessionFile", "deleteSession", "archiveSession"].includes(op) && !(isRecord(result) && result.ok === false)) sessionsChanged();
+        if (["renameSessionFile", "deleteSession", "archiveSession", "restoreArchive"].includes(op) && !(isRecord(result) && result.ok === false)) sessionsChanged();
         return result;
       }
     }
