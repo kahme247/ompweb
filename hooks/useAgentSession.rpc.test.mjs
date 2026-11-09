@@ -631,6 +631,37 @@ test("a `!` message with an inline text attachment is held as a prompt, never ru
   assert.equal(getDraft(sid), null, "the stored prompt consumes the unchanged draft");
 });
 
+test("editing and resending a queued bang-prefixed prompt never runs its inline file text as shell", async (t) => {
+  resetWorld();
+  const { clearDraft } = await import("@/lib/draft-store");
+  const sid = "queued-bang-prompt";
+  const message = "!!explain this\n\nAttached file: notes.txt\n```text\necho attachment-content\n```";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { queuedMessages: { steering: [], followUp: [message] } } });
+  world.outboxHold = true;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "remove_queued_message",
+    produce: async () => ({ value: { success: true, data: { removed: true } } }),
+  });
+  const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.click(view.getByTitle("Edit this queued message")); });
+  await until(() => view.getByRole("textbox").value === message, "the removed queue entry must return to the composer");
+  await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || world.calls.some((call) => call.body?.type === "bash"), "the recovered message must be dispatched");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash"), [], "queue recovery must preserve prompt intent");
+  assert.equal(world.outbox[0]?.mode, "prompt");
+  assert.equal(world.outbox[0]?.message, message);
+  await until(() => view.getByRole("textbox").value === "", "a stored prompt clears its originating draft");
+  await act(async () => {
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "!!printf example" } });
+    fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" });
+  });
+  await until(() => world.calls.some((call) => call.body?.type === "bash"), "fresh input still supports shell commands");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash").map((call) => call.body.command), ["printf example"]);
+});
+
 test("a shell-queued outbox prompt and steer use queue_update without a phantom turn or reply notice", async () => {
   resetWorld();
   primeSession("bash-queue", [userMsg("u0", "q")]);

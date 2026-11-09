@@ -926,6 +926,7 @@ for (const hops of [1, 2]) {
       ...beforeResponse,
       value: `removed question\n\n${beforeResponse.value}`,
       images: [...removedImages, ...beforeResponse.images],
+      promptOnly: true,
     };
     await act(async () => { releaseResponse(); await response; });
     await waitFor(() => assert.deepEqual(getDraft(currentKey), expected));
@@ -998,6 +999,7 @@ for (const hops of [1, 2]) {
             ...movedDraft,
             value: `removed question\n\n${movedDraft.value}`,
             images: [...removedImages, ...movedDraft.images],
+            promptOnly: true,
           };
           assert.deepEqual(getDraft(targetKey), expected, "HTTP success recovers before the new identity renders");
           assert.equal(getDraft(currentKey), null, "the old key stays absent before hydration");
@@ -1086,6 +1088,7 @@ for (const [responseBeforeCommit, movedBeforeNavigation] of [[false, false], [fa
       ...sourceDraft,
       value: "removed question\n\noriginal conversation",
       images: [...removedImages, ...sourceDraft.images],
+      promptOnly: true,
     }));
     assert.equal(screen.getByRole("textbox").value, "unrelated conversation");
     assert.deepEqual(getDraft(unrelatedTarget), unrelatedDraft, "navigation cannot hijack pending recovery");
@@ -1477,6 +1480,6 @@ test("a rejected attachment prompt retains its files rather than becoming a shel
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
   await waitFor(() => assert.equal(submissions.length, 2));
   assert.equal(submissions[1][0], "!!explain this\n\nAttached file: notes.txt\n```text\necho attachment-content\n```");
-  assert.deepEqual(submissions[1][4], { textAttachments: true });
+  assert.deepEqual(submissions[1][4], { promptOnly: true });
 });
 

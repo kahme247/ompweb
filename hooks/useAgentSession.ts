@@ -151,8 +151,8 @@ export type PromptSubmissionResult =
 
 /** What the composer knows about a prompt that its text no longer shows. */
 export interface PromptSendOptions {
-  /** The text embeds inline text-file attachments, so a leading `!` is part of a prompt, not a shell command. */
-  textAttachments?: boolean;
+  /** Explicit model input (inline files or a recovered queue entry), even when its text starts with `!`. */
+  promptOnly?: boolean;
 }
 
 const MAX_HANDLED_EDIT_HISTORY_MARKERS = 64;
@@ -3162,7 +3162,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (initialHydrationPendingRef.current) return { status: "rejected" };
     // Shell commands run during a turn too, as in omp's terminal: omp holds the
     // result back until a later prompt starts.
-    const isBashCommand = !options?.textAttachments && !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
+    const isBashCommand = !options?.promptOnly && !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
@@ -3517,7 +3517,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         .map((entry) => entry.text)
         .filter((text): text is string => typeof text === "string" && text.length > 0);
       const images = entries.flatMap((entry) => toDraftImages(entry.images));
-      if (texts.length > 0 || images.length > 0) recoverDraft(sid, { text: texts.join("\n\n"), images });
+      if (texts.length > 0 || images.length > 0) recoverDraft(sid, { text: texts.join("\n\n"), images, promptOnly: true });
       // A failed attempt may have withdrawn messages whose texts were in the
       // lost response; say so unless the retry brought texts back.
       if (failures > 0 && texts.length === 0 && hookAliveRef.current && sessionIdRef.current === sid) {
@@ -3546,7 +3546,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (fresh.length === 0) return;
       entries.forEach((_, i) => { if (removed[i]) restored[i] = true; });
       const block = entries.filter((_, i) => restored[i]).map((entry) => entry.text).join("\n\n");
-      recoverDraft(sid, { text: block, replace: recoveredBlock ? { lead: recoveredBlock, fallback: fresh.join("\n\n") } : undefined });
+      recoverDraft(sid, { text: block, replace: recoveredBlock ? { lead: recoveredBlock, fallback: fresh.join("\n\n") } : undefined, promptOnly: true });
       recoveredBlock = block;
     };
     const removals = Promise.all(entries.map(async (entry, i) => {
@@ -3685,6 +3685,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           value: loaded && !value.trim() ? content : value,
           images: destination ? [...draft.images, ...destination.images] : draft.images,
           files: destination ? [...draft.files, ...destination.files] : draft.files,
+          ...((draft.promptOnly || destination?.promptOnly) ? { promptOnly: true } : {}),
           // The same upload may sit in both drafts (an id is one file): keep its first occurrence.
           uploads: destination
             ? [...(draft.uploads ?? []), ...(destination.uploads ?? [])].filter((upload, at, all) => all.findIndex((other) => other.id === upload.id) === at)
