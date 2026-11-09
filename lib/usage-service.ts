@@ -1,5 +1,6 @@
 import { statSync } from "fs";
 import { basename, join } from "path";
+import { getAgentDir } from "./omp/paths";
 import { readModelsConfig } from "./omp/models-config";
 import { forEachFileLineSync, invalidateSessionFileListCache, readSessionHeaderSync } from "./omp/session-files";
 import { SUBAGENT_ID_RE } from "./subagent-types";
@@ -9,7 +10,8 @@ import {
   calculateUsageCost,
   resolveModelRates,
 } from "./usage-rates";
-import { getUsageReportFromDb } from "./usage-db";
+import { runSingleFlight } from "./single-flight";
+import { runUsageReportInWorker } from "./usage-report-worker";
 import type {
   UsageQueryOptions,
   UsageRecord,
@@ -417,11 +419,114 @@ export function parseSessionUsage(
 /**
  * Generate full usage report over all sessions according to query options.
  * Backed by the persistent local SQLite usage database.
+ *
+ * The scan reads every new/changed transcript, so it must never run on the
+ * request path more than necessary: the last report for a query is served
+ * immediately (`stale: true`) while one background rescan runs, and concurrent
+ * requests for the same query share that rescan. A report younger than
+ * {@link USAGE_REPORT_REFRESH_MS} is served as current without any rescan.
+ * The scan itself runs in a worker (see usage-report-worker.ts): its
+ * synchronous SQLite work must never block this server's event loop.
  */
 export async function getUsageReport(options: UsageQueryOptions = {}): Promise<UsageReport> {
+  const agentDir = getAgentDir();
+  const key = usageReportKey(options, agentDir);
+
   if (options.forceRefresh) {
+    const flights = getUsageReportFlights();
+    // A refresh request while this query is already scanning joins that scan
+    // instead of starting a second full pass (and discarding every cached
+    // report other callers hold).
+    const inFlight = flights.get(key);
+    if (inFlight) return inFlight;
+    const cached = getUsageReportCache().get(key);
+    if (cached && Date.now() - cached.scannedAt < USAGE_FORCE_REFRESH_COOLDOWN_MS) {
+      return { ...cached.report, stale: false, scannedAt: cached.scannedAt };
+    }
     invalidateUsageCache();
     invalidateSessionFileListCache();
+    getUsageReportCache().clear();
+    return runSingleFlight(flights, key, () => refreshUsageReport(key, options, agentDir)).promise;
   }
-  return getUsageReportFromDb(options);
+
+  const cached = getUsageReportCache().get(key);
+  if (cached) {
+    const age = Date.now() - cached.scannedAt;
+    if (age < USAGE_REPORT_REFRESH_MS) {
+      return { ...cached.report, stale: false, scannedAt: cached.scannedAt };
+    }
+    // Serve the cached report now; rescans are coalesced per query.
+    runSingleFlight(getUsageReportFlights(), key, () => refreshUsageReport(key, options, agentDir)).promise.catch(() => {
+      // A failed background rescan keeps the cached report; the next request retries.
+    });
+    return { ...cached.report, stale: true, scannedAt: cached.scannedAt };
+  }
+
+  const { promise } = runSingleFlight(getUsageReportFlights(), key, () => refreshUsageReport(key, options, agentDir));
+  return promise;
+}
+
+/** Minimum age before a served report starts a background rescan. */
+export const USAGE_REPORT_REFRESH_MS = 5_000;
+
+/** A `refresh=true` this soon after a completed scan is answered from that scan. */
+export const USAGE_FORCE_REFRESH_COOLDOWN_MS = 60_000;
+
+/** Number of query reports kept; the usage page asks for one or two at a time. */
+const MAX_CACHED_USAGE_REPORTS = 24;
+
+interface CachedUsageReport {
+  report: UsageReport;
+  scannedAt: number;
+}
+
+declare global {
+  var __ompUsageReportCache: Map<string, CachedUsageReport> | undefined;
+  var __ompUsageReportFlights: Map<string, Promise<UsageReport>> | undefined;
+}
+
+function getUsageReportCache(): Map<string, CachedUsageReport> {
+  if (!globalThis.__ompUsageReportCache) globalThis.__ompUsageReportCache = new Map();
+  return globalThis.__ompUsageReportCache;
+}
+
+function getUsageReportFlights(): Map<string, Promise<UsageReport>> {
+  if (!globalThis.__ompUsageReportFlights) globalThis.__ompUsageReportFlights = new Map();
+  return globalThis.__ompUsageReportFlights;
+}
+
+/** Query identity: two requests share a report only for the same window,
+ *  granularity and filters — and the same agent dir (the DB it was read from). */
+function usageReportKey(options: UsageQueryOptions, agentDir: string): string {
+  return [
+    agentDir,
+    options.range ?? "",
+    options.granularity ?? "",
+    options.project ?? "",
+    options.from ?? "",
+    options.to ?? "",
+  ].join("|");
+}
+
+async function refreshUsageReport(
+  key: string,
+  options: UsageQueryOptions,
+  agentDir: string,
+): Promise<UsageReport> {
+  const report = await runUsageReportInWorker(options, agentDir);
+  const cached: CachedUsageReport = { report, scannedAt: report.scannedAt };
+  const cache = getUsageReportCache();
+  cache.delete(key);
+  cache.set(key, cached);
+  while (cache.size > MAX_CACHED_USAGE_REPORTS) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+  return { ...report, stale: false };
+}
+
+/** Drop every cached report (new scan rules, tests). */
+export function invalidateUsageReportCache(): void {
+  globalThis.__ompUsageReportCache?.clear();
 }

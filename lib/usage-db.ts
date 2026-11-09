@@ -769,6 +769,7 @@ export async function getUsageReportFromDb(
   const transcriptsInWindow = inWindowSyncedRow?.c ?? 0;
   const transcriptsOutsideWindow = Math.max(0, transcriptsScanned - transcriptsInWindow);
   const durationSeconds = Math.max(0.001, (Date.now() - startTime) / 1000);
+  const scannedAt = Date.now();
 
   return {
     timeRange,
@@ -784,7 +785,11 @@ export async function getUsageReportFromDb(
       transcriptsOutsideWindow,
       usageRecordsCount: totalRecords,
       durationSeconds: parseFloat(durationSeconds.toFixed(3)),
-      scannedAt: Date.now(),
+      scannedAt,
     },
+    // Freshly computed; getUsageReport flips `stale` when it serves a cached
+    // report while a refresh runs.
+    stale: false,
+    scannedAt,
   };
 }
