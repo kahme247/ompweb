@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { networkInterfaces } from "node:os";
+import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { getAccessibleAddresses } from "../bin/network-addresses";
 import { createChildProcessEnvironment } from "./project-command-env";
 
 /**
@@ -61,44 +62,63 @@ export function classifyExposure(hostname: string | null): MobileExposure {
   return "network";
 }
 
-export function isTailscaleIpv4(address: string): boolean {
-  const parts = address.split(".").map(Number);
-  return parts.length === 4 && parts.every((part) => Number.isInteger(part)) && parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
-}
-
-function isCandidateAddress(address: string): boolean {
-  if (address.startsWith("127.") || address.startsWith("169.254.") || /^198\.(18|19)\./.test(address)) return false;
-  return address.split(".").length === 4;
-}
+/**
+ * The map `os.networkInterfaces()` returns, named so callers and tests do not
+ * have to spell out (or infer) the Node type at every call site.
+ */
+export type NetworkInterfaceMap = Record<string, NetworkInterfaceInfo[] | undefined>;
 
 /**
- * Addresses to type into the app: Tailscale first (MagicDNS, then 100.64/10
- * addresses), then other non-internal IPv4s. No loopback: a phone cannot use it.
+ * Addresses to type into the app, from the same binding-aware enumeration the
+ * launcher prints (`bin/network-addresses.js`): a specific-IP bind yields that
+ * one address, a loopback bind yields none a phone can use, and a wildcard
+ * bind yields the interface addresses. Duplicating the enumeration here once
+ * offered six interface addresses for a single-IP bind.
+ *
+ * Two deliberate differences from the launcher's list:
+ *
+ *  - The `Local` entry (`http://localhost:…`) is dropped: a phone cannot reach
+ *    this machine's loopback, and the card is addressed to a phone.
+ *  - Tailscale addresses come before LAN ones. The launcher prints LAN first
+ *    because that is the common case for a browser; a phone that is away from
+ *    home needs the Tailscale address, so it is listed first here.
+ *
+ * MagicDNS is prepended when Tailscale reports a name.
  */
 export function candidateAddresses({
-  interfaces,
+  hostname,
   port,
   magicDnsName,
+  interfaces = networkInterfaces(),
 }: {
-  interfaces: ReturnType<typeof networkInterfaces>;
+  hostname: string | null;
   port: number;
   magicDnsName?: string | null;
+  interfaces?: NetworkInterfaceMap;
 }): MobileAddress[] {
   const magic = magicDnsName?.trim().replace(/\.$/, "");
   const magicdn: MobileAddress[] = magic ? [{ url: `http://${magic}:${port}`, label: "magicdns" }] : [];
+  // `null` means the launch flags were not visible. The default bind is
+  // loopback, so listing interface addresses would advertise a reachability
+  // this server may not have; the card says "unknown" and shows no address.
+  const { entries, hint } = getAccessibleAddresses({ hostname: hostname ?? "127.0.0.1", port, interfaces });
+  // The helper's hint is its own "not exposed to the network" signal (it is
+  // set for a loopback bind). Nothing it lists is reachable from a phone then,
+  // MagicDNS included: that name resolves to an address this server is not
+  // listening on. The card's network hint tells the user to rebind instead.
+  if (hint) return [];
   const tailscale: MobileAddress[] = [];
   const lan: MobileAddress[] = [];
   const seen = new Set<string>();
-  for (const [name, infos] of Object.entries(interfaces)) {
-    for (const info of infos ?? []) {
-      // `family` is "IPv4" on modern Node and 4 on older versions.
-      if (info.family !== "IPv4" && String(info.family) !== "4") continue;
-      if (info.internal || seen.has(info.address) || !isCandidateAddress(info.address)) continue;
-      seen.add(info.address);
-      const entry = { url: `http://${info.address}:${port}`, label: "tailscale" as const };
-      if (isTailscaleIpv4(info.address) || name.toLowerCase().includes("tailscale")) tailscale.push(entry);
-      else lan.push({ url: `http://${info.address}:${port}`, label: "lan" });
-    }
+  for (const entry of entries) {
+    if (seen.has(entry.url)) continue;
+    // `Local` is loopback: right for the browser, unreachable from a phone.
+    if (entry.label === "Local") continue;
+    seen.add(entry.url);
+    // The helper labels a Tailscale address by interface or CGNAT range; both
+    // arrive as "Tailscale". Everything else is a bound name or a LAN address.
+    if (entry.label === "Tailscale") tailscale.push({ url: entry.url, label: "tailscale" });
+    else lan.push({ url: entry.url, label: "lan" });
   }
   return [...magicdn, ...tailscale, ...lan];
 }
@@ -176,36 +196,52 @@ export async function probeMagicDnsName(timeoutMs = 1500): Promise<string | null
 
 /**
  * Exact commands from the installers and `ompweb --help`; nothing invented.
- * `scrypt$…` stands for the output of `ompweb hash-password` (stdin, so it
- * never reaches the shell history or `ps`).
+ *
+ * No command line carries a secret, and no secret is echoed. `ompweb
+ * hash-password` reads the password at a hidden prompt and prints the hash;
+ * every flow pastes that hash into a *hidden* prompt (`read -rs`, `Read-Host
+ * -AsSecureString`) and hands it to the next command through the environment,
+ * so neither the password nor the hash lands in the shell history or in `ps`.
+ * All four installers accept `OMP_WEB_PASSWORD_HASH` directly, so the
+ * plaintext never has to be exported at all.
  */
 export function mobileAccessMethods(): MobileAccessMethod[] {
+  // `-s` keeps the input off the terminal; `echo` ends the line the hidden
+  // prompt left open. The value goes into the environment, never into argv.
+  const readHash = "read -rsp 'OMP_WEB_PASSWORD_HASH: ' OMP_WEB_PASSWORD_HASH && export OMP_WEB_PASSWORD_HASH && echo";
   return [
     {
       id: "cli",
       commands: [
         "ompweb hash-password",
-        "OMP_WEB_PASSWORD_HASH='scrypt$…' ompweb -H 0.0.0.0",
+        readHash,
+        "ompweb -H 0.0.0.0",
       ],
     },
     {
       id: "windowsTray",
       commands: [
         "ompweb hash-password",
-        "setx OMP_WEB_PASSWORD_HASH \"scrypt$…\"",
+        // User scope is what the service script reads at logon; the session
+        // variable makes the same value visible to the command below.
+        "$s = Read-Host -AsSecureString 'OMP_WEB_PASSWORD_HASH'; $h = [Net.NetworkCredential]::new('', $s).Password; [Environment]::SetEnvironmentVariable('OMP_WEB_PASSWORD_HASH', $h, 'User'); $env:OMP_WEB_PASSWORD_HASH = $h",
         "ompweb --install-tray -H 0.0.0.0",
       ],
     },
     {
       id: "systemd",
       commands: [
-        "OMP_WEB_HOSTNAME=0.0.0.0 OMP_WEB_PASSWORD='…' ompweb-systemd install",
+        "ompweb hash-password",
+        readHash,
+        "OMP_WEB_HOSTNAME=0.0.0.0 ompweb-systemd install",
       ],
     },
     {
       id: "launchd",
       commands: [
-        "OMP_WEB_HOSTNAME=0.0.0.0 OMP_WEB_PASSWORD='…' ompweb-launchd install",
+        "ompweb hash-password",
+        readHash,
+        "OMP_WEB_HOSTNAME=0.0.0.0 ompweb-launchd install",
       ],
     },
   ];
