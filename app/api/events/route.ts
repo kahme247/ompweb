@@ -8,7 +8,8 @@ const MAX_REQUEST_BYTES = 16 * 1024;
 // Subscriptions are attached with POST (see lib/event-stream-protocol.ts).
 export function GET(req: Request, { disableIdleTimeout }: { disableIdleTimeout: () => void }) {
   disableIdleTimeout();
-  // A native client may ask for a longer keep-alive (`?heartbeat=110`); the range is clamped server-side.
+  // A native client may ask for a longer keep-alive (`?heartbeat=110`); values
+  // outside 15..110 fall back to the 30 s default rather than being clamped.
   const heartbeat = parseHeartbeatSeconds(new URL(req.url).searchParams.get("heartbeat"));
   const connection = new EventStreamConnection(req.signal, { heartbeatMs: heartbeat * 1000 });
   return new Response(connection.stream, {

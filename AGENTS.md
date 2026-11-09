@@ -953,6 +953,21 @@ during the wait.
   CLOSED = fatal (e.g. 409 for a wrapper-less session; the chat hook then
   retries with backoff). Dead tabs are detected with a lifetime Web Lock —
   MessagePort has no close event.
+- **Native-client handshake and keep-alive.** `GET /api/app-info` (behind the
+  normal `/api` auth gate) answers `{ name, version, api: 1, capabilities }`
+  with `Cache-Control: no-store`: package identity and which server-side
+  features exist, never a credential or configuration value. A capability is
+  added only together with its implementation, so a client may branch on it
+  instead of probing for 404s. Today it carries `heartbeatParam`.
+  `GET /api/events?heartbeat=<seconds>` sets that one connection's keep-alive
+  (an idle stream gets a `:` comment frame): an integer in 15..110, otherwise
+  the 30 s default — out-of-range values fall back to the default, they are
+  not clamped to the nearest bound. The interval is per connection; other
+  connections and the browser link's own 15 s ping are unchanged. A value
+  above the reverse proxy's read timeout (nginx defaults to 60 s) disconnects
+  an idle stream before its first keep-alive, so a client selecting 110 s
+  needs a proxy read timeout above 110 s (see the README's reverse-proxy
+  section); the 30 s default needs one above 30 s.
 - Channels (`lib/event-stream-hub.ts`): `running` (sidebar badges +
   session-list hints), `notifications` (one tab's toasts and in-page system
   notifications, keyed by its `clientId`), `hosts` (the `GET /api/hosts` body on
