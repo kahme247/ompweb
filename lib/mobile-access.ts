@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { getAccessibleAddresses } from "../bin/network-addresses";
+import { getAccessibleAddresses, isTailscaleAddress, isWildcardHost } from "../bin/network-addresses";
 import { createChildProcessEnvironment } from "./project-command-env";
 
 /**
@@ -83,7 +83,11 @@ export type NetworkInterfaceMap = Record<string, NetworkInterfaceInfo[] | undefi
  *    because that is the common case for a browser; a phone that is away from
  *    home needs the Tailscale address, so it is listed first here.
  *
- * MagicDNS is prepended when Tailscale reports a name.
+ * MagicDNS is advertised only when the bind actually covers the Tailscale
+ * address: a wildcard bind listens on every interface, and a specific-IP bind
+ * does so only when that IP is itself the Tailscale address. A socket bound to
+ * a LAN IP does not listen on the Tailscale IP, so the MagicDNS name would
+ * resolve to an address nothing is listening on.
  */
 export function candidateAddresses({
   hostname,
@@ -96,8 +100,6 @@ export function candidateAddresses({
   magicDnsName?: string | null;
   interfaces?: NetworkInterfaceMap;
 }): MobileAddress[] {
-  const magic = magicDnsName?.trim().replace(/\.$/, "");
-  const magicdn: MobileAddress[] = magic ? [{ url: `http://${magic}:${port}`, label: "magicdns" }] : [];
   // `null` means the launch flags were not visible. The default bind is
   // loopback, so listing interface addresses would advertise a reachability
   // this server may not have; the card says "unknown" and shows no address.
@@ -120,6 +122,12 @@ export function candidateAddresses({
     if (entry.label === "Tailscale") tailscale.push({ url: entry.url, label: "tailscale" });
     else lan.push({ url: entry.url, label: "lan" });
   }
+  // The bind covers the Tailscale address when it listens on every interface,
+  // or when the specific IP it is bound to is the Tailscale address itself.
+  const coversTailscale = isWildcardHost(hostname)
+    || (typeof hostname === "string" && isTailscaleAddress(undefined, hostname.trim()));
+  const magic = coversTailscale ? magicDnsName?.trim().replace(/\.$/, "") : undefined;
+  const magicdn: MobileAddress[] = magic ? [{ url: `http://${magic}:${port}`, label: "magicdns" }] : [];
   return [...magicdn, ...tailscale, ...lan];
 }
 
@@ -206,9 +214,13 @@ export async function probeMagicDnsName(timeoutMs = 1500): Promise<string | null
  * plaintext never has to be exported at all.
  */
 export function mobileAccessMethods(): MobileAccessMethod[] {
+  // The prompt is printed by `printf`, not by `read -p`: on macOS the default
+  // shell is zsh, where `read -p` reads from a coprocess instead of printing a
+  // prompt and the whole sequence fails with `read: -p: no coprocess`. `-r`
+  // and `-s` mean the same in bash and zsh, so this sequence works in either.
   // `-s` keeps the input off the terminal; `echo` ends the line the hidden
   // prompt left open. The value goes into the environment, never into argv.
-  const readHash = "read -rsp 'OMP_WEB_PASSWORD_HASH: ' OMP_WEB_PASSWORD_HASH && export OMP_WEB_PASSWORD_HASH && echo";
+  const readHash = "printf 'OMP_WEB_PASSWORD_HASH: ' && read -rs OMP_WEB_PASSWORD_HASH && export OMP_WEB_PASSWORD_HASH && echo";
   return [
     {
       id: "cli",
