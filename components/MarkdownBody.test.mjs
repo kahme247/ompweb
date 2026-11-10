@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 const { MarkdownBody } = await import("./MarkdownBody.tsx");
 const { normalizeDisplayMath, loadMathMarkdownPlugins } = await import("../lib/markdown.ts");
 const { GithubRepoContext } = await import("../lib/github-refs.ts");
+const { renderedTextNodes } = await import("../lib/session-match-listing.ts");
 
 function renderMarkdown(markdown) {
   return renderToStaticMarkup(
@@ -50,16 +51,24 @@ test("renders LaTeX parenthesis delimiters as inline math", async () => {
 
 test("keeps dollar amounts literal while $x$ stays math", async () => {
   await loadMathMarkdownPlugins();
-  const prices = renderMarkdown("Costs $5 and $10, or $ 3 $ each.");
-  const reais = renderMarkdown("De R$5,00 por R$ 10 e US$3.");
-  const math = renderMarkdown("Let $x^2$ and $y$ be $3.");
+  const katexCount = (html) => html.match(/class="katex"/g)?.length ?? 0;
+  const literal = [
+    ["Costs $5 and $10, or $ 3 $ each.", /Costs \$5 and \$10, or \$ 3 \$ each\./],
+    ["De R$5,00 por R$ 10 e US$3.", /De R\$5,00 por R\$ 10 e US\$3\./],
+    ["Total: **$5** or **$10**", /<strong>\$5<\/strong> or <strong>\$10<\/strong>/],
+    ["> costs $5 and\n> then $10 ok", /costs \$5 and\nthen \$10 ok/],
+    ["`$a$` and $x$5", /<code[^>]*>\$a\$<\/code> and \$x\$5/],
+  ];
+  for (const [markdown, expected] of literal) {
+    const html = renderMarkdown(markdown);
+    assert.equal(katexCount(html), 0, markdown);
+    assert.match(html, expected, markdown);
+  }
 
-  assert.doesNotMatch(prices, /class="katex"/);
-  assert.match(prices, /Costs \$5 and \$10, or \$ 3 \$ each\./);
-  assert.doesNotMatch(reais, /class="katex"/);
-  assert.match(reais, /De R\$5,00 por R\$ 10 e US\$3\./);
-  assert.equal(math.match(/class="katex"/g)?.length, 2);
-  assert.match(math, /be \$3\./);
+  assert.equal(katexCount(renderMarkdown("Let $x^2$ and $y$ be $3.")), 2);
+  assert.equal(katexCount(renderMarkdown("price is $5, then $x$ later")), 1);
+  assert.equal(katexCount(renderMarkdown("设$x$为实数，$y$也是")), 2);
+  assert.deepEqual(renderedTextNodes("Costs $5 and $10 each"), ["Costs $5 and $10 each"]);
 });
 
 test("renders paired LaTeX bracket delimiters as display math", async () => {

@@ -85,7 +85,7 @@ export function loadMathMarkdownPlugins(): Promise<MarkdownPlugins> {
       ]);
       if (typeof document !== "undefined") await loadKatexCss();
       mathMarkdownPlugins = {
-        remarkPlugins: [...baseMarkdownPlugins.remarkPlugins, remarkMath, remarkLiteralDollars],
+        remarkPlugins: [...baseMarkdownPlugins.remarkPlugins, remarkMath],
         rehypePlugins: [
           ...baseMarkdownPlugins.rehypePlugins,
           [rehypeKatex, { throwOnError: false, strict: false }],
@@ -99,54 +99,6 @@ export function loadMathMarkdownPlugins(): Promise<MarkdownPlugins> {
     });
   }
   return mathMarkdownPluginsPromise;
-}
-
-interface MdNode {
-  type: string;
-  value?: string;
-  children?: MdNode[];
-  position?: { start: { offset?: number }; end: { offset?: number } };
-}
-
-/**
- * remark-math reads any `$…$` pair as math, so prices ("$5 and $10",
- * "R$ 5 e R$ 10") render as glued italics. Pandoc's rule decides instead: the
- * opening `$` is followed by non-space, the closing `$` is preceded by
- * non-space and not followed by a digit. An opening `$` glued to a letter or
- * digit (R$, US$) is a currency sign, not math. Other single-dollar spans go
- * back to their source text. Runs after remark-math.
- */
-export function remarkLiteralDollars() {
-  return (tree: MdNode, file: { toString(): string }) => {
-    const source = String(file);
-    const literal = (node: MdNode) => {
-      const start = node.position?.start.offset;
-      const end = node.position?.end.offset;
-      if (node.type !== "inlineMath" || start === undefined || end === undefined) return null;
-      const raw = source.slice(start, end);
-      if (raw.startsWith("$$") || !raw.startsWith("$") || !raw.endsWith("$")) return null;
-      const literal = /^\s|\s$/.test(raw.slice(1, -1)) || /\d/.test(source[end] ?? "") || /[\p{L}\p{N}]/u.test(source[start - 1] ?? "");
-      return literal ? raw : null;
-    };
-    const walk = (node: MdNode) => {
-      if (!node.children) return;
-      const children: MdNode[] = [];
-      for (const child of node.children) {
-        const raw = literal(child);
-        const next = raw === null ? child : { type: "text", value: raw, position: child.position };
-        const previous = children.at(-1);
-        // Join with neighbouring text, as an unmatched `$` would be: search counts hits per rendered text node.
-        if (next.type === "text" && previous?.type === "text") {
-          children[children.length - 1] = { ...previous, value: `${previous.value}${next.value}` };
-        } else {
-          children.push(next);
-          walk(next);
-        }
-      }
-      node.children = children;
-    };
-    walk(tree);
-  };
 }
 
 /**
@@ -225,9 +177,15 @@ export function normalizeDisplayMath(markdown: string): string {
       continue;
     }
 
-    if (inlineCodeMarkerSize || line.includes("`")) {
+    if (inlineCodeMarkerSize) {
       inlineCodeMarkerSize = updateInlineCodeMarker(line, inlineCodeMarkerSize);
       normalized.push(line);
+      continue;
+    }
+
+    if (line.includes("`")) {
+      inlineCodeMarkerSize = updateInlineCodeMarker(line, 0);
+      normalized.push(escapeLiteralDollars(line));
       continue;
     }
 
@@ -314,7 +272,7 @@ export function normalizeDisplayMath(markdown: string): string {
       }
     }
 
-    normalized.push(normalizeInlineLatexMath(line));
+    normalized.push(normalizeInlineLatexMath(escapeLiteralDollars(line)));
   }
 
   return normalized.join(lineBreak);
@@ -418,6 +376,71 @@ function updateInlineCodeMarker(line: string, initialMarkerSize: number): number
     cursor = end;
   }
   return markerSize;
+}
+
+/**
+ * remark-math pairs any two `$`, so prices ("$5 and $10", "R$5 or US$10")
+ * render as glued italics. Escapes every single `$` that Pandoc's rule does
+ * not pair: an opener is followed by non-space, the next `$` closes it only
+ * when preceded by non-space and not followed by a digit. A letter glued
+ * before an opener that precedes a digit (R$5, US$10) is a currency sign.
+ */
+// shortcut: pairs within one line, so inline math spanning lines renders as text; upgrade to a micromark extension if that shows up.
+function escapeLiteralDollars(line: string): string {
+  // Raw HTML keeps backslashes literally (attributes, <pre> on one line).
+  if (!line.includes("$") || /<\/?[A-Za-z][^>]*>/.test(line)) return line;
+  const escaped: number[] = [];
+  let opener = -1;
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index];
+    if (char === "\\") {
+      index++;
+      continue;
+    }
+    if (char === "`") {
+      const close = codeSpanEnd(line, index);
+      if (close === -1) break; // the span continues on a later line
+      index = close - 1;
+      continue;
+    }
+    if (char !== "$") continue;
+    if (line[index + 1] === "$") {
+      while (line[index + 1] === "$") index++; // `$$` runs are display/double math
+      continue;
+    }
+    const before = line[index - 1] ?? "";
+    const after = line[index + 1] ?? "";
+    if (opener !== -1) {
+      const closes = /\S/.test(before) && !/\d/.test(after);
+      if (!closes) escaped.push(opener);
+      opener = -1;
+      if (closes) continue;
+    }
+    if (/\S/.test(after) && !(/[A-Za-z]/.test(before) && /\d/.test(after))) opener = index;
+    else escaped.push(index);
+  }
+  if (opener !== -1) escaped.push(opener);
+  let result = line;
+  for (const index of escaped.reverse()) result = `${result.slice(0, index)}\\${result.slice(index)}`;
+  return result;
+}
+
+/** End of the code span opened by the backtick run at `start`, or -1 when this line does not close it. */
+function codeSpanEnd(line: string, start: number): number {
+  let end = start;
+  while (line[end] === "`") end++;
+  const size = end - start;
+  for (let cursor = end; cursor < line.length;) {
+    if (line[cursor] !== "`") {
+      cursor++;
+      continue;
+    }
+    let runEnd = cursor;
+    while (line[runEnd] === "`") runEnd++;
+    if (runEnd - cursor === size) return runEnd;
+    cursor = runEnd;
+  }
+  return -1;
 }
 
 function normalizeInlineLatexMath(line: string): string {
