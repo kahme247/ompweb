@@ -142,6 +142,8 @@ lib/
     local-bootstrap.ts web server side of the local link: `localLinkUrl`, `ensureLocalHostLink` (the `local` record + `host.json`)
     host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
     session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
+    session-ownership.ts  daemon side of the `sessionOwnership` op: `ChannelTable` first (ours), then one bounded process scan (foreign), then the transcript tail (activity only); `unknown` for a failed or switched-off inspection, never `none`
+    omp-processes.ts   the process scan behind that op: Windows CIM / POSIX `ps` parsing, own-user and own-child filtering, `--resume`/`--restore`/`-r` values and unique id-prefix matching, a 10 s cached snapshot with a liveness re-check
     uploads.ts         daemon side of composer uploads: `StagedUploads` (staging dir `<agent dir>/omp-web/uploads/`, offset writes, 24 h sweep, attach into the session's `local/uploads/`), `sanitizeUploadName`
     upload-retention.ts  daemon side of sent-upload retention: `UploadRetention` (op `setUploadRetention`, `<agent dir>/omp-web/upload-retention.json`, sweep at start and every 24 h), `sweepSentUploads`; `upload-retention-sync.ts` is main's side (`startUploadRetentionSync` on every hello, `pushUploadRetention` when the setting changes)
     link-protocol.ts   link messages, codec, binary blob frames, close codes, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`, `LinkSender`/`PartJoiner` (pieces, fair sending)
@@ -377,6 +379,34 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   must not open a session file on main for a session that may be remote or local.
   `SessionInfo.hostId` and `ManagedProject.hostId` carry the host; sidebar and
   project state key on `hostProjectKey` (bare path on this machine, `<hostId>:<path>`).
+- **Session ownership is a daemon op** (`sessionOwnership {ids}` ->
+  one `{id, owner, running?, source?, lastActivityAt?}` per id in request order,
+  ≤ 256 ids; `docs/specs/2026-11-05-session-ownership-design.md`). It lives in the
+  daemon because only there the three facts meet: `ChannelTable` (ours),
+  a process scan in the children's PID namespace and uid (foreign), and the
+  transcript on the machine that owns the file (activity). `owner` is
+  `daemon`/`foreign`/`none`/`unknown`; a failed, switched-off or unsupported
+  inspection is `unknown`, never `none`, and then reports no `running` fact.
+  Ownership and activity are separate: an idle foreign writer still owns the
+  file, and a fresh transcript without a process is an activity hint only.
+  Every requested id goes to the scan (a file that does not resolve must not
+  turn a named writer into `none`), and a scan hit is re-checked against the OS
+  because the snapshot is cached for 10 s. `--resume`, `--restore` and `-r` are
+  recognised, including a unique id prefix; only an omp row can own a session,
+  and the entry point must be anchored — `argv[0]`, or the program a known
+  launcher runs (`cmd[.exe] /c …`, `sh|bash -c …`, `node|bun …`, after
+  `env`/`nice`/`nohup`) — so a token that merely appears as an argument
+  (`grep -r <id> lib/omp`, `cp -r <id> …/omp`, `--exclude-dir=omp`) cannot
+  claim one, and on Windows a `.cmd`/node shim row counts too. A quoted
+  command string is re-split and walked the same way, so `sh -c "omp …"` counts
+  while `sh -c "grep -r <id> lib/omp"` does not; a quoted program path with
+  spaces (`"C:\Program Files\omp\omp.cmd"`) is still recognised. The POSIX scan
+  asks `ps` for `-ww`, which lifts the width to procps's 131 072-column cap
+  instead of the screen width, because `args` is its last column and a clipped
+  command line would read as naming no session.
+  The daemon's own children are excluded by transport pid plus a bounded
+  ppid-chain walk. Detection is advisory, not an atomic lock: a writer can start
+  between the inspection and a later spawn.
 - **Link = one WebSocket per host per web server, dialled by the daemon** (`/api/hosts/link`;
   design `docs/specs/2026-10-31-websocket-link-design.md`). **Text frames**
   carry the messages (hub → daemon one per frame; daemon → hub newline-separated

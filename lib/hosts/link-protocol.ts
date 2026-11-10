@@ -46,6 +46,9 @@ export const LINK_LIMITS = {
   pendingBytes: 1024 * 1024,
   /** A shared channel's `ready` wait (the legacy wrapper's allowance); an open waits for it plus opTimeoutMs. */
   channelReadyMs: 120_000,
+  /** The most session ids one `sessionOwnership` request may carry: the reply is one entry per id, so the bound keeps a
+   * single op's answer small and its one process scan bounded. A caller with more ids pages through them. */
+  ownershipIds: 256,
   /** Link head-of-line samples (metric "link"): each side writes or reports them at this count, else after statsFlushMs.
    * Also the most one `stats` message may carry, which bounds it to about 40 KB. */
   statsSamples: 256,
@@ -95,6 +98,7 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   updateProject: ["updates"],
   hideProject: ["path"],
   validateCwd: ["path"],
+  sessionOwnership: ["ids"],
 };
 
 /** Every op a daemon answers. Older daemons refuse newer ops with unknown_op; upload ops require v6, `setUploadRetention`

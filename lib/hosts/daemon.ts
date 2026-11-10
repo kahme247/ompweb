@@ -15,6 +15,7 @@ import type { SpawnRequest } from "./host";
 import { encodeLine, HostOpError, isHostOp, LINK_LIMITS, SESSION_OP_PARAMS, type DownMessage, type OpenChannelRequest, type UnknownMessage } from "./link-protocol";
 import { localHost, resolveSpawnCwdResult } from "./local-host";
 import { sessionOps } from "./session-ops";
+import { detectSessionOwnership } from "./session-ownership";
 import packageJson from "../../package.json";
 import { checkHostUpdates, configureHostUpdateSafety, getHostUpdateOperation, HostUpdateError, startHostUpdate } from "./updates";
 import type { HostUpdateCompatibility, HostUpdateOperation } from "./update-types";
@@ -281,6 +282,18 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
       case "uploadAbort": requireUploadOwner(link, args.id); return uploads.abort(args.id);
       case "uploadAttach": requireUploadOwner(link, args.id); return uploads.attach(args.id, sessionsPath(args.sessionFile), args.sessionId);
       case "setUploadRetention": return uploadRetention.set(args.days);
+      case "sessionOwnership": {
+        // The daemon is the only place where the three facts meet: its ChannelTable (which child is ours), the process
+        // scan in this PID namespace and as this uid, and the transcript on the machine that owns the file.
+        const ids = args.ids;
+        if (!Array.isArray(ids) || ids.length === 0 || ids.length > LINK_LIMITS.ownershipIds || !ids.every(id => typeof id === "string" && isValidSessionId(id))) {
+          throw new HostOpError(400, "invalid_request", "sessionOwnership takes a non-empty array of at most " + LINK_LIMITS.ownershipIds + " session ids");
+        }
+        return detectSessionOwnership(ids, {
+          channel: (id, file) => channels.ownership(id, file),
+          excludePids: () => channels.childPids(),
+        });
+      }
       default: {
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
         const result = await run.apply(sessionOps, SESSION_OP_PARAMS[op].map(name => args[name]));

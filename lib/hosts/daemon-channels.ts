@@ -10,6 +10,7 @@ import { HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, 
 import { PendingRequests } from "./pending-requests";
 import { StreamSnapshot } from "./stream-snapshot";
 import { ChannelLifecycle } from "./channel-lifecycle";
+import { comparableProjectPath } from "../comparable-path";
 import { SharedRequests } from "./shared-requests";
 import { RESUME_PROMPT, type HostResumeEntry } from "./host-resume";
 
@@ -516,6 +517,47 @@ export class ChannelTable {
     return [...this.channels.values()].filter(channel => link.version >= 7 ? channel.legacy === null || channel.legacy === link.id : channel.legacy === link.id)
       .map(channel => ({ ch: channel.ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? this.pendingFor(channel, link) : null }));
   }
+  /**
+   * Whether a child of this daemon runs (or is being spawned for) a session, and whether it is mid-turn. The authority
+   * for "ours": `sessionOwnership` (lib/hosts/session-ownership.ts) asks this before it looks at any process, so a
+   * spawning, adopted, idle or running child is never reported as a foreign writer. `sessionFile` covers a channel that
+   * knows the session only by its launch file (a new session whose `get_state` has not named it yet).
+   */
+  ownership(id: string, sessionFile?: string | null): { owned: boolean; running?: boolean; sessionFile?: string } {
+    const key = sessionFile ? comparableProjectPath(sessionFile) : "";
+    for (const channel of this.channels.values()) {
+      if (channel.exited) continue;
+      const named = channel.aliases.has(id) || channel.pending.sessionId === id
+        || (key !== "" && [...channel.files].some((file) => comparableProjectPath(file) === key));
+      if (!named) continue;
+      // `isRunning` is "a run is executing (or was started and has not settled)"; `resuming` covers the window between
+      // omp accepting the resume prompt and its `agent_start`. An idle child between turns is not running.
+      // A legacy channel has no lifecycle, so its activity is unknown rather than idle.
+      const running = channel.lifecycle ? channel.lifecycle.isRunning || channel.resuming === true : undefined;
+      // The launch file (or the one `get_state` named) lets the detector report `lastActivityAt` for our own child too.
+      const knownFile = channel.launch.sessionFile || [...channel.files][0];
+      return { owned: true, ...(running === undefined ? {} : { running }), ...(knownFile ? { sessionFile: knownFile } : {}) };
+    }
+    // A spawn still connecting has no channel yet, but its child is already ours. `spawning` is keyed by the identity
+    // (session id) or the launch file, which is exactly what a caller asking about this session has.
+    for (const spawnKey of this.spawning.keys()) {
+      if (spawnKey === id) return { owned: true, running: true };
+      if (key !== "" && comparableProjectPath(spawnKey) === key) return { owned: true, running: true, sessionFile: spawnKey };
+    }
+    return { owned: false };
+  }
+
+  /** Pids of this daemon's children, so a process scan never counts one as a foreign writer. */
+  childPids(): number[] {
+    const pids: number[] = [];
+    for (const channel of this.channels.values()) {
+      if (channel.exited) continue;
+      const id = channel.transport.id;
+      if (id !== undefined && /^\d+$/.test(id)) pids.push(Number(id));
+    }
+    return pids;
+  }
+
   running(): HostResumeEntry[] {
     return [...this.channels.values()].filter(channel => (channel.lifecycle?.isRunning || channel.resuming) && channel.pending.sessionId && channel.launch.sessionFile && !channel.sessionMovePending)
       .map(channel => ({ sessionId: channel.pending.sessionId!, launch: channel.launch }));
