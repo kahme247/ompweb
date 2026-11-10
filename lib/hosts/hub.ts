@@ -1007,6 +1007,8 @@ export class RemoteRpcTransport implements RpcTransport {
   session: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
+  /** A later start owns this creation proxy too: its allocating attempt may no longer discard it. */
+  reusedForCreation = false;
   /** The daemon stopped listing this child: it died while the link was down. Set before the synthesized exit. */
   lost = false;
   /** Killed: a child of a previous run of this server that it could not adopt. Its output has no reader and is dropped. */
@@ -1183,6 +1185,7 @@ export class RemoteHost implements Host {
       : `creation-${createHash("sha256").update("ompweb:creation:").update(creationId).digest("hex")}`;
     const existing = link.channels.get(ch);
     const transport = existing ?? new RemoteRpcTransport(this.id, ch);
+    if (existing && creationId !== undefined) transport.reusedForCreation = true;
     // Registered first: the child's output can overtake the spawn result.
     link.channels.set(ch, transport);
     try {
@@ -1196,7 +1199,7 @@ export class RemoteHost implements Host {
         link.channels.delete(ch);
         // The daemon may have started it after we gave up: never leave it unread.
         transport.killTree(true);
-      } else if (!existing && error instanceof HostOpError && error.status >= 400 && error.status < 500 && error.status !== 408
+      } else if (!existing && !transport.reusedForCreation && error instanceof HostOpError && error.status >= 400 && error.status < 500 && error.status !== 408
         && link.channels.get(ch) === transport) {
         link.channels.delete(ch);
       }
