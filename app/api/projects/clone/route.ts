@@ -1,9 +1,6 @@
-import { spawn } from "child_process";
-import { mkdir, rm } from "fs/promises";
 import { join } from "path";
-import { apiErrorResponse } from "@/lib/api-utils";
 import { cloneDirectoryName } from "@/lib/git-clone";
-import { createChildProcessEnvironment } from "@/lib/project-command-env";
+import { cloneRepository } from "@/lib/project-clone";
 import { ProjectPathError, validateProjectPath } from "@/lib/project-registry";
 
 // In-flight clones by client-chosen id, so DELETE can cancel one while its
@@ -16,46 +13,6 @@ type CloneFrame =
   | { type: "done"; path: string }
   | { type: "cancelled"; path: string }
   | { type: "error"; error: string; code: string };
-
-/** Runs `git clone`, streaming its output. Resolves the exit code, or null if
- *  git could not start. Never prompts: credentials must come from helpers/agents.
- *  On POSIX git leads its own session (no controlling terminal, so ssh fails
- *  fast on host-key or passphrase prompts instead of blocking on /dev/tty) and
- *  cancel signals the whole group: ssh/remote helpers hold the output pipes
- *  open, so killing git alone would leave the clone hanging until they exit. */
-function runGitClone(url: string, target: string, signal: AbortSignal, onOutput: (text: string) => void): Promise<number | null> {
-  // Aborted while the target was being created: skip git; the caller cleans up.
-  if (signal.aborted) return Promise.resolve(null);
-  const { promise, resolve } = Promise.withResolvers<number | null>();
-  const child = spawn("git", ["clone", "--progress", "--", url, target], {
-    stdio: ["ignore", "pipe", "pipe"],
-    // An empty GIT_ASKPASS also overrides core.askPass/SSH_ASKPASS fallbacks.
-    env: createChildProcessEnvironment({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
-    detached: process.platform !== "win32",
-    windowsHide: true,
-  });
-  const kill = () => {
-    if (!child.pid) return;
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-      return;
-    }
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      // Group already gone.
-    }
-  };
-  signal.addEventListener("abort", kill, { once: true });
-  child.stdout.setEncoding("utf8").on("data", onOutput);
-  child.stderr.setEncoding("utf8").on("data", onOutput);
-  child.on("error", () => resolve(null));
-  child.on("close", (code) => {
-    signal.removeEventListener("abort", kill);
-    resolve(code);
-  });
-  return promise;
-}
 
 // POST /api/projects/clone  body: { id, parent, url }
 // Clones `url` into `<parent>/<repo name>` and streams NDJSON frames:
@@ -81,54 +38,56 @@ export async function POST(req: Request, { disableIdleTimeout }: { disableIdleTi
     throw error;
   }
   // Registered before any await so a cancel sent while the target is being
-  // created is not a 404; runGitClone then skips git and the stream cleans up.
+  // created is not a 404; cloneRepository skips git and cleans up its own target.
   const controller = new AbortController();
   clones.set(id, controller);
   req.signal.addEventListener("abort", () => controller.abort(), { once: true });
   if (req.signal.aborted) controller.abort();
-  // Creating the (empty) target up front makes the existence check atomic, so
-  // cleanup only ever removes a directory this request created.
-  try {
-    await mkdir(target);
-  } catch (error) {
-    clones.delete(id);
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      return Response.json({ error: `Already exists: ${target}`, code: "clone_target_exists" }, { status: 409 });
-    }
-    return apiErrorResponse(error);
-  }
-  disableIdleTimeout();
   const encoder = new TextEncoder();
+  let streamController!: ReadableStreamDefaultController<Uint8Array>;
   const stream = new ReadableStream<Uint8Array>({
-    async start(streamController) {
-      const send = (frame: CloneFrame) => {
-        try {
-          streamController.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
-        } catch {
-          // Client gone; the clone still finishes its cleanup.
-        }
-      };
-      const code = await runGitClone(url, target, controller.signal, (text) => send({ type: "output", text }));
-      clones.delete(id);
-      if (code === 0 && !controller.signal.aborted) {
-        send({ type: "done", path: target });
-      } else {
-        const removed = await rm(target, { recursive: true, force: true, maxRetries: 5 }).then(() => true, () => false);
-        if (!removed) send({ type: "error", error: `Could not remove ${target}`, code: "clone_cleanup_failed" });
-        else if (controller.signal.aborted) send({ type: "cancelled", path: target });
-        else if (code === null) send({ type: "error", error: "Could not run git — is it installed?", code: "git_not_found" });
-        else send({ type: "error", error: `git clone exited with code ${code}`, code: "clone_failed" });
-      }
-      try {
-        streamController.close();
-      } catch {
-        // Already closed by a disconnect.
-      }
+    start(value) {
+      streamController = value;
     },
     cancel() {
       controller.abort();
     },
   });
+  const send = (frame: CloneFrame) => {
+    try {
+      streamController.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
+    } catch {
+      // Client gone; the clone still finishes its cleanup.
+    }
+  };
+  const outputReady = Promise.withResolvers<null>();
+  const operation = cloneRepository({
+    origin: url,
+    target,
+    signal: controller.signal,
+    onOutput(text) {
+      send({ type: "output", text });
+      outputReady.resolve(null);
+    },
+  }).then((result) => {
+    clones.delete(id);
+    if (result.ok) send({ type: "done", path: result.value.path });
+    else if (result.code === "clone_cancelled") send({ type: "cancelled", path: target });
+    else send({ type: "error", error: result.error, code: result.code });
+    try {
+      streamController.close();
+    } catch {
+      // Already closed by a disconnect.
+    }
+    return result;
+  });
+  // The helper owns atomic target acquisition. Wait for output or completion so
+  // acquisition conflicts still return HTTP 409 rather than a streamed error.
+  const first = await Promise.race([outputReady.promise, operation]);
+  if (first && !first.ok && (first.code === "clone_target_exists" || first.code === "clone_target_failed")) {
+    return Response.json({ error: first.error, code: first.code }, { status: first.status });
+  }
+  disableIdleTimeout();
   return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
