@@ -879,6 +879,11 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
     }
   }, [cwd, hostId]);
 
+  // Reset per file, not per activation: switching tabs back keeps the user's pick.
+  useEffect(() => {
+    setLanguageOverride(null);
+  }, [filePath]);
+
   // Initial load + SSE watch setup
   useEffect(() => {
     if (!active) {
@@ -891,7 +896,6 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
     setGitDiff(null);
     setDisplayMode("source");
     setWrapLines(false);
-    setLanguageOverride(null);
     setWatching(false);
 
     // Cancel effect-local work on filePath change so a stale in-flight load

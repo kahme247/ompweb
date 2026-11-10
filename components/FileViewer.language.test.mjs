@@ -45,6 +45,12 @@ test("the language picker highlights a file whose extension maps to no grammar, 
   fireEvent.change(picker, { target: { value: "diff" } });
   await waitFor(() => assert.ok(view.container.querySelector(".file-source-view .token")));
 
+  // Leaving the tab and coming back to the same file keeps the pick.
+  view.rerender(React.createElement(FileViewer, { ...props("/ws/change.txt"), active: false }));
+  view.rerender(React.createElement(FileViewer, props("/ws/change.txt")));
+  await waitFor(() => assert.ok(view.container.querySelector(".file-source-view .token")));
+  assert.equal(view.container.querySelector("select.file-viewer-language-select").value, "diff");
+
   view.rerender(React.createElement(FileViewer, props("/ws/other.txt")));
   await waitFor(() => assert.equal(view.container.querySelector(".file-source-view .token"), null));
   assert.equal(view.container.querySelector("select.file-viewer-language-select").value, "");
