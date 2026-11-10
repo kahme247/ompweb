@@ -1140,13 +1140,14 @@ during the wait.
   Active replacement inference also requires unambiguous message admission:
   an intervening message command from another origin cannot supply this
   attempt's identical echo. Retain uncertainty instead of guessing ownership.
-  A later new idle message may renew an ambiguous child through the existing
-  awaited restart lifecycle: require authoritative native settlement, a saved
-  session, no active/queued/background work, dialogs, history mutation or unrelated
-  pending command, and stable child/admission identity across preparation awaits.
-  Recheck before teardown; never infer old acceptance from time or settlement,
-  and never replay old uncertain entries. Preserve accepted host-tool and URI
-  registrations under current policy before submitting to the replacement child.
+  The taint lifts on the same child, never by a restart: only a `get_state`
+  issued after every message command was answered, reporting native settlement
+  with no active/queued/background work, plus no dialog, history mutation or
+  unrelated pending command and stable admission generation, peer admissions and
+  identity across that read (`clearMessageProofTaintIfSettled`, one read at a time,
+  joined by a dispatch arriving during it; at an idle dispatch and on `session_settled`).
+  Never infer old acceptance from time or settlement events, and never replay
+  old uncertain entries.
   A prompt's bubble leaves when the server sees omp's reply and echo;
   the hook shows omp's echoed user message (`echoedUserMessage`) until the
   transcript catch-up has its saved copy (same timestamp and text), so there is
