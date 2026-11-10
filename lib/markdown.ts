@@ -380,6 +380,9 @@ function updateInlineCodeMarker(line: string, initialMarkerSize: number): number
 
 const HTML_TAG = /<[A-Za-z/!][^>]*>/y;
 const BARE_URL = /(?:https?:\/\/|www\.)\S+/iy;
+// CommonMark HTML block starts (types 1, 2 and 6); a line opening with an inline tag (`<b>`) is a paragraph.
+const HTML_BLOCK_START =
+  /^ {0,3}(?:<!--|<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul|pre|script|style|textarea)(?:[\s/>]|$))/i;
 
 /**
  * remark-math pairs any two `$`, so prices ("$5 and $10", "R$5 or US$10")
@@ -391,7 +394,7 @@ const BARE_URL = /(?:https?:\/\/|www\.)\S+/iy;
 // shortcut: pairs within one line, so inline math spanning lines renders as text; upgrade to a micromark extension if that shows up.
 function escapeLiteralDollars(line: string): string {
   // An HTML block keeps backslashes literally; inline tags are skipped below.
-  if (!line.includes("$") || /^ {0,3}<\/?[A-Za-z]/.test(line)) return line;
+  if (!line.includes("$") || HTML_BLOCK_START.test(line)) return line;
   const escaped: number[] = [];
   let opener = -1;
   for (let index = 0; index < line.length; index++) {
