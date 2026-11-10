@@ -6,5 +6,7 @@ import { mock } from "bun:test";
 export async function mockBuiltin(t, name, overrides) {
   const real = { ...(await import(name)) };
   mock.module(name, () => ({ ...real, default: { ...real.default, ...overrides }, ...overrides }));
-  t.after(() => mock.module(name, () => real));
+  // A block body, not `() => mock.module(...)`: with the expression form Bun 1.4.4 kept the fakes
+  // in place for the rest of the file (seen with child_process).
+  t.after(() => { mock.module(name, () => real); });
 }
