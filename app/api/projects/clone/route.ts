@@ -84,7 +84,8 @@ export async function POST(req: Request, { disableIdleTimeout }: { disableIdleTi
   // The helper owns atomic target acquisition. Wait for output or completion so
   // acquisition conflicts still return HTTP 409 rather than a streamed error.
   const first = await Promise.race([outputReady.promise, operation]);
-  if (first && !first.ok && (first.code === "clone_target_exists" || first.code === "clone_target_failed")) {
+  if (first && !first.ok && (first.code === "clone_target_exists" || first.code === "clone_target_failed"
+    || first.code === "project_target_busy" || first.code === "project_reservation_failed")) {
     return Response.json({ error: first.error, code: first.code }, { status: first.status });
   }
   disableIdleTimeout();

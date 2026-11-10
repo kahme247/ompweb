@@ -3,7 +3,7 @@ import { lstat, mkdir, realpath } from "fs/promises";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "path";
 import { promisify } from "util";
 import { cloneDirectoryName } from "./git-clone";
-import { cloneRepository } from "./project-clone";
+import { cloneRepository, withProjectReservation } from "./project-clone";
 import { createChildProcessEnvironment } from "./project-command-env";
 import type { OpResult } from "./hosts/session-ops";
 
@@ -142,59 +142,67 @@ async function prepare(input: {
     if (!cloned.ok) throw new PreparationError(cloned.code, cloned.error, cloned.status);
   }
 
-  const gitDirectory = join(cloneRoot, ".git");
-  let gitStat;
-  try {
-    gitStat = await lstat(gitDirectory);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PreparationError("pool_clone_conflict", "Clone target is not a completed repository");
-    throw error;
-  }
-  if (!gitStat.isDirectory() || gitStat.isSymbolicLink() || await git(cloneRoot, "rev-parse", "--show-toplevel") !== cloneRoot) {
-    throw new PreparationError("pool_clone_conflict", "Clone root must be an independent repository");
-  }
-  // Reject multiple literal URLs: Git fetches the first, whereas config --get returns the last.
-  // remote get-url expands insteadOf rewrites and cannot verify the registered literal origin.
-  if (await git(cloneRoot, "config", "--null", "--get-all", "remote.origin.url") !== `${origin}\0`) {
-    throw new PreparationError("pool_origin_mismatch", "Clone must have exactly one origin matching the registered project");
-  }
-  try {
-    await git(cloneRoot, "rev-parse", "--verify", "HEAD^{commit}");
-  } catch {
-    throw new PreparationError("pool_clone_incomplete", "Clone target has no completed checkout");
-  }
-
-  if (existingWorktree) {
-    const dotGit = await lstat(join(cwd, ".git"));
-    if (!dotGit.isFile() || dotGit.isSymbolicLink()
-      || await git(cwd, "rev-parse", "--show-toplevel") !== cwd
-      || await realpath(await git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")) !== await realpath(gitDirectory)
-      || await git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD") !== branch) {
-      throw new PreparationError("pool_worktree_conflict", "Worktree target is owned by another checkout");
-    }
-    let metadata: { projectId?: string; ref?: string | null; baseCommit?: string };
+  // The clone helper has released its reservation after success. Reacquire it
+  // without nesting before inspecting or consuming any existing checkout.
+  const reserved = await withProjectReservation<PreparedPoolProject>(cloneRoot, async () => {
+    if (!await directoryExists(cloneRoot)) throw new PreparationError("pool_clone_conflict", "Clone target disappeared");
+    const currentWorktree = await directoryExists(cwd);
+    const gitDirectory = join(cloneRoot, ".git");
+    let gitStat;
     try {
-      metadata = JSON.parse(await git(cloneRoot, "config", "--get", metadataKey));
+      gitStat = await lstat(gitDirectory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PreparationError("pool_clone_conflict", "Clone target is not a completed repository");
+      throw error;
+    }
+    if (!gitStat.isDirectory() || gitStat.isSymbolicLink() || await git(cloneRoot, "rev-parse", "--show-toplevel") !== cloneRoot) {
+      throw new PreparationError("pool_clone_conflict", "Clone root must be an independent repository");
+    }
+    // Reject multiple literal URLs: Git fetches the first, whereas config --get returns the last.
+    // remote get-url expands insteadOf rewrites and cannot verify the registered literal origin.
+    if (await git(cloneRoot, "config", "--null", "--get-all", "remote.origin.url") !== `${origin}\0`) {
+      throw new PreparationError("pool_origin_mismatch", "Clone must have exactly one origin matching the registered project");
+    }
+    try {
+      await git(cloneRoot, "rev-parse", "--verify", "HEAD^{commit}");
     } catch {
-      throw new PreparationError("pool_worktree_conflict", "Worktree has no matching pool preparation record");
+      throw new PreparationError("pool_clone_incomplete", "Clone target has no completed checkout");
     }
-    if (!metadata || typeof metadata !== "object" || metadata.projectId !== projectId || metadata.ref !== (ref ?? null)
-      || typeof metadata.baseCommit !== "string" || !/^[a-f0-9]{40,64}$/.test(metadata.baseCommit)) {
-      throw new PreparationError("pool_worktree_conflict", "Creation ID was already used for a different project or ref");
-    }
-    await git(cloneRoot, "cat-file", "-e", `${metadata.baseCommit}^{commit}`);
-    return { cwd, projectRoot: cloneRoot, baseCommit: metadata.baseCommit };
-  }
 
-  // Fetch the remote ref itself, not a possibly unpublished local branch. Never reset or clean.
-  await fetchRemoteRef(cloneRoot, ref ?? "HEAD");
-  const baseCommit = await git(cloneRoot, "rev-parse", "--verify", "FETCH_HEAD^{commit}");
-  await mkdir(sessionRoot, { recursive: true });
-  if (!await directoryExists(sessionRoot) || await directoryExists(cwd)) {
-    throw new PreparationError("pool_worktree_conflict", "Worktree target already exists");
-  }
-  await git(cloneRoot, "worktree", "add", "-b", branch, "--", cwd, baseCommit);
-  // Persist the original base before returning; retries never rebase a dirty or committed session.
-  await git(cloneRoot, "config", metadataKey, JSON.stringify({ projectId, ref: ref ?? null, baseCommit }));
-  return { cwd, projectRoot: cloneRoot, baseCommit };
+    if (currentWorktree) {
+      const dotGit = await lstat(join(cwd, ".git"));
+      if (!dotGit.isFile() || dotGit.isSymbolicLink()
+        || await git(cwd, "rev-parse", "--show-toplevel") !== cwd
+        || await realpath(await git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")) !== await realpath(gitDirectory)
+        || await git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD") !== branch) {
+        throw new PreparationError("pool_worktree_conflict", "Worktree target is owned by another checkout");
+      }
+      let metadata: { projectId?: string; ref?: string | null; baseCommit?: string };
+      try {
+        metadata = JSON.parse(await git(cloneRoot, "config", "--get", metadataKey));
+      } catch {
+        throw new PreparationError("pool_worktree_conflict", "Worktree has no matching pool preparation record");
+      }
+      if (!metadata || typeof metadata !== "object" || metadata.projectId !== projectId || metadata.ref !== (ref ?? null)
+        || typeof metadata.baseCommit !== "string" || !/^[a-f0-9]{40,64}$/.test(metadata.baseCommit)) {
+        throw new PreparationError("pool_worktree_conflict", "Creation ID was already used for a different project or ref");
+      }
+      await git(cloneRoot, "cat-file", "-e", `${metadata.baseCommit}^{commit}`);
+      return { ok: true, value: { cwd, projectRoot: cloneRoot, baseCommit: metadata.baseCommit } };
+    }
+
+    // Fetch the remote ref itself, not a possibly unpublished local branch. Never reset or clean.
+    await fetchRemoteRef(cloneRoot, ref ?? "HEAD");
+    const baseCommit = await git(cloneRoot, "rev-parse", "--verify", "FETCH_HEAD^{commit}");
+    await mkdir(sessionRoot, { recursive: true });
+    if (!await directoryExists(sessionRoot) || await directoryExists(cwd)) {
+      throw new PreparationError("pool_worktree_conflict", "Worktree target already exists");
+    }
+    await git(cloneRoot, "worktree", "add", "-b", branch, "--", cwd, baseCommit);
+    // Persist the original base before returning; retries never rebase a dirty or committed session.
+    await git(cloneRoot, "config", metadataKey, JSON.stringify({ projectId, ref: ref ?? null, baseCommit }));
+    return { ok: true, value: { cwd, projectRoot: cloneRoot, baseCommit } };
+  });
+  if (!reserved.ok) throw new PreparationError(reserved.code, reserved.error, reserved.status);
+  return reserved.value;
 }
