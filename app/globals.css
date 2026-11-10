@@ -1593,6 +1593,10 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   min-height: 35px;
 }
 
+.file-viewer-shell {
+  container: file-viewer / inline-size;
+}
+
 .file-viewer-path {
   flex: 1 1 auto;
   min-width: 48px;
@@ -1676,6 +1680,28 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
 
 .file-viewer-language-select:hover {
   color: var(--text);
+}
+
+/* A narrow panel moves the controls to their own row, wrapping them again
+   rather than clipping the view modes or Download. */
+@container file-viewer (max-width: 440px) {
+  .file-viewer-toolbar {
+    flex-wrap: wrap;
+    row-gap: 5px;
+  }
+
+  .file-viewer-meta {
+    display: none;
+  }
+
+  .file-viewer-controls {
+    flex-shrink: 1;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 5px;
+    min-width: 0;
+    margin-left: auto;
+  }
 }
 
 .file-viewer-icon-button {
