@@ -1,8 +1,11 @@
-import { serveWorkspaceRequest } from "@/lib/api-utils";
-import { getWorkspaceGitStatus } from "@/lib/workspace-files";
+import { apiErrorResponse, opErrorResponse, resolveWorkspaceHost } from "@/lib/api-utils";
 
 export async function GET(request: Request) {
-  return new URL(request.url).searchParams.has("sessionId")
-    ? serveWorkspaceRequest(request, "git-status")
-    : getWorkspaceGitStatus(request);
+  try {
+    const params = new URL(request.url).searchParams;
+    const resolved = await resolveWorkspaceHost(params.get("hostId") ?? undefined, params.get("sessionId"));
+    if ("response" in resolved) return resolved.response;
+    const result = await resolved.host.workspaceOps.gitStatus(resolved.cwd ?? params.get("cwd")?.trim() ?? "", resolved.owner);
+    return result.ok ? Response.json(result.value) : opErrorResponse(result);
+  } catch (error) { return apiErrorResponse(error); }
 }

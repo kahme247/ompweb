@@ -297,8 +297,9 @@ export async function sharedHostInstallReason(installDir: string, ignoredPids: n
   }
   if (process.platform === "darwin" && process.ppid === 1) return "A launchd-managed or orphaned host must be updated manually to avoid duplicate daemon starts";
   try {
+    // Cold CIM startup can exceed five seconds on contended Windows hosts.
     const { stdout } = process.platform === "win32"
-      ? await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"], { timeout: 5000, maxBuffer: 8 * 1024 * 1024, windowsHide: true })
+      ? await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"], { timeout: 20000, maxBuffer: 8 * 1024 * 1024, windowsHide: true })
       : await exec("ps", ["-axo", "pid=,command="], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 });
     const rows: { pid: number; command: string; executable?: string }[] = process.platform === "win32"
       ? (JSON.parse(stdout) as { ProcessId: number; CommandLine: string; ExecutablePath: string }[]).map((row) => ({ pid: row.ProcessId, command: row.CommandLine || "", executable: row.ExecutablePath }))

@@ -35,6 +35,9 @@ export async function POST(req: Request) {
     if (!isRecord(body)) return Response.json({ error: "A session request object is required", code: "invalid_request" }, { status: 400 });
     const { cwd: requestedCwd, hostId, poolId, projectId, creationId, ref, ...command } = body;
     delete command.intentHash;
+    if (Object.hasOwn(command, "uploadProofs") || Object.hasOwn(command, "uploads")) {
+      return Response.json({ error: "Files attach only to an existing session", code: "invalid_uploads" }, { status: 400 });
+    }
     const pooled = poolId !== undefined || projectId !== undefined || creationId !== undefined || ref !== undefined;
     if (pooled && (hostId !== undefined || requestedCwd !== undefined || typeof poolId !== "string" || typeof projectId !== "string" || typeof creationId !== "string" || (ref !== undefined && typeof ref !== "string"))) {
       return Response.json({ error: "Pool creation requires creationId, poolId and projectId, without hostId or cwd", code: "invalid_pool_target" }, { status: 400 });
@@ -62,16 +65,18 @@ export async function POST(req: Request) {
       if (promptCommand.type === "ensure_session") return null;
       return session.send(promptCommand, { preserveUnknownDelivery });
     };
+    const preparing = promptCommand.type !== "ensure_session" || !!(provider && modelId) || !!thinkingLevel || !!name;
 
     if (pooled) {
       // The hash is derived here from every effectful field, including unknown command options.
       const intent = { ...promptCommand, provider, modelId, toolNames, thinkingLevel, advisor, name };
       const result = await startPooledSession({ creationId: creationId as string, poolId: poolId as string, projectId: projectId as string, ...(ref === undefined ? {} : { ref: ref as string }), intent }, async (host, prepared, id, onStarted) => {
-        const started = await startNewRpcSession(host, prepared.cwd, toolNames, advisor === true, id);
+        const started = await startNewRpcSession(host, prepared.cwd, toolNames, advisor === true, preparing, id);
         if (!started.ok) throw new HostOpError(started.status, started.code, started.error);
         const { session, realSessionId } = started.value;
         await onStarted(realSessionId);
-        return { sessionId: realSessionId, data: await initialize(session, true) };
+        const run = () => initialize(session, true);
+        return { sessionId: realSessionId, data: await (preparing ? session.withPendingCommand(run, true) : run()) };
       });
       return Response.json({ success: true, ...result });
     }
@@ -81,11 +86,12 @@ export async function POST(req: Request) {
     }
     const target = resolveHostOrError(hostId);
     if ("response" in target) return target.response;
-    const started = await startNewRpcSession(target.host, requestedCwd, toolNames, advisor === true);
+    const started = await startNewRpcSession(target.host, requestedCwd, toolNames, advisor === true, preparing);
     if (!started.ok) return opErrorResponse(started);
     const { session, realSessionId } = started.value;
     try {
-      return Response.json({ success: true, sessionId: realSessionId, data: await initialize(session, false) });
+      const run = async () => Response.json({ success: true, sessionId: realSessionId, data: await initialize(session, false) });
+      return await (preparing ? session.withPendingCommand(run, true) : run());
     } catch (error) {
       if (error instanceof WebRpcError && error.code === "host_offline") {
         return Response.json({ error: error.message, code: error.code, hostOffline: true, delivery: error.delivery, sessionId: realSessionId }, { status: 503 });

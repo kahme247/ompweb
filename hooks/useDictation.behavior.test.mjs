@@ -270,6 +270,53 @@ test("the meter's audio context is resumed inside the click, and again if the mi
   assert.notEqual(view.result.current.captureRef.current.analyser, null);
 });
 
+test("a meter the browser suspends mid-recording or during a pause is resumed", async () => {
+  const contexts = [];
+  let resumes = 0;
+  class TrackingAudioContext extends FakeAudioContext {
+    constructor() {
+      super();
+      contexts.push(this);
+    }
+    resume() {
+      resumes += 1;
+      this.state = "running";
+      return super.resume();
+    }
+  }
+  override(window, "AudioContext", TrackingAudioContext);
+  override(globalThis, "AudioContext", TrackingAudioContext);
+  const { view } = mountDictation();
+  await act(async () => { view.result.current.toggle(); });
+  await settle();
+  const ctx = contexts[0];
+  const before = resumes;
+
+  ctx.state = "interrupted";
+  ctx.onstatechange();
+  assert.equal(resumes, before + 1, "a mid-take interruption resumes the meter");
+  ctx.onstatechange();
+  assert.equal(resumes, before + 1, "a running meter is not resumed again");
+
+  await act(async () => { view.result.current.togglePause(); });
+  await settle(40);
+  ctx.state = "suspended";
+  ctx.onstatechange();
+  assert.equal(resumes, before + 2, "a meter suspended during the pause is resumed");
+  // A suspension the browser reported no change for (or a refused resume).
+  ctx.state = "suspended";
+  await act(async () => { view.result.current.togglePause(); });
+  await settle();
+  assert.equal(ctx.state, "running", "resuming the take resumes a suspended meter");
+
+  await act(async () => { view.result.current.stop(); });
+  await settle();
+  const afterStop = resumes;
+  ctx.state = "suspended";
+  ctx.onstatechange();
+  assert.equal(resumes, afterStop, "a finished take's context is left alone");
+});
+
 test("pause then resume keeps the timer base and analyser while accumulating paused time", async () => {
   const { view } = mountDictation();
 

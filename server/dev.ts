@@ -11,7 +11,8 @@ const root = process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
 // Bundled on each start (and each --hot re-evaluation); its hash, like a build's, versions the worker's URL.
 const worker = await buildEventStreamWorker(root);
 const env = clientEnv(root, worker);
-if (Object.keys(env).some((name) => !process.env[name])) {
+// Empty commit fields are initialized values; a new worker hash during hot reload must not start a second listener.
+if (Object.keys(env).some((name) => process.env[name] === undefined)) {
   // bunfig.toml's [serve.static] env inlines OMP_WEB_PUBLIC_* from the environment Bun started with, so setting them
   // now is too late: run once more with them set and the same flags (--hot). The guard survives a --hot re-evaluation.
   const child = (globalThis.__ompWebDevServer ??= Bun.spawn([process.execPath, ...process.execArgv, ...process.argv.slice(1)], {

@@ -6,6 +6,7 @@ import { getFileIcon } from "./FileIcons";
 import { DiffView } from "./FileViewer";
 import { GIT_STATUS_COLORS, GIT_STATUS_LABEL_KEYS } from "./FileExplorer";
 import { translate, useI18n } from "@/lib/i18n";
+import { formatApiError } from "@/lib/i18n/api-error";
 import {
   getFileDirectory,
   getFileName,
@@ -24,33 +25,36 @@ const COLLAPSE_REASON_LABEL_KEYS: Record<GitCollapseReason, string> = {
 interface Props {
   cwd: string;
   sourceSessionId?: string | null;
+  hostId: string;
   refreshKey?: number;
   onOpenFile: (filePath: string, fileName: string, sourceSessionId?: string | null) => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onRefreshDone?: () => void;
 }
 
-async function fetchStatus(cwd: string, sourceSessionId?: string | null): Promise<GitStatusResponse> {
-  const params = new URLSearchParams({ cwd });
+async function fetchStatus(cwd: string, hostId: string, sourceSessionId?: string | null): Promise<GitStatusResponse> {
+  const params = new URLSearchParams({ cwd, hostId });
   if (sourceSessionId) params.set("sessionId", sourceSessionId);
   const res = await fetch(`/api/git/status?${params.toString()}`);
   if (!res.ok) {
-    throw new Error(translate("gitChanges.loadFailed", { status: res.status }));
+    const body = await res.json().catch(() => ({})) as { error?: string; code?: string };
+    throw new Error(formatApiError({ ...body, error: body.error ?? translate("gitChanges.loadFailed", { status: res.status }) }));
   }
   return res.json() as Promise<GitStatusResponse>;
 }
 
-async function fetchPatch(cwd: string, filePath: string, sourceSessionId?: string | null): Promise<GitFileDiffResponse> {
-  const params = new URLSearchParams({ cwd, path: filePath });
+async function fetchPatch(cwd: string, filePath: string, hostId: string, sourceSessionId?: string | null): Promise<GitFileDiffResponse> {
+  const params = new URLSearchParams({ cwd, path: filePath, hostId });
   if (sourceSessionId) params.set("sessionId", sourceSessionId);
   const res = await fetch(`/api/git/diff?${params.toString()}`);
   if (!res.ok) {
-    throw new Error(translate("gitChanges.diffLoadFailed", { status: res.status }));
+    const body = await res.json().catch(() => ({})) as { error?: string; code?: string };
+    throw new Error(formatApiError({ ...body, error: body.error ?? translate("gitChanges.diffLoadFailed", { status: res.status }) }));
   }
   return res.json() as Promise<GitFileDiffResponse>;
 }
 
-export function GitChangesPanel({ cwd, sourceSessionId, refreshKey, onOpenFile, onAtMention, onRefreshDone }: Props) {
+export function GitChangesPanel({ cwd, hostId, sourceSessionId, refreshKey, onOpenFile, onAtMention, onRefreshDone }: Props) {
   const { t, tn } = useI18n();
   const [files, setFiles] = useState<GitStatusResponse["files"]>([]);
   const [isRepo, setIsRepo] = useState(false);
@@ -79,7 +83,7 @@ export function GitChangesPanel({ cwd, sourceSessionId, refreshKey, onOpenFile, 
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchStatus(cwd, sourceSessionId)
+    fetchStatus(cwd, hostId, sourceSessionId)
       .then((status) => {
         if (cancelled) return;
         const nextFiles = status.isGitRepository ? status.files : [];
@@ -108,7 +112,7 @@ export function GitChangesPanel({ cwd, sourceSessionId, refreshKey, onOpenFile, 
         onRefreshDoneRef.current?.();
       });
     return () => { cancelled = true; };
-  }, [cwd, sourceSessionId, refreshToken]);
+  }, [cwd, hostId, sourceSessionId, refreshToken]);
 
   useEffect(() => {
     if (!selectedPath) {
@@ -120,7 +124,7 @@ export function GitChangesPanel({ cwd, sourceSessionId, refreshKey, onOpenFile, 
     const requestId = ++patchRequestRef.current;
     setPatchLoading(true);
     setPatchError(null);
-    fetchPatch(cwd, selectedPath, sourceSessionId)
+    fetchPatch(cwd, selectedPath, hostId, sourceSessionId)
       .then((diff) => {
         if (requestId !== patchRequestRef.current) return;
         setPatchSupported(diff.supported);
@@ -135,7 +139,8 @@ export function GitChangesPanel({ cwd, sourceSessionId, refreshKey, onOpenFile, 
       .finally(() => {
         if (requestId === patchRequestRef.current) setPatchLoading(false);
       });
-  }, [cwd, sourceSessionId, selectedPath, refreshToken]);
+    return () => { patchRequestRef.current = requestId + 1; };
+  }, [cwd, hostId, sourceSessionId, selectedPath, refreshToken]);
 
   const [primaryFiles, attributeFiles] = useMemo(() => {
     const q = filter.trim().toLowerCase();

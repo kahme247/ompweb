@@ -11,8 +11,10 @@ const originalFetch = globalThis.fetch;
 const originalWorker = globalThis.Worker;
 afterEach(async () => {
   // The viewer's lazy chunks resolve after the assertions; let them land before jsdom closes.
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  cleanup();
+  await React.act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    cleanup();
+  });
   globalThis.fetch = originalFetch;
   globalThis.Worker = originalWorker;
   delete window.matchMedia;
@@ -37,6 +39,7 @@ async function renderPreview(filePath, opened) {
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   const view = render(React.createElement(FileViewer, {
     filePath,
+    hostId: "local",
     cwd: "/ws",
     sourceSessionId: "s1",
     onOpenFile: (file) => opened.push(file),
@@ -92,14 +95,14 @@ test("a viewer reads Git changes from its immutable source owner when another ow
     const content = owner === "worker-one" ? "FIRST OWNER SOURCE" : owner === "worker-two" ? "SECOND OWNER SOURCE" : "CENTRAL DECOY SOURCE";
     return { ok: true, json: async () => ({ content, language: "text", size: content.length }) };
   };
-  const props = { filePath: "/shared/shared.txt", cwd: "/shared", sourceSessionId: "worker-one" };
+  const props = { filePath: "/shared/shared.txt", hostId: "h1", cwd: "/shared", sourceSessionId: "worker-one" };
   const view = render(React.createElement(FileViewer, props));
   await waitFor(() => assert.ok(view.queryByText("FIRST OWNER SOURCE")));
   const firstDiff = await waitFor(() => view.getByRole("button", { name: translate("fileViewer.compareWithHead") }));
   fireEvent.click(firstDiff);
   await waitFor(() => assert.equal(firstDiff.getAttribute("aria-pressed"), "true"));
   await waitFor(() => assert.ok(view.queryByText("FIRST OWNER PATCH", { exact: false })));
-  view.rerender(React.createElement(FileViewer, { ...props, sourceSessionId: "worker-two" }));
+  view.rerender(React.createElement(FileViewer, { ...props, hostId: "h2", sourceSessionId: "worker-two" }));
   await waitFor(() => assert.ok(view.queryByText("SECOND OWNER SOURCE")));
   const secondDiff = await waitFor(() => view.getByRole("button", { name: translate("fileViewer.compareWithHead") }));
   fireEvent.click(secondDiff);

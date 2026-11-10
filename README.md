@@ -42,7 +42,12 @@ The single manifest link requests `/api/manifest` with credentials; that endpoin
 uses the existing web-password guard and private, revalidating caching. Its
 192×192 and 512×512 PNG icons are embedded from the packaged assets because
 Android's native installer fetches ordinary icon URLs without authentication
-cookies. The app still launches at `/` with scope `/`.
+cookies. The app still launches at `/` with scope `/`. Its `theme_color` and
+`background_color` come from the manifest link's `?theme=` parameter: Chrome
+refreshes an installed app's manifest without cookies, so the server renders the
+selected theme's color (remembered in the `omp-theme-color` cookie) into the
+link. Chrome 153 and later color an installed app's Android navigation bar from
+it after Chrome next checks the app for manifest updates.
 
 Keep Cloudflare Access and application authentication enabled; no public
 manifest exception or Access bypass rule is needed. This does not add offline
@@ -565,10 +570,28 @@ Notes:
 - **Trust:** a linked host runs omp with full tool access on that machine for
   whoever controls the ompweb server or the token. Keep the token private and
   revoke it when a machine is retired.
-- **Not available on remote hosts yet:** the file explorer, Git and worktree
-  panels, directory browsing, archiving sessions, and the Skills, Plugins, Agents
-  and MCP settings only work on the machine ompweb runs on. Chat, session history,
-  notifications and starting sessions work on every host.
+- **Workspace files on every host:** Explorer, previews, downloads, file search,
+  @-mentions and live file watching use the owning machine's daemon, including
+  This machine. Explorer uploads accept up to 2 GiB per file with no 100 MiB batch
+  cap; preview limits remain 256 KiB for text and 10 MiB for images/DOCX.
+  File tabs retain their source session, host and workspace when you switch chats;
+  paths from another conversation cannot be mentioned into the selected chat.
+  An unavailable or older daemon reports offline or asks for an update; main
+  never substitutes its own filesystem. Unprepared pool chats have no guessed
+  filesystem to browse.
+- **Git and worktrees on every host:** status, diffs, GitHub issue links, and
+  worktree creation, selection and removal run on the owning daemon. Dirty
+  worktrees still require explicit force confirmation. Switching a worktree
+  changes where new sessions start, not an open conversation.
+- **Directory browsing and cloning on every host:** the Add workspace picker
+  navigates that host's directories and clones HTTPS/SSH repositories there.
+  Cancelling waits for the clone process and safe cleanup; interrupted connections
+  report an unknown outcome rather than pretending the clone was cancelled.
+  If the destination changes during cleanup, captured data is preserved in a
+  private quarantine and the error gives its location; inspect it before removing
+  or restoring anything.
+- **Not available on remote hosts yet:** session archiving and the Skills,
+  Plugins, Agents and MCP settings. Transcript search still scans this machine.
 - **Agent-started sessions:** with agent tools enabled, an agent can pass a `host`
   to `new_session` (it defaults to the agent's own host). A remote host asks for
   confirmation each time unless **Agents can start sessions here without asking**
@@ -695,7 +718,7 @@ Stop it with `Stop-ScheduledTask ompweb-host`, then end the running host with
 - **Draft Recovery**: Unsent text stays scoped to its conversation or new-session workspace and is restored after Back/Forward navigation or reload in the same tab when browser storage is available (up to 50 drafts). Images and file attachments remain in memory only.
 - **Live Plans & Subagents**: Collapsible panels pinned above the composer track live todo phases and running subagents (status, tool, retries, tokens/cost, nested tasks) with transcript dialogs and history recovery.
 - **Tool Preset Picker**: Choose the toolset for new sessions in the composer — `none` / `default` (`read,bash,edit,write`) / `full` (all tools including subagents). Persists to localStorage.
-- **File Explorer & Previews**: Browse workspaces side-by-side with chat; preview code, markdown, Mermaid, images, audio, PDFs, and diffs with allow-listed access. The **Show hidden items** switch lists build and dependency folders.
+- **File Explorer & Previews**: Browse workspaces side-by-side with chat; preview code, markdown, Mermaid, images, audio, PDFs, and diffs with allow-listed access.
 - **Git Worktree Support**: Create, switch, and manage Git worktrees directly from the sidebar; sessions and file roots stay grouped by project.
 - **Remote Hosts**: Link other machines (for example a MacBook) and run sessions there from one ompweb. The sidebar groups sessions by host. See [Run sessions on another machine](#run-sessions-on-another-machine).
 - **Usage & Analytics**: Dashboard in **Settings → Usage** for tokens, costs, cache savings, and breakdowns by provider / model / day / project with SQLite persistence.

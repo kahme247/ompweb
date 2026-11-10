@@ -60,7 +60,7 @@ interface PendingCommand {
   resolve: (data: unknown) => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
-  onReply?: () => void;
+  onReply?: (success: boolean, id: string) => void;
 }
 
 export interface RpcProcessOptions {
@@ -76,9 +76,8 @@ export interface RpcProcessOptions {
   onExit?: (info: { code: number | null; signal: NodeJS.Signals | null; stderrTail: string }) => void;
   /** Byte transport to run over. Omitted → spawn the installed omp (see spawnLocalRpcTransport). */
   transport?: RpcTransport;
-  /** A child that outlived the server that spawned it (see adoptRpcSession): no
-   * ready wait, the decoder starts at this version and drops `rpc_chunk`
-   * records until a frame starts, and frames are held until `release` (after `replay`). */
+  /** The daemon already owns readiness/negotiation, or a legacy child outlived its server:
+   * decode v2 immediately, skip partial chunk tails, and hold frames until `release` (after `replay`). */
   adopted?: { protocolVersion: 2 };
   /** Injectable process boundary for deterministic transport tests. */
   dependencies?: {
@@ -165,7 +164,7 @@ export class RpcProcess {
       // It announced readiness and negotiated this version with the server that spawned it.
       this.protocolVersion = options.adopted.protocolVersion;
       this.heldFrames = [];
-      ready.resolve({ type: "ready", supportedProtocolVersions: [options.adopted.protocolVersion] });
+      ready.resolve({ type: "ready", supportedProtocolVersions: [options.adopted.protocolVersion], supportsBashExcludeFromContext: this.transport.supportsBashExcludeFromContext === true });
     }
 
     let decoder = new RpcFrameDecoder();
@@ -335,8 +334,9 @@ export class RpcProcess {
    * reclaims wedged children via idle-kill and dispose(). Callers that want a
    * cap pass `timeoutMs` (>0); when set, the timer is unref'd so it never
    * keeps the event loop alive on its own. `onReply` runs synchronously when
-   * the response is read, before any frame after it is dispatched. */
-  sendCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number, onReply?: () => void): Promise<T> {
+   * the response is read, before any frame after it is dispatched; it is told whether the command succeeded and its
+   * wire id (what omp's `prompt_result` names). */
+  sendCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number, onReply?: (success: boolean, id: string) => void): Promise<T> {
     if (this.exited) {
       return Promise.reject(new Error("omp RPC process has exited"));
     }
@@ -421,7 +421,7 @@ export class RpcProcess {
     }
     this.pending.delete(id);
     if (entry.timer) clearTimeout(entry.timer);
-    entry.onReply?.();
+    entry.onReply?.(response.success === true, id);
     if (response.success) {
       entry.resolve(response.data);
     } else {
@@ -429,13 +429,19 @@ export class RpcProcess {
     }
   }
 
-  /** Graceful shutdown: close stdin (omp exits on EOF), escalate to SIGTERM
-   * then SIGKILL on the whole process group. Resolves once the process has
-   * exited. Safe to call during server teardown — escalation timers are
-   * unref'd so they never keep the event loop alive on their own. */
-  async dispose(gracePeriodMs = 5_000): Promise<void> {
+  /** Close shared membership unless explicitly stopping the child. Legacy shutdown
+   * closes stdin, escalates to SIGTERM/SIGKILL and waits for actual exit. */
+  async dispose(gracePeriodMs = 5_000, stopShared = false): Promise<void> {
     if (this.exited) return;
-    this.transport.endInput();
+    if (this.transport.hostOwnedLifecycle) {
+      if (!stopShared) {
+        this.transport.close!();
+        return;
+      }
+      this.transport.killTree(false);
+    } else {
+      this.transport.endInput();
+    }
     const timer = setTimeout(() => {
       if (!this.exited) this.transport.killTree(false);
     }, gracePeriodMs);

@@ -9,6 +9,7 @@ interface WorktreeEntry {
 }
 
 interface WorktreeState {
+  hostId: string;
   /** The cwd this data was fetched for — guards against stale responses */
   forCwd: string;
   projectRoot: string;
@@ -17,12 +18,15 @@ interface WorktreeState {
    *  because subdir sessions keep their own project identity */
   isTopLevel: boolean;
   worktrees: WorktreeEntry[];
+  error?: string;
 }
 /** The active Git workspace's worktrees plus the actions that change them
  *  (owned by SessionSidebar, rendered by the file panel's Worktrees tab). */
 interface WorktreeContext {
+  hostId: string;
   projectRoot: string;
   worktrees: WorktreeEntry[];
+  error?: string;
   /** Path of the worktree the workspace currently points at. */
   currentPath: string;
   select(path: string): void;

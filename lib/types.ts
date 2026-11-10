@@ -26,6 +26,8 @@ export interface SessionEntryBase {
   id: string;
   parentId: string | null;
   timestamp: string;
+  /** Client intent metadata stored on native message/custom-message entries, never sent to the model. */
+  clientMessageId?: string;
 }
 
 export interface TextContent {
@@ -73,6 +75,7 @@ export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
   timestamp?: number;
+  clientMessageId?: string;
   /** Rendered from a `branch_summary` entry, not a real prompt: omp cannot branch at it. */
   branchSummary?: true;
 }
@@ -125,6 +128,7 @@ export interface CustomMessage {
   display: boolean;
   details?: unknown;
   timestamp?: number;
+  clientMessageId?: string;
 }
 
 export interface BashExecutionMessage {
@@ -207,6 +211,8 @@ export type ExtensionUiRequest =
       method: "input";
       title: string;
       placeholder?: string;
+      secret?: boolean;
+      password?: boolean;
       timeout?: number;
       expiresAt?: number;
     }
@@ -474,6 +480,10 @@ export interface ArchivedSessionInfo {
   firstMessage: string;
   size: number;
   status?: "complete" | "interrupted" | "aborted" | "error" | "pending" | "unknown";
+  /** In-progress/interrupted restore evidence; its unique capture key is not an actionable restore target. */
+  restorePending?: true;
+  /** Host whose archive holds it ("local" for this machine). Set by the all-hosts list; a host's own list leaves it out. */
+  hostId?: string;
 }
 
 /** Workspace-level omp launch configuration; only affects omp children spawned for that workspace. */
@@ -520,16 +530,28 @@ export interface SessionContext {
   model: { provider: string; modelId: string } | null;
   /** Latest persisted todo snapshot on the selected session branch. */
   todoPhases: TodoPhase[];
+  /** Correlated native messages retained in the session's append history, including compacted entries. */
+  persistedClientMessageIds?: string[];
+  /** Explicit native withdrawals/consumption records; absence alone never resolves a handoff. */
+  resolvedClientMessageIds?: string[];
 }
 
 /** An omp child that exited unexpectedly; retained until that session starts again. */
 /** A host tool call for a session no tab is watching, sent to every open tab. */
 export interface CrossSessionHostToolCall {
   sessionId: string;
+  hostId: string;
+  cwd: string;
   id: string;
   toolName: string;
   arguments: Record<string, unknown>;
 }
+
+export type CrossSessionHostToolEvent = (CrossSessionHostToolCall & { type?: "host_tool_call" }) | {
+  type: "host_tool_cancel";
+  sessionId: string;
+  targetId: string;
+};
 
 export interface ExitedRpcSession {
   id: string;
@@ -541,4 +563,35 @@ export interface ExitedRpcSession {
   signal: string | null;
   /** Last stderr line, if any. */
   detail: string;
+}
+
+/** How a held message goes to omp (docs/specs/2026-11-04-message-outbox-design.md O3). */
+export type OutboxMode = "prompt" | "followUp" | "steer";
+
+/** A message omp-web holds for a session until omp has it (the web server's outbox, lib/message-outbox.ts). */
+export interface OutboxEntry {
+  id: string;
+  sessionId: string;
+  mode: OutboxMode;
+  message: string;
+  images?: { type: "image"; data: string; mimeType: string }[];
+  uploads?: string[];
+  state: "held" | "waiting_host" | "delivering" | "failed" | "delivered";
+  error?: string;
+  /** A lost reply: omp may have it; never resent by itself. */
+  mayHaveBeenSent?: boolean;
+  /** Only while delivering: authoritative persisted history captured before dispatch, never retained in tombstones. */
+  previousEntryIds?: string[];
+  /** Delivered native input still needs its correlated view; none is an explicit non-message completion. */
+  settlement?: "native" | "none" | "uncorrelated";
+  createdAt: number;
+}
+
+/** The session channel's outbox snapshot: every entry not yet delivered, in submission order. */
+export interface OutboxUpdateFrame {
+  type: "outbox_update";
+  entries: OutboxEntry[];
+  /** Recent delivered/removed ids: a late first subscription can retire browser copies without seeing their removal. */
+  settledIds: string[];
+  nativeSettledIds?: string[];
 }

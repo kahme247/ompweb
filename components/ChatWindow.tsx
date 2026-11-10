@@ -2,13 +2,15 @@
 import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
-import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import { ArrowDown, ChevronDown, ChevronUp, Paperclip, Square } from "lucide-react";
+import type { AgentMessage, AssistantMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
-import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
+import { collectToolResults, isGroupAnchor, planTranscriptRows, type TranscriptRow } from "@/lib/chat-transcript-plan";
 import { isReplyBlock } from "@/lib/message-display";
 import { resolveForkTargets } from "@/lib/chat-fork";
-import { MessageView } from "./MessageView";
+import { renderTranscriptGroupRow, type RenderMessage } from "./ChatWindow-transcript-group-row";
+import { ChatLiveTail } from "./ChatWindow-live-tail";
+import { HeldMessageView, MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
@@ -42,7 +44,10 @@ import {
 } from "@/lib/chat-lazy-load";
 import { getDraftSummary, type ChatDraft } from "@/lib/draft-store";
 import { isLinkUp, type HostStatus } from "@/lib/hosts/host";
-import { newChatDraftKey, remoteHostId } from "@/lib/project-ordering";
+import { newChatDraftKey } from "@/lib/project-ordering";
+import { WorkspaceFileContext } from "@/lib/workspace-file-context";
+import type { WorkspaceFileSource } from "@/lib/workspace-types";
+import { getFileName } from "@/lib/file-paths";
 
 interface Props {
   session: SessionInfo | null;
@@ -83,7 +88,7 @@ interface Props {
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   onProviderUsageContextChange?: (context: ProviderUsageContext | null) => void;
-  onOpenFile?: (filePath: string) => void;
+  onOpenFile?: (filePath: string, name: string, source: WorkspaceFileSource) => void;
   /** Handles the open_url host tool; returns the result text for the agent. */
   onOpenUrl?: (url: string) => string;
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
@@ -173,16 +178,6 @@ function assistantSpeech(
   return null;
 }
 
-function withAssistantBlocks(
-  message: AssistantMessage,
-  content: AssistantContentBlock[],
-  options: { omitUsage?: boolean } = {},
-): AssistantMessage {
-  const next = { ...message, content };
-  if (options.omitUsage) next.usage = undefined;
-  return next;
-}
-
 // Retain the last successful value across welcome-screen remounts, not reloads.
 let lastKnownOmpVersion: string | undefined;
 
@@ -216,67 +211,6 @@ export function OmpRuntimeVersion() {
       omp <span style={{ color: "var(--text)" }}>{version === undefined ? t("appShell.loading") : version ? `v${version}` : t("chatWindow.versionNotFound")}</span>
     </span>
   );
-}
-
-function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messageCount: number; toolCallCount: number; children: () => ReactNode }) {
-  const { t, tn } = useI18n();
-  const [expanded, setExpanded] = useState(false);
-  const parts = [t("chatWindow.processDetails"), tn("chatWindow.messageCount", messageCount)];
-  if (toolCallCount > 0) parts.push(tn("chatWindow.toolCallCount", toolCallCount));
-
-  return (
-    <div style={{ marginBottom: 4 }}>
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((v) => !v)}
-        className="process-details-toggle"
-        title={expanded ? t("chatWindow.collapseProcessDetails") : t("chatWindow.expandProcessDetails")}
-      >
-        <Layers
-          size={12}
-          strokeWidth={1.8}
-          aria-hidden="true"
-          style={{ flexShrink: 0, color: "var(--accent)" }}
-        />
-        <ChevronDown
-          size={12}
-          strokeWidth={1.8}
-          aria-hidden="true"
-          style={{
-            flexShrink: 0,
-            transform: expanded ? "rotate(180deg)" : "none",
-            transition: "transform var(--dur-fast) var(--ease-out-warm)",
-          }}
-        />
-        <span className="process-details-label">
-          {parts.join(" · ")}
-        </span>
-      </button>
-      {expanded && (
-        <div style={{ marginTop: 3 }}>
-          {children()}
-        </div>
-      )}
-    </div>
-  );
-}
-
-type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] }) => ReactNode;
-
-/** Render a folded activity run exactly as it streamed: one entry per piece, never merged across messages. */
-export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityPiece[], renderMessage: RenderMessage): ReactNode[] {
-  return pieces.map((piece, pieceIdx) => {
-    if (!piece.blocks) return renderMessage(piece.index, { attachRef: false, keyPrefix: "activity" });
-    const msg = messages[piece.index] as AssistantMessage;
-    return renderMessage(piece.index, {
-      attachRef: false,
-      keyPrefix: `activity-${pieceIdx}`,
-      messageOverride: { ...withAssistantBlocks(msg, piece.blocks, { omitUsage: true }), errorMessage: undefined },
-      showTimestamp: false,
-      sourceBlockIndices: piece.blocks.map((block) => msg.content.indexOf(block)),
-    });
-  });
 }
 
 interface CommittedTranscriptProps {
@@ -445,52 +379,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
       rendered.push(renderMessage(row.index));
       continue;
     }
-    const { userIndex: userIdx, endIndex: endIdx, segments } = row;
-
-    if (rendersFlat(row)) {
-      // Live tail: stays flat so streaming updates and tool progress stay in
-      // view, and folds once the run ends.
-      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
-        rendered.push(renderMessage(renderIdx));
-      }
-      continue;
-    }
-
-    rendered.push(renderMessage(userIdx));
-    // A message split across segments keeps its navigation ref on the first one.
-    const attached = new Set<number>();
-    segments.forEach((segment, segmentIdx) => {
-      if (segment.kind === "text") {
-        const msg = messages[segment.index] as AssistantMessage;
-        const override = withAssistantBlocks(msg, segment.blocks, { omitUsage: !segment.last });
-        if (!segment.last) override.errorMessage = undefined;
-        rendered.push(renderMessage(segment.index, {
-          attachRef: !attached.has(segment.index),
-          keyPrefix: `text-${segmentIdx}`,
-          messageOverride: override,
-          ...(segment.last ? {} : { showTimestamp: false }),
-          // Thinking can ride in a text segment; deferred text loads by source index.
-          sourceBlockIndices: segment.blocks.map((block) => msg.content.indexOf(block)),
-        }));
-        attached.add(segment.index);
-        return;
-      }
-      const refIdx = segment.pieces
-        .filter((piece) => !attached.has(piece.index))
-        .map((piece) => visibleRefIndexByMessage.get(piece.index))
-        .find((value): value is number => typeof value === "number");
-      for (const piece of segment.pieces) attached.add(piece.index);
-      rendered.push(
-        <div
-          key={`activity-${userIdx}-${segmentIdx}`}
-          ref={refIdx === undefined ? undefined : (el) => { messageRefs.current[refIdx] = el; }}
-        >
-          <ProcessDetailsGroup messageCount={segment.stepCount} toolCallCount={segment.toolCallCount}>
-            {() => renderActivityPieces(messages, segment.pieces, renderMessage)}
-          </ProcessDetailsGroup>
-        </div>,
-      );
-    });
+    rendered.push(...renderTranscriptGroupRow(row, { messages, renderMessage, flat: rendersFlat(row), messageRefs, visibleRefIndexByMessage }));
   }
   return (
     <>
@@ -509,8 +398,15 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessionCreationId, newSessionPoolId, newSessionProjectId, newSessionInitialization, onNewSessionInitialization, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessionCreationId, newSessionPoolId, newSessionProjectId, newSessionInitialization, onNewSessionInitialization, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile: onOpenWorkspaceFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
   const { t, tn } = useI18n();
+  const fileSource = useMemo<WorkspaceFileSource>(() => ({
+    hostId: session?.hostId ?? newSessionHostId ?? "local",
+    cwd: session?.cwd ?? newSessionCwd, sessionId: session?.id ?? null,
+  }), [session?.hostId, session?.cwd, session?.id, newSessionHostId, newSessionCwd]);
+  const onOpenFile = useMemo(() => onOpenWorkspaceFile
+    ? (filePath: string) => onOpenWorkspaceFile(filePath, getFileName(filePath), fileSource)
+    : undefined, [onOpenWorkspaceFile, fileSource]);
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
   const internalChatInputRef = useRef<ChatInputHandle | null>(null);
@@ -567,7 +463,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     isNew, hostStatus: frameHostStatus,
     sessionIdRef, messagesEndRef, scrollContainerRef, holdScrollPosition,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
-    handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
+    handleSteer, handleFollowUp, handleAbortCompaction, handleCompact,
+    heldMessages, deleteHeldMessage,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleThinkingLevelChange, handleFastModeChange, handleSlowModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
@@ -577,7 +474,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
   } = useAgentSession({
     session, newSessionCwd, newSessionHostId, newSessionCreationId, newSessionPoolId, newSessionProjectId, newSessionInitialization, onNewSessionInitialization, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
     modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
-    onOpenFile, onOpenUrl,
+    onOpenFile: onOpenWorkspaceFile, onOpenUrl,
   });
   useEffect(() => {
     if (!autoplayPendingRef.current) return;
@@ -751,7 +648,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     holdScrollPosition,
     onTargetHandled: onSearchTargetHandled,
   });
-  const remoteWorkspace = session ? remoteHostId(session.hostId) !== undefined : Boolean(newSessionPoolId) || newSessionHostId !== undefined;
   // The hosts channel is the source of truth; a frame only speaks before its first snapshot.
   const currentHostStatus = channelHostStatus ?? frameHostStatus;
   const hostBanner = currentHostStatus && !isLinkUp(currentHostStatus) ? <HostOfflineBanner host={hostLabel ?? ""} /> : null;
@@ -1035,18 +931,17 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
   }, [advisorEnabled]);
 
   // GitHub repo of the session checkout, so bare `#123` in messages links to it.
-  // A remote session's cwd is a path on its host, which this server cannot inspect.
   const [githubRepo, setGithubRepo] = useState<string | null>(null);
   useEffect(() => {
     setGithubRepo(null);
-    if (!messageCwd || remoteWorkspace) return;
+    if (!messageCwd) return;
     const controller = new AbortController();
-    fetch(`/api/github-repo?cwd=${encodeURIComponent(messageCwd)}`, { signal: controller.signal })
+    fetch(`/api/github-repo?${new URLSearchParams({ cwd: messageCwd, hostId: fileSource.hostId })}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() as Promise<{ repo?: string | null }> : null)
-      .then((data) => setGithubRepo(data?.repo ?? null))
+      .then((data) => { if (!controller.signal.aborted) setGithubRepo(data?.repo ?? null); })
       .catch(() => {});
     return () => controller.abort();
-  }, [messageCwd, remoteWorkspace]);
+  }, [messageCwd, fileSource.hostId]);
 
   const advisorModelMeta = useMemo(() => {
     if (!advisorRoleSelector) return null;
@@ -1131,7 +1026,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      outbox={!isNew}
       isStreaming={sessionBusy}
       submissionBlocked={editingEntryId !== null}
       model={displayModelValue}
@@ -1185,8 +1080,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
       draftKey={draftKey}
       uploadHostId={session ? session.hostId : newSessionHostId}
       resolveUploadHost={!session && newSessionPoolId ? resolveUploadHost : undefined}
-      // @-mentions and skill lookups read this machine's disk: not for a remote workspace yet.
-      cwd={remoteWorkspace ? null : session?.cwd ?? newSessionCwd}
+      cwd={!session && newSessionPoolId ? null : session?.cwd ?? newSessionCwd}
       /* The pill bar and chevron only render in the non-empty layout; don't
          accept Escape-to-minimize in the fresh-chat branch where there is
          nothing to collapse. */
@@ -1203,7 +1097,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     return <WorkspaceState kind="loading" title={t("chatWindow.loadingSession")} />;
   }
 
-  if (error) {
+  if (error && heldMessages.length === 0 && !(currentHostStatus && !isLinkUp(currentHostStatus))) {
     return (
       <WorkspaceState
         kind="error"
@@ -1225,6 +1119,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     <SpeechSynthesisProvider value={tts}>
     <GithubRepoContext.Provider value={githubRepo}>
     <AgentLinkContext.Provider value={openAgentLink}>
+    <WorkspaceFileContext.Provider value={fileSource}>
     <div
       className="relative flex h-full flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
@@ -1334,7 +1229,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
       ) : (
       <>
       {hostBanner}
-      <div className="relative flex flex-1 overflow-hidden" style={{ minHeight: 0 }}>
+      {/* clip, not just hidden: scrollIntoView (scroll to bottom, search jumps) also
+          scrolls a hidden-overflow box, which shifted the transcript up and left a blank
+          band above the composer. The class stays as the fallback where clip is unknown. */}
+      <div className="relative flex flex-1 overflow-hidden" style={{ minHeight: 0, overflow: "clip" }}>
         <div
           style={{
             position: "absolute",
@@ -1342,6 +1240,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
             left: 0,
             right: 0,
             zIndex: 40,
+            // Scrolls inside the clipped area, so a focused dismiss button below a short chat area stays reachable.
+            maxHeight: "calc(100% - 12px)",
+            overflowY: "auto",
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
             pointerEvents: "none",
           }}
@@ -1358,6 +1259,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
             <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
+              {error && (
+                <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--status-error)" }}>
+                  <span>{error}</span>
+                  <button type="button" className="load-retry-button" onClick={retrySession} style={{ flexShrink: 0, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer" }}>
+                    {t("chatWindow.retry")}
+                  </button>
+                </div>
+              )}
 
             {conversationMeta.hasCompaction && (
               <div
@@ -1412,62 +1321,27 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
               sentinelRef={sentinelRef}
               handleLoadMoreClick={handleLoadMoreClick}
             />
-            {/* Also while held: a finished reply stays until its saved row
-                replaces it in the same render (useAgentSession-stream). */}
-            {streamState.streamingMessage && (
-              <MessageView
-                key={streamState.streamingMessage.timestamp ?? "stream"}
-                message={streamState.streamingMessage as AgentMessage}
-                modelNames={modelNames}
-                cwd={messageCwd}
-                onOpenFile={onOpenFile}
-                toolResults={toolResultsWithLive}
-                toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
-                expandThinkingByDefault={expandThinkingByDefault}
-                hideThinking={hideThinkingBlock}
-                liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
-              />
-            )}
+            <ChatLiveTail
+              streamingMessage={streamState.streamingMessage}
+              isStreaming={streamState.isStreaming}
+              liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
+              pendingToolHeaders={pendingToolHeaders}
+              deferredBash={deferredBash}
+              pendingBash={pendingBash}
+              toolResults={toolResultsWithLive}
+              modelNames={modelNames}
+              cwd={messageCwd}
+              onOpenFile={onOpenFile}
+              sessionId={session?.id ?? sessionIdRef.current ?? undefined}
+              toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              expandThinkingByDefault={expandThinkingByDefault}
+              hideThinking={hideThinkingBlock}
+            />
 
-            {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
-              <div
-                key={tool.id}
-                role="status"
-                aria-label={t("chatWindow.runningNamed", { names: tool.name })}
-                style={{
-                  display: "flex", alignItems: "center", gap: 7,
-                  marginBottom: 8, padding: "6px 10px",
-                  border: "1px solid color-mix(in srgb, var(--status-success) 25%, transparent)",
-                  borderRadius: "var(--radius-control)",
-                  background: "color-mix(in srgb, var(--status-success) 4%, transparent)",
-                  color: "var(--text-muted)", fontSize: 12,
-                }}
-              >
-                <span aria-hidden className="live-status-dot live-pulse inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                <span style={{ color: "var(--status-success)", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11 }}>{tool.name}</span>
-              </div>
+            {/* After the live turn, in submission order: what omp does not have yet. */}
+            {heldMessages.map((held) => (
+              <HeldMessageView key={held.id} held={held} hostLabel={hostLabel} onDelete={deleteHeldMessage} />
             ))}
-
-
-            {deferredBash.map((message, index) => (
-              <MessageView
-                key={index}
-                message={message}
-                sessionId={session?.id ?? sessionIdRef.current ?? undefined}
-              />
-            ))}
-
-            {pendingBash && (
-              <MessageView
-                message={{
-                  role: "bashExecution",
-                  command: pendingBash.command,
-                  output: "",
-                  excludeFromContext: pendingBash.excludeFromContext,
-                } as BashExecutionMessage}
-                sessionId={session?.id ?? sessionIdRef.current ?? undefined}
-              />
-            )}
 
             <div ref={messagesEndRef} />
             </div>
@@ -1551,6 +1425,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
             {extensionDialog && (
               <div style={{ marginBottom: 8 }}>
                 <ExtensionDialog
+                  key={extensionDialog.id}
                   request={extensionDialog}
                   onRespond={respondToExtensionUi}
                   attached
@@ -1576,6 +1451,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
       </>
       )}
       </div>
+    </WorkspaceFileContext.Provider>
     </AgentLinkContext.Provider>
     </GithubRepoContext.Provider>
     </SpeechSynthesisProvider>

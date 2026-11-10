@@ -5,11 +5,47 @@ import React from "react";
 const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react/pure.js");
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await import("./MessageView.tsx");
+const { HeldMessageView, MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await import("./MessageView.tsx");
 const { CodeBlock } = await import("./MermaidBlock.tsx");
 const { buildSessionContext } = await import("../lib/session-reader.ts");
 const { collectToolResults, planTranscriptRows } = await import("../lib/chat-transcript-plan.ts");
 afterEach(cleanup);
+
+test("held messages name every delivery leg and only offer Delete before dispatch", () => {
+  const base = { id: "held", mode: "prompt", message: "Keep this safe.", createdAt: Date.now(), local: false };
+  for (const [state, label, actions, spinner] of [
+    ["sending", "Sending…", false, true],
+    ["waiting_host", "Waiting for Build box", true, false],
+    ["delivering", "Delivering…", false, true],
+    ["failed", "Not sent", true, false],
+  ]) {
+    const html = renderToStaticMarkup(React.createElement(HeldMessageView, { held: { ...base, state }, hostLabel: "Build box", onDelete() {} }));
+    assert.ok(html.includes(label), state);
+    assert.equal(html.includes("Delete this held message"), actions, state);
+    assert.equal(html.includes("<select"), false, state);
+    assert.equal(html.includes("activity-row-spinner"), spinner, state);
+  }
+});
+
+test("Delete confirmation never claims omp has not seen a message that may have been sent, nor cancellation", async () => {
+  const base = { id: "held", mode: "prompt", message: "Keep this safe.", createdAt: Date.now(), local: false, state: "failed" };
+  const dialogText = async (held) => {
+    const view = render(React.createElement(HeldMessageView, { held, onDelete() {} }));
+    await act(async () => { fireEvent.click(view.getByRole("button", { name: "Delete this held message" })); });
+    const text = (await waitFor(() => view.getByRole("dialog"))).textContent;
+    view.unmount();
+    return text;
+  };
+  const uncertain = await dialogText({ ...base, mayHaveBeenSent: true });
+  assert.match(uncertain, /may already have reached omp/);
+  assert.match(uncertain, /cannot cancel or undo/);
+  assert.doesNotMatch(uncertain, /has not reached|will not be sent/);
+  for (const state of ["held", "failed"]) {
+    const ordinary = await dialogText({ ...base, state });
+    assert.match(ordinary, /Remove this held message from the outbox list\?/, state);
+    assert.doesNotMatch(ordinary, /has not reached|never reached|will not send|will not be sent|cancel/, state);
+  }
+});
 
 test("sent messages without timestamps or branch metadata still offer copy", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
@@ -234,6 +270,29 @@ test("read paths with an internal URL scheme are not file links", () => {
     assert.doesNotMatch(render(path), /activity-file-link|role="link"/, path);
   }
   assert.match(render("src/foo.ts:10"), /activity-file-link/);
+});
+
+test("tool-row file links keep Windows drive paths and colon filenames intact", () => {
+  const cases = [
+    // Drive-letter colon is not a line suffix: splitting on ":" opened "C".
+    ["C:\\Users\\me\\proj\\src\\file.ts", "C:\\Users\\me\\proj\\src\\file.ts"],
+    ["C:/Users/me/proj/src/file.ts:42", "C:/Users/me/proj/src/file.ts"],
+    ["src/my:file.txt", "src/my:file.txt"],
+  ];
+  for (const [path, expected] of cases) {
+    const openedFiles = [];
+    const { container } = render(React.createElement(MessageView, {
+      onOpenFile(file) { openedFiles.push(file); },
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path } }],
+      },
+    }));
+    // File links render as a clickable span (role="button"), unlike web URLs.
+    fireEvent.click(container.querySelector(".activity-file-link"));
+    assert.deepEqual(openedFiles, [expected], path);
+    cleanup();
+  }
 });
 
 test("read paths with a web URL open the fetched page in a new tab without toggling the row", () => {
@@ -1053,7 +1112,7 @@ test("a `!` run renders as a shell card with its command, status and output", ()
   fireEvent.click(ok.header);
   assert.equal(ok.view.container.querySelector(".shell-run-output").textContent, "clean\n");
   assert.equal(ok.view.container.querySelector(".shell-run-failed"), null);
-  assert.equal(ok.header.querySelector(".shell-run-tag"), null, "only `!!` runs are tagged local");
+  assert.equal(ok.header.querySelector(".shell-run-tag"), null, "only excluded runs are tagged");
   fireEvent.click(ok.header);
   assert.equal(ok.view.container.querySelector(".shell-run-output"), null, "the header closes it again");
   cleanup();
@@ -1067,10 +1126,6 @@ test("a `!` run renders as a shell card with its command, status and output", ()
 
   const cancelled = shell({ command: "sleep 9", output: "", cancelled: true });
   assert.match(cancelled.header.querySelector(".shell-run-status").textContent, /cancelled/);
-  cleanup();
-
-  const local = shell({ command: "env", output: "A=1", exitCode: 0, excludeFromContext: true });
-  assert.equal(local.header.querySelector(".shell-run-tag").textContent, "local");
   cleanup();
 
   const pending = shell({ command: "make", output: "" });

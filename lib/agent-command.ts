@@ -3,7 +3,10 @@ import { startRpcSession, getRpcSession, getRpcSessionKeys, WebRpcError, type Ag
 import { sessionSpawnTarget } from "@/lib/hosts/session-index";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { RequestBodyTooLargeError } from "@/lib/bounded-form-data";
-import { attachUploads, forgetUploads, takeUploads } from "@/lib/uploads";
+import { attachUploads, forgetUploads, takeUploads, type OutboxUploadReceipt } from "@/lib/uploads";
+import { runOutboxCommand } from "@/lib/message-outbox";
+import { readClientMessageIds } from "@/lib/client-message-ids";
+import { reconcileOutboxHandoffs } from "@/lib/outbox-handoff";
 
 // Commands that ride whatever child is alive and never spawn or replace one:
 // keystroke predictions, and the side-question reads/cancel omp-web sends in
@@ -56,7 +59,7 @@ function sendFences(): Map<string, Promise<void>> {
  * the browser socket. `owner`: the caller's web session (lib/web-auth.ts
  * `requestOwner`), whose uploads a prompt may attach. Never throws: failures
  * become `commandErrorResponse`. */
-export async function runAgentCommand(id: string, body: unknown, advisor: boolean, owner: string): Promise<Response> {
+export async function runAgentCommand(id: string, body: unknown, advisor: boolean, owner: string, trustedUploads?: OutboxUploadReceipt[]): Promise<Response> {
   let release = () => {}; // frees this command's send fence; idempotent
   try {
     const command = body as { type?: unknown; [key: string]: unknown } | null;
@@ -64,8 +67,15 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
       return Response.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }
     const type = command.type;
+    // Held messages: stored and answered here; the outbox's dispatcher sends them to omp (lib/message-outbox.ts).
+    if (type === "outbox_add" || type === "outbox_remove" || type === "outbox_scope") return await runOutboxCommand(id, command, advisor, owner);
+    if (type === "get_client_message_status") {
+      const ids = readClientMessageIds(command.clientMessageIds);
+      if (!ids) return Response.json({ error: "clientMessageIds must contain 1 to 32 unique valid IDs", code: "invalid_client_message_ids" }, { status: 400 });
+      return Response.json({ success: true, data: await reconcileOutboxHandoffs(id, ids) });
+    }
     // Attached files go to the session's host first; nothing reaches omp when one fails (spec U3).
-    const uploads = takeUploads(command, owner);
+    const uploads = takeUploads(command, owner, trustedUploads);
     // Hold later wrapper selection as well as dispatch behind attachment preparation, so an
     // advisor toggle cannot replace the child and a Stop cannot overtake the preparing prompt.
     // A moved session answers to several ids: a command through any of them waits.
@@ -85,13 +95,13 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
       return session.withPendingCommand(async () => {
         let sending: Promise<unknown>;
         try {
-          await attachUploads(uploads, owner, session, command);
+          await attachUploads(uploads.ids, owner, session, command, uploads.receipts);
           sending = session.send(command);
         } finally {
           release();
         }
         const result = await sending;
-        if (uploads) forgetUploads(uploads);
+        if (uploads) forgetUploads(uploads.ids, owner, uploads.receipts);
         return result;
       });
     };
@@ -101,17 +111,22 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     // flag must replace an idle child to take effect; busy children keep
     // running and pick the flag up at the next natural respawn.
     const existing = getRpcSession(id);
+    let resumeId = id;
+    let resumeHost: AgentSessionWrapper["host"] | undefined;
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, type);
     const liveOnly = LIVE_SESSION_ONLY.has(type);
     if (existing?.isAlive()) {
-      if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isEditingHistory()) {
+      if (noSpawn || liveOnly || (existing.adopted && !existing.hostOwnedLifecycle)
+        || existing.advisorSpawned === (advisor === true || existing.launchAdvisor === true) || existing.isRunning() || existing.isEditingHistory()) {
         const result = await send(existing);
         return Response.json({ success: true, data: result });
       }
       // Disposing a child behind a down link would wait for the link to return.
       const offline = hostOfflineResponse(existing.host);
       if (offline) return offline;
-      await existing.destroyAndWait();
+      resumeId = existing.sessionId;
+      resumeHost = existing.host;
+      if (!existing.hostOwnedLifecycle) await existing.destroyAndWait("advisor", true);
     }
     if (noSpawn) return Response.json({ success: true, data: NO_SPAWN_REPLIES[type] });
     if (liveOnly) {
@@ -121,12 +136,12 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
       );
     }
 
-    const resolved = await resolveSessionHostOr404(id);
+    const resolved = resumeHost ? { host: resumeHost } : await resolveSessionHostOr404(resumeId);
     if ("response" in resolved) return resolved.response;
     const { host } = resolved;
     const offline = hostOfflineResponse(host);
     if (offline) return offline;
-    const target = await sessionSpawnTarget(id, host);
+    const target = await sessionSpawnTarget(resumeId, host);
     if (!target) return Response.json({ error: "Session not found", code: "session_not_found" }, { status: 404 });
 
     // A cold set_model must reach omp before the saved model is restored:
@@ -148,32 +163,34 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
         ? `${command.provider}/${command.modelId}`
         : undefined;
 
-    const { session } = await startRpcSession(id, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, spawnModel, host);
-    if (spawnModel) {
-      // Try the normal RPC first: when it succeeds it also records the new
-      // model in the session, so later spawns restore it without an override.
-      // But in omp 18.12.6 set_model can fail spuriously with "Model not
-      // found" for a catalog model whose provider has no credentials
-      // configured, even though the spawn already bound it. In that case the
-      // switch itself succeeded — verify from live state and report success
-      // rather than a false failure. A mismatch (e.g. an omp without --model
-      // precedence) rethrows the RPC error, so a real failure still surfaces.
-      try {
-        const result = await session.send(command);
-        return Response.json({ success: true, data: result });
-      } catch (error) {
-        const state = (await session.send({ type: "get_state" })) as {
-          model?: { id?: unknown; provider?: unknown };
-        } | null;
-        if (state?.model?.provider === command.provider && state?.model?.id === command.modelId) {
-          return Response.json({ success: true, data: { id: command.modelId, provider: command.provider } });
+    const { session } = await startRpcSession(id, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, spawnModel, host, true);
+    // This command inherits the open's preparation lease, so the shared child cannot idle out before it is sent.
+    return await session.withPendingCommand(async () => {
+      if (spawnModel) {
+        // Try the normal RPC first: when it succeeds it also records the new
+        // model in the session, so later spawns restore it without an override.
+        // But in omp 18.12.6 set_model can fail spuriously with "Model not
+        // found" for a catalog model whose provider has no credentials
+        // configured, even though the spawn already bound it. In that case the
+        // switch itself succeeded — verify from live state and report success
+        // rather than a false failure. A mismatch (e.g. an omp without --model
+        // precedence) rethrows the RPC error, so a real failure still surfaces.
+        try {
+          const result = await session.send(command);
+          return Response.json({ success: true, data: result });
+        } catch (error) {
+          const state = (await session.send({ type: "get_state" })) as {
+            model?: { id?: unknown; provider?: unknown };
+          } | null;
+          if (state?.model?.provider === command.provider && state?.model?.id === command.modelId) {
+            return Response.json({ success: true, data: { id: command.modelId, provider: command.provider } });
+          }
+          throw error;
         }
-        throw error;
       }
-    }
-    const result = await send(session);
-
-    return Response.json({ success: true, data: result });
+      const result = await send(session);
+      return Response.json({ success: true, data: result });
+    }, true);
   } catch (error) {
     return commandErrorResponse(error);
   } finally {

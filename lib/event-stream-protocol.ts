@@ -34,7 +34,7 @@ export type EventStreamChannel =
   /** Notifications the server routes to the tab with this notification client id. */
   | { kind: "notifications"; clientId: string }
   | { kind: "session"; sessionId: string }
-  | { kind: "file"; path: string; sessionId: string | null }
+  | { kind: "file"; path: string; hostId?: string; sessionId: string | null }
   /** Host tool calls (open_url, notify, open_file) from sessions no tab is watching. */
   | { kind: "host-tools" }
   /** Settings → Hosts: the `GET /api/hosts` body on subscribe and after every change. */
@@ -89,14 +89,16 @@ export const COMMAND_DEDUPE_MS = 600_000;
 export const NO_OMP_REPLY_COMMANDS: ReadonlySet<string> = new Set([
   "predict_word", "predict_word_feedback", "get_btw_history", "btw_cancel",
   "host_tool_result", "host_uri_result", "extension_ui_response",
+  "outbox_add", "outbox_remove", "outbox_scope",
 ]);
 
-const REPEATABLE_COMMANDS = ["predict_word", "predict_word_feedback", "set_host_tools", "set_host_uri_schemes"];
+const REPEATABLE_COMMANDS = ["predict_word", "predict_word_feedback", "set_host_tools", "set_host_uri_schemes", "outbox_add", "outbox_remove", "outbox_scope"];
 
-/** Commands that are repeatable by nature: `get_*` and `predict_word` only read, and the others register or record the
- * same thing again. Safe to send again after a resync, and not worth remembering for the (session, rid) dedupe, where
- * they would only take room from commands that change something (and be refused at the cap). Never `abort`: a resent
- * one could stop a prompt that ran after it. */
+/** Commands that are repeatable by nature: `get_*` and `predict_word` only read, the outbox commands are idempotent by
+ * their message id (lib/message-outbox.ts), and the others register or record the same thing again. Safe to send again
+ * after a resync, and not worth remembering for the (session, rid) dedupe, where they would only take room from
+ * commands that change something (and be refused at the cap). Never `abort`: a resent one could stop a prompt that ran
+ * after it. */
 export function isIdempotentCommand(type: string): boolean {
   return type.startsWith("get_") || REPEATABLE_COMMANDS.includes(type);
 }
@@ -138,7 +140,8 @@ export function parseEventStreamChannel(value: unknown): EventStreamChannel | nu
       if (!isBoundedString(channel.path, MAX_PATH_LENGTH)) return null;
       const sessionId = channel.sessionId ?? null;
       if (sessionId !== null && !isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
-      return { kind: "file", path: channel.path, sessionId };
+      if (channel.hostId !== undefined && !isBoundedString(channel.hostId, MAX_ID_LENGTH)) return null;
+      return { kind: "file", path: channel.path, sessionId, ...(channel.hostId === undefined ? {} : { hostId: channel.hostId as string }) };
     }
     default:
       return null;

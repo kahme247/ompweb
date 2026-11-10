@@ -1,8 +1,11 @@
-import { serveWorkspaceRequest } from "@/lib/api-utils";
-import { getWorkspaceGitDiff } from "@/lib/workspace-files";
+import { apiErrorResponse, opErrorResponse, resolveWorkspaceHost } from "@/lib/api-utils";
 
 export async function GET(request: Request) {
-  return new URL(request.url).searchParams.has("sessionId")
-    ? serveWorkspaceRequest(request, "git-diff")
-    : getWorkspaceGitDiff(request);
+  try {
+    const params = new URL(request.url).searchParams;
+    const resolved = await resolveWorkspaceHost(params.get("hostId") ?? undefined, params.get("sessionId"));
+    if ("response" in resolved) return resolved.response;
+    const result = await resolved.host.workspaceOps.gitDiff(resolved.cwd ?? params.get("cwd")?.trim() ?? "", params.get("path")?.trim() ?? "", resolved.owner);
+    return result.ok ? Response.json(result.value) : opErrorResponse(result);
+  } catch (error) { return apiErrorResponse(error); }
 }

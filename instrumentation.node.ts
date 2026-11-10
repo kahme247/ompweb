@@ -59,17 +59,24 @@ export async function register(): Promise<void> {
     }
   })();
 
-  // Point the local `ompweb host` daemon at this server (production only: a dev
-  // server must not take the daemon from the running production one).
+  // Add this server's local daemon link without moving any existing production link.
   if (process.env.NODE_ENV !== "development") {
     try {
       const { ensureLocalHostLink, localLinkUrl } = await import("@/lib/hosts/local-bootstrap");
       const target = localLinkUrl();
-      if ("url" in target) ensureLocalHostLink({ url: target.url });
+      if ("url" in target) await ensureLocalHostLink({ url: target.url });
       else console.warn(`[omp-web] local daemon link skipped: ${target.skip}`);
     } catch (error) {
       console.warn(`[omp-web] local daemon link not prepared: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  // Each host daemon deletes sent uploads after the configured number of days: tell it the setting whenever it links.
+  try {
+    const { startUploadRetentionSync } = await import("@/lib/hosts/upload-retention-sync");
+    startUploadRetentionSync();
+  } catch (error) {
+    console.warn(`[omp-web] upload retention sync not started: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // Resume sessions that were mid-run when omp-web last stopped (opt-in
@@ -82,6 +89,14 @@ export async function register(): Promise<void> {
       console.warn(`[omp-web] session auto-resume failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   })();
+
+  // Messages the outbox held when omp-web last stopped go once their hosts link (lib/message-outbox.ts).
+  try {
+    const { startOutbox } = await import("@/lib/message-outbox");
+    startOutbox();
+  } catch (error) {
+    console.warn(`[omp-web] message outbox not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   // Crash/stall journal: a long-running server that dies or wedges while the
   // user is away leaves no trace in a terminal that no longer exists (CLI runs

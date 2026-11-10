@@ -209,8 +209,11 @@ export function ThemeSwitcher() {
               flexDirection: isMobile ? "column" : undefined,
               gridTemplateColumns: isMobile ? undefined : "1fr 1fr",
               gap: isMobile ? 4 : 8,
-              maxHeight: isMobile ? 380 : undefined,
-              overflowY: isMobile ? "auto" : undefined,
+              // Desktop previously had no cap, so on short viewports the
+              // fixed-position menu clipped its bottom themes with no way
+              // to scroll to them. Cap against the viewport, as on mobile.
+              maxHeight: isMobile ? 380 : "calc(100vh - 56px)",
+              overflowY: "auto",
             }}
           >
             {/* Light column */}

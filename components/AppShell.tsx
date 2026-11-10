@@ -33,11 +33,13 @@ import { formatGenerationSpeed } from "@/lib/generation-speed";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useIsCompactOverlay } from "@/hooks/useIsCompactOverlay";
 import { copyText } from "@/lib/clipboard";
-import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { getFileApiUrl, getFileName, getRelativeFilePath, joinFilePath } from "@/lib/file-paths";
+import { normalizeLocalPath } from "@/lib/file-links";
+import type { WorkspaceFileSource } from "@/lib/workspace-types";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
+import { hostProjectKey, LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
 import { useHostRows } from "@/hooks/useHostRows";
 import { LocalDaemonBanner } from "./LocalDaemonBanner";
 import { hostName } from "./host-status";
@@ -109,9 +111,6 @@ const EXPAND_THINKING_STORAGE_KEY = "omp-web:expand-thinking";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
 const NATIVE_SELECT_ALL_STORAGE_KEY = "omp-web:scope-native-select-all";
 const OPEN_URL_AUTOMATICALLY_STORAGE_KEY = "omp-web:open-url-automatically";
-// Off by default, so the Explorer keeps hiding build/, node_modules/ and the
-// other IGNORED_NAMES directories until the toolbar switch is flipped.
-const SHOW_HIDDEN_FILES_STORAGE_KEY = "omp-web:show-hidden-files";
 
 
 type AutoNameStatus =
@@ -189,7 +188,6 @@ export function AppShell({ appName }: { appName: string }) {
   const [providerUsageVisible, setProviderUsageVisible] = useState(true);
   const [scopeNativeSelectAll, setScopeNativeSelectAll] = useState(false);
   const [openUrlAutomatically, setOpenUrlAutomatically] = useState(false);
-  const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   // Active drag handlers so an unmount mid-drag can detach them.
   const sidebarResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
@@ -210,7 +208,6 @@ export function AppShell({ appName }: { appName: string }) {
       setProviderUsageVisible(window.localStorage.getItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY) !== "false");
       setScopeNativeSelectAll(window.localStorage.getItem(NATIVE_SELECT_ALL_STORAGE_KEY) === "true");
       setOpenUrlAutomatically(window.localStorage.getItem(OPEN_URL_AUTOMATICALLY_STORAGE_KEY) === "true");
-      setShowHiddenFiles(window.localStorage.getItem(SHOW_HIDDEN_FILES_STORAGE_KEY) === "true");
     } catch {
       // Keep the compact default when storage is unavailable.
     }
@@ -278,17 +275,6 @@ export function AppShell({ appName }: { appName: string }) {
     } catch {
       // The preference still applies for this page load.
     }
-  }, []);
-  const handleToggleShowHiddenFiles = useCallback(() => {
-    setShowHiddenFiles((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem(SHOW_HIDDEN_FILES_STORAGE_KEY, String(next));
-      } catch {
-        // The preference still applies for this page load.
-      }
-      return next;
-    });
   }, []);
   // Persist the committed width (after each change; skipped mid-drag, then
   // written once the drag ends). The first run is skipped so the mount-time
@@ -692,11 +678,13 @@ export function AppShell({ appName }: { appName: string }) {
   const [autoNameStatus, setAutoNameStatus] = useState<AutoNameStatus>({ kind: "idle" });
   const autoNameTimerRef = useRef<TimerHandle | undefined>(undefined);
   const activeSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
+  const activeSettingsTabRef = useRef(settingsTab);
   const archiveRetryTimerRef = useRef<TimerHandle | undefined>(undefined);
   useEffect(() => () => clearTimeout(archiveRetryTimerRef.current), []);
   useLayoutEffect(() => {
     activeSessionIdRef.current = selectedSession?.id ?? null;
-  }, [selectedSession?.id]);
+    activeSettingsTabRef.current = settingsTab;
+  }, [selectedSession?.id, settingsTab]);
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
@@ -1062,7 +1050,7 @@ export function AppShell({ appName }: { appName: string }) {
     };
   }, []);
   // One-shot request asking the explorer tab to expand + scroll to a file.
-  const [revealPath, setRevealPath] = useState<string | null>(null);
+  const [revealTarget, setRevealTarget] = useState<{ path: string; hostId: string } | null>(null);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [explorerGitCount, setExplorerGitCount] = useState(0);
@@ -1129,11 +1117,12 @@ export function AppShell({ appName }: { appName: string }) {
     void fetch("/api/cwd/validate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: requestedCwd }),
+      body: JSON.stringify({ cwd: requestedCwd, hostId: initialNavigation.hostId }),
       signal: controller.signal,
     })
       .then(async (response) => {
         const data = await response.json().catch(() => ({})) as { cwd?: string; error?: string; code?: string };
+        if (controller.signal.aborted) return;
         if (!response.ok || !data.cwd) {
           throw new Error(data.error || data.code ? formatApiError(data) : `HTTP ${response.status}`);
         }
@@ -1141,6 +1130,10 @@ export function AppShell({ appName }: { appName: string }) {
         // The sidebar will notify us when it adopts this cwd. Avoid remounting
         // the just-created empty chat during that initial synchronization.
         suppressCwdRef.current = data.cwd;
+        setNewSessionCwd(data.cwd);
+        setNewSessionHostId(remoteHostId(initialNavigation.hostId));
+        setActiveCwd(data.cwd);
+        setActiveHostId(remoteHostId(initialNavigation.hostId));
         setInitialCwdStatus("ready");
       })
       .catch((error: unknown) => {
@@ -1576,28 +1569,29 @@ export function AppShell({ appName }: { appName: string }) {
     });
   }, [fileTabs]);
 
-  const handleOpenFile = useCallback((filePath: string, fileName: string, sourceSessionId?: string | null, sourceCwd?: string | null) => {
-    const originId = sourceSessionId === undefined ? selectedSession?.id ?? null : sourceSessionId;
-    const originCwd = sourceCwd === undefined
-      ? selectedSession && originId === selectedSession.id ? selectedSession.cwd : originId ? null : activeCwd ?? newSessionCwd
-      : sourceCwd;
-    const tabId = originId ? `file:${originId}:${filePath}` : `file:${filePath}`;
+  const handleOpenFile = useCallback((filePath: string, fileName: string, source: WorkspaceFileSource) => {
+    const absolute = filePath.startsWith("/") || filePath.startsWith("~/") || filePath.startsWith("\\\\") || /^[a-zA-Z]:[\\/]/.test(filePath);
+    const rooted = !absolute && source.cwd ? joinFilePath(source.cwd, filePath) : filePath;
+    const target = filePath.startsWith("~/") ? filePath : normalizeLocalPath(rooted);
+    const tabId = `file:${source.sessionId ?? hostProjectKey(source.hostId, source.cwd ?? "")}:${target}`;
     setFileTabs((prev) => prev.some((tab) => tab.id === tabId)
       ? prev
-      : [...prev, { id: tabId, label: fileName, filePath, sourceSessionId: originId, sourceCwd: originCwd }]);
+      : [...prev, { id: tabId, label: fileName, filePath: target, hostId: source.hostId, sourceCwd: source.cwd, sourceSessionId: source.sessionId }]);
     setActiveFileTabId(tabId);
     setRightView("file");
     setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile, selectedSession, activeCwd, newSessionCwd]);
+  }, [isMobile]);
 
   // Agent open requests that wait for the user. URLs always ask unless the
   // user opted into opening links from the viewed session automatically; URLs
   // and files from a session this tab is not viewing always ask, so they cannot
   // take over the current view. The click is also the user gesture that lets
   // the new tab through pop-up blockers.
-  const [pendingOpens, setPendingOpens] = useState<Array<{ kind: "url" | "file"; target: string; name: string; sessionId: string; crossSession: boolean }>>([]);
+  const [pendingOpens, setPendingOpens] = useState<Array<{
+    target: string; name: string; sessionId: string; crossSession: boolean;
+  } & ({ kind: "url" } | { kind: "file"; source: WorkspaceFileSource })>>([]);
   const pendingOpen = pendingOpens[0] ?? null;
   // Keep the last request on screen while the dialog animates closed.
   const shownOpenRef = useRef(pendingOpen);
@@ -1615,18 +1609,26 @@ export function AppShell({ appName }: { appName: string }) {
       : `Asked the user to confirm opening ${url}.`;
   }, [openUrlAutomatically]);
   const handleSessionOpenUrl = useCallback((url: string) => requestOpenUrl(url, selectedSession?.id ?? "", false), [requestOpenUrl, selectedSession?.id]);
+  const pendingCrossHostToolsRef = useRef(new Map<string, AbortController>());
   const handleCrossSessionHostTool = useCallback(async (call: CrossSessionHostToolCall) => {
+    const key = JSON.stringify([call.sessionId, call.id]);
+    if (pendingCrossHostToolsRef.current.has(key)) return;
+    const controller = new AbortController();
+    pendingCrossHostToolsRef.current.set(key, controller);
     // Full-page Settings hides the chat, so its session counts as not viewed.
-    const viewing = call.sessionId === selectedSession?.id && !settingsTab;
-    const { text, isError } = await runHostTool(call.toolName, call.arguments, {
-      openUrl: (url) => requestOpenUrl(url, call.sessionId, !viewing),
-      openFile: (path, name) => {
-        if (viewing) return handleOpenFile(path, name, call.sessionId);
-        setPendingOpens((queue) => [...queue, { kind: "file", target: path, name, sessionId: call.sessionId, crossSession: true }]);
-        return `Asked the user to confirm opening ${path}; they are viewing another omp-web session.`;
-      },
-    });
+    const viewing = () => call.sessionId === activeSessionIdRef.current && !activeSettingsTabRef.current;
+
     try {
+      const { text, isError } = await runHostTool(call.toolName, call.arguments, {
+        openUrl: (url) => requestOpenUrl(url, call.sessionId, !viewing()),
+        openFile: (path, name, owner) => {
+          const source = owner ? { ...call, sessionId: owner } : call;
+          if (viewing()) return handleOpenFile(path, name, source);
+          setPendingOpens((queue) => [...queue, { kind: "file", target: path, name, sessionId: call.sessionId, source, crossSession: true }]);
+          return `Asked the user to confirm opening ${path}; they are viewing another omp-web session.`;
+        },
+      }, call.sessionId, controller.signal);
+      if (controller.signal.aborted) return;
       await sendAgentCommand(call.sessionId, {
         type: "host_tool_result",
         id: call.id,
@@ -1635,25 +1637,36 @@ export function AppShell({ appName }: { appName: string }) {
       });
     } catch (e) {
       console.error("Failed to send host tool result:", e);
+    } finally {
+      pendingCrossHostToolsRef.current.delete(key);
     }
-  }, [handleOpenFile, requestOpenUrl, selectedSession?.id, settingsTab]);
+  }, [handleOpenFile, requestOpenUrl]);
   const crossSessionHostToolRef = useRef(handleCrossSessionHostTool);
   useEffect(() => { crossSessionHostToolRef.current = handleCrossSessionHostTool; }, [handleCrossSessionHostTool]);
   useEffect(() => {
     // Mounted with the shell (not the sidebar) so it keeps listening on the
     // full-page Settings view too.
+    const pending = pendingCrossHostToolsRef.current;
     const source = openEventStream({ kind: "host-tools" });
     source.onmessage = (e) => {
       try {
-        const call = JSON.parse(e.data) as CrossSessionHostToolCall & { type?: string };
-        if (call.type === "host_tool_call" && call.sessionId && call.id && call.toolName) {
-          void crossSessionHostToolRef.current({ sessionId: call.sessionId, id: call.id, toolName: call.toolName, arguments: call.arguments ?? {} });
+        const call = JSON.parse(e.data);
+        if (call.type === "host_tool_cancel" && typeof call.sessionId === "string" && typeof call.targetId === "string") {
+          pending.get(JSON.stringify([call.sessionId, call.targetId]))?.abort();
+        } else if (call.type === "host_tool_call" && call.sessionId && call.id && call.toolName
+          && typeof call.hostId === "string" && typeof call.cwd === "string") {
+          void crossSessionHostToolRef.current(call);
         }
       } catch {
         // ignore malformed frames
       }
     };
-    return () => source.close();
+    // A drop loses the server-side subscription, and with it the calls routed to this tab (rejectCrossSessionHostTools).
+    source.onerror = () => { for (const controller of pending.values()) controller.abort(); };
+    return () => {
+      for (const controller of pending.values()) controller.abort();
+      source.close();
+    };
   }, []);
 
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
@@ -1663,7 +1676,7 @@ export function AppShell({ appName }: { appName: string }) {
   // A session whose worktree was removed (its repo's worktree list no longer
   // contains its folder) falls back to the sidebar's cwd, the repo root.
   const sessionCwd = selectedSession?.cwd ?? null;
-  const sessionWorktreeRemoved = sessionCwd !== null && worktreeCtx !== null
+  const sessionWorktreeRemoved = sessionCwd !== null && worktreeCtx !== null && (selectedSession?.hostId ?? LOCAL_HOST_ID) === worktreeCtx.hostId
     && comparableProjectPath(selectedSession?.projectRoot ?? sessionCwd) === comparableProjectPath(worktreeCtx.projectRoot)
     && !worktreeCtx.worktrees.some((wt) => {
       const root = comparableProjectPath(wt.path);
@@ -1674,21 +1687,19 @@ export function AppShell({ appName }: { appName: string }) {
   // chat's, else the sidebar's selection. Undefined is this machine.
   const currentHostId = selectedSession ? remoteHostId(selectedSession.hostId) : newSessionCwd !== null ? newSessionHostId : activeHostId;
   const remoteHost = currentHostId !== undefined;
-  // A prepared real session supplies its owner-bound cwd. An unprepared pool
-  // composer, or a standalone remote target without a session, is not browsable.
+  const workspaceHostId = currentHostId ?? LOCAL_HOST_ID;
+  const sidebarCwd = (activeHostId ?? LOCAL_HOST_ID) === workspaceHostId ? activeCwd : null;
   const explorerCwd = selectedSession
-    ? (sessionWorktreeRemoved && !remoteHost ? activeCwd : sessionCwd)
-    : newSessionPoolProject || activePoolProject || remoteHost ? null : activeCwd ?? newSessionCwd ?? null;
-  const handleOpenLinkedFile = useCallback((filePath: string) => {
-    handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
-  }, [handleOpenFile, selectedSession?.id]);
+    ? (sessionWorktreeRemoved ? sidebarCwd : sessionCwd)
+    : newSessionPoolProject || activePoolProject ? null : newSessionCwd ?? sidebarCwd;
 
   // File-panel integrations: every action works on the active tab so the right
   // panel behaves like an editor toolbar, not just a tab strip.
   const handleMentionActiveFile = useCallback(() => {
     if (!activeFileTab || activeFileTab.sourceSessionId !== (selectedSession?.id ?? null)) return;
+    if (activeFileTab.hostId !== workspaceHostId) { toast.info(t("hosts.fileOtherHost")); return; }
     handleAtMention(getRelativeFilePath(activeFileTab.filePath, activeFileTab.sourceCwd ?? undefined), false);
-  }, [activeFileTab, selectedSession?.id, handleAtMention]);
+  }, [activeFileTab, selectedSession?.id, handleAtMention, workspaceHostId, t]);
 
   const handleCopyActiveFilePath = useCallback(() => {
     if (!activeFileTab) return;
@@ -1702,7 +1713,7 @@ export function AppShell({ appName }: { appName: string }) {
   const handleDownloadActiveFile = useCallback(() => {
     if (!activeFileTab) return;
     const link = document.createElement("a");
-    link.href = `/api/files/${encodeFilePathForApi(activeFileTab.filePath)}?type=download${activeFileTab.sourceSessionId ? `&sessionId=${encodeURIComponent(activeFileTab.sourceSessionId)}` : ""}`;
+    link.href = getFileApiUrl(activeFileTab.filePath, "download", activeFileTab.hostId, activeFileTab.sourceSessionId);
     link.download = activeFileTab.label;
     document.body.appendChild(link);
     link.click();
@@ -1710,14 +1721,15 @@ export function AppShell({ appName }: { appName: string }) {
   }, [activeFileTab]);
   const handleRevealActiveFile = useCallback(() => {
     if (!activeFileTab) return;
-    if ((activeFileTab.sourceSessionId && activeFileTab.sourceSessionId !== selectedSession?.id) || (!activeFileTab.sourceSessionId && remoteHost)) {
+    if (activeFileTab.sourceSessionId !== (selectedSession?.id ?? null)) {
       toast.info(t("appShell.revealSourceSession"));
       return;
     }
-    setRevealPath(activeFileTab.filePath);
+    if (activeFileTab.hostId !== workspaceHostId) { toast.info(t("hosts.fileOtherHost")); return; }
+    setRevealTarget({ path: activeFileTab.filePath, hostId: activeFileTab.hostId });
     setRightView("explorer");
     setRightPanelOpen(true);
-  }, [activeFileTab, selectedSession?.id, remoteHost, t]);
+  }, [activeFileTab, selectedSession?.id, workspaceHostId, t]);
 
   const handleSelectFileTab = useCallback((tabId: string) => {
     setActiveFileTabId(tabId);
@@ -1730,8 +1742,8 @@ export function AppShell({ appName }: { appName: string }) {
   }, []);
 
   const handleRevealDone = useCallback(() => {
-    setRevealPath(null);
-  }, []);
+    setRevealTarget((current) => current === revealTarget ? null : current);
+  }, [revealTarget]);
 
   const handleToggleFileSearch = useCallback(() => {
     setFileSearchOpen((open) => !open);
@@ -1937,7 +1949,7 @@ export function AppShell({ appName }: { appName: string }) {
           else if (pendingOpen) {
             // The file panel is hidden behind full-page Settings.
             setSettingsTab(null);
-            handleOpenFile(pendingOpen.target, pendingOpen.name, pendingOpen.sessionId);
+            handleOpenFile(pendingOpen.target, pendingOpen.name, pendingOpen.source);
           }
           dismissPendingOpen();
         }}
@@ -1952,7 +1964,9 @@ export function AppShell({ appName }: { appName: string }) {
             handleNewSession(crypto.randomUUID(), activeCwd, activeHostId, activePoolProject ?? undefined);
             return;
           }
-          void fetch("/api/default-cwd", { method: "POST" })
+          const targetHost = currentHostId ?? LOCAL_HOST_ID;
+          const sourceVersion = navViewVersionRef.current;
+          void fetch(`/api/default-cwd?${new URLSearchParams({ hostId: targetHost })}`, { method: "POST" })
             .then(async (response) => {
               if (!response.ok) throw new Error(`HTTP ${response.status}`);
               const data = (await response.json()) as { cwd?: string };
@@ -1961,7 +1975,7 @@ export function AppShell({ appName }: { appName: string }) {
             })
             .then((data) => {
               if (!data.cwd) throw new Error("Empty cwd returned");
-              handleNewSession(crypto.randomUUID(), data.cwd);
+              if (navViewVersionRef.current === sourceVersion) handleNewSession(crypto.randomUUID(), data.cwd, targetHost);
             })
             .catch(() => toast.error(translate("errors.generic")));
         }}
@@ -2588,7 +2602,7 @@ export function AppShell({ appName }: { appName: string }) {
                   </div>
                   {/* The workspace's worktrees: picking one sets where the new
                       session starts (same switch as the file panel's Worktrees tab). */}
-                  {worktreeCtx && worktreeCtx.worktrees.length > 1
+                  {worktreeCtx && !worktreeCtx.error && worktreeCtx.hostId === newSessionHostKey && worktreeCtx.worktrees.length > 1
                     && comparableProjectPath(worktreeCtx.projectRoot) === comparableProjectPath(newSessionProject) && (
                     <div className="new-session-workspace-control">
                       <span className="new-session-workspace-icon" aria-hidden="true">
@@ -2618,8 +2632,7 @@ export function AppShell({ appName }: { appName: string }) {
               onSessionMoved={handleSessionMoved}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
-              // Real sessions route file links by their immutable owner; fresh pools have no guessed root.
-              onOpenFile={selectedSession || (!effectivePoolProject && !remoteHost) ? handleOpenLinkedFile : undefined}
+              onOpenFile={selectedSession || !effectivePoolProject ? handleOpenFile : undefined}
               onOpenUrl={handleSessionOpenUrl}
               onBranchDataChange={handleBranchDataChange}
               onSystemPromptChange={handleSystemPromptChange}
@@ -2721,19 +2734,17 @@ export function AppShell({ appName }: { appName: string }) {
         rightPanelResizing={rightPanelResizing}
         rightPanelRef={attachRightPanel}
         fileExplorerRef={fileExplorerRef}
-        revealPath={revealPath}
+        revealPath={revealTarget?.hostId === workspaceHostId ? revealTarget.path : null}
         onRevealDone={handleRevealDone}
         explorerCwd={explorerCwd}
         sourceSessionId={selectedSession?.id ?? null}
-        remoteHost={remoteHost}
+        hostId={workspaceHostId}
         worktrees={worktreeCtx}
         connectionDiagnosticsOn={connectionDiagnosticsOn}
         explorerRefreshKey={explorerRefreshKey}
         fileSearchOpen={fileSearchOpen}
         onToggleFileSearch={handleToggleFileSearch}
         onFileSearchOpenChange={setFileSearchOpen}
-        showHiddenFiles={showHiddenFiles}
-        onToggleShowHiddenFiles={handleToggleShowHiddenFiles}
         explorerUploadBusy={explorerUploadBusy}
         onUploadBusyChange={setExplorerUploadBusy}
         explorerGitCount={explorerGitCount}

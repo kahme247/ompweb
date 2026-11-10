@@ -88,3 +88,29 @@ export function isAudioPath(filePath: string): boolean {
 export function isDocumentPreviewPath(filePath: string): boolean {
   return documentPreviewKind(filePath) !== null;
 }
+const EXT_TO_LANGUAGE: Record<string, string> = {
+  ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx",
+  mjs: "javascript", cjs: "javascript", py: "python", rb: "ruby",
+  go: "go", rs: "rust", java: "java", kt: "kotlin", kts: "kotlin", swift: "swift",
+  c: "c", cpp: "cpp", cc: "cpp", cxx: "cpp", h: "c", hpp: "cpp", hh: "cpp", cs: "csharp",
+  html: "html", htm: "html", css: "css", scss: "scss", less: "css",
+  json: "json", jsonl: "json", yaml: "yaml", yml: "yaml",
+  toml: "toml", xml: "xml", md: "markdown", mdx: "markdown",
+  sh: "bash", bash: "bash", zsh: "bash", fish: "bash",
+  sql: "sql", graphql: "graphql", gql: "graphql",
+  dockerfile: "dockerfile", tf: "hcl", hcl: "hcl",
+  diff: "diff", patch: "diff", proto: "protobuf",
+  ini: "ini", cfg: "ini", conf: "ini", mk: "makefile",
+  env: "bash", gitignore: "bash", txt: "text",
+  pdf: "pdf", docx: "word",
+};
+
+export function getFileLanguage(filePath: string): string {
+  const base = getBaseName(filePath).toLowerCase();
+  // Special full-name matches
+  if (base === "dockerfile" || base.startsWith("dockerfile.")) return "dockerfile";
+  if (base === ".env" || base.startsWith(".env.")) return "bash";
+  if (base === "makefile" || base === "gnumakefile") return "makefile";
+  const ext = base.split(".").pop() ?? "";
+  return EXT_TO_LANGUAGE[ext] ?? "text";
+}

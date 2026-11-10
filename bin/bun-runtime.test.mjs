@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -13,7 +13,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const isWindows = process.platform === "win32";
 
 function tempDir(t) {
-  const dir = mkdtempSync(path.join(tmpdir(), "bun-runtime-"));
+  const dir = realpathSync(mkdtempSync(path.join(tmpdir(), "bun-runtime-")));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }

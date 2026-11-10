@@ -1,6 +1,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { resolveOmpBin } from "./omp/omp-cli";
+import { createChildProcessEnvironment } from "./project-command-env";
 import { asNumber, isRecord } from "./type-guards";
 import type {
   ProviderUsageReport,
@@ -198,6 +199,14 @@ export function parseProviderUsageOutput(output: string, query: UsageQuery = {},
   if (!isRecord(payload)) throw new Error("omp usage returned an invalid response");
   const rawReports = Array.isArray(payload.reports) ? payload.reports : [];
   const reports = rawReports.flatMap((report, index) => isRecord(report) ? normalizeReport(report, query, now, index) : []);
+  const accountsWithoutUsage = Array.isArray(payload.accountsWithoutUsage) ? payload.accountsWithoutUsage : [];
+  for (const [index, account] of accountsWithoutUsage.entries()) {
+    if (!isRecord(account)) continue;
+    reports.push(...normalizeReport({
+      provider: account.provider,
+      metadata: { email: account.email },
+    }, query, now, rawReports.length + index));
+  }
   const generatedAt = asNumber(payload.generatedAt) ?? null;
   return { generatedAt, reports };
 }
@@ -210,6 +219,9 @@ async function fetchProviderUsage(refresh = false): Promise<string> {
       timeout: USAGE_TIMEOUT_MS,
       maxBuffer: USAGE_MAX_BUFFER,
       windowsHide: true,
+      // No `env` option would inherit the server's full environment,
+      // including omp-web's own secrets, into this child.
+      env: createChildProcessEnvironment(),
     });
   }
   // Unredacted so accounts show their real email; only the parsed label, plan
@@ -218,6 +230,7 @@ async function fetchProviderUsage(refresh = false): Promise<string> {
     timeout: USAGE_TIMEOUT_MS,
     maxBuffer: USAGE_MAX_BUFFER,
     windowsHide: true,
+    env: createChildProcessEnvironment(),
   });
   return stdout;
 }

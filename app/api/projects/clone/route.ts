@@ -1,102 +1,64 @@
-import { join } from "path";
-import { cloneDirectoryName } from "@/lib/git-clone";
-import { cloneRepository } from "@/lib/project-clone";
-import { ProjectPathError, validateProjectPath } from "@/lib/project-registry";
+import { apiErrorResponse, opErrorResponse, resolveWorkspaceHost } from "@/lib/api-utils";
+import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+import { isRecord } from "@/lib/type-guards";
+import type { CloneProgress } from "@/lib/git-clone";
 
-// In-flight clones by client-chosen id, so DELETE can cancel one while its
-// POST stream stays open to report the cleanup.
-const clones = new Map<string, AbortController>();
-const CLONE_ID = /^[A-Za-z0-9-]{1,64}$/;
-
-type CloneFrame =
-  | { type: "output"; text: string }
-  | { type: "done"; path: string }
-  | { type: "cancelled"; path: string }
-  | { type: "error"; error: string; code: string };
-
-// POST /api/projects/clone  body: { id, parent, url }
-// Clones `url` into `<parent>/<repo name>` and streams NDJSON frames:
-// output chunks, then exactly one of done / cancelled / error. The target is
-// removed on failure or cancellation (DELETE, or the client disconnecting).
-export async function POST(req: Request, { disableIdleTimeout }: { disableIdleTimeout: () => void }) {
-  let body: { id?: unknown; parent?: unknown; url?: unknown };
+export async function POST(request: Request, { disableIdleTimeout }: { disableIdleTimeout: () => void }) {
   try {
-    body = await req.json();
-  } catch {
-    return Response.json({ error: "Invalid request", code: "invalid_request" }, { status: 400 });
-  }
-  const id = typeof body.id === "string" && CLONE_ID.test(body.id) ? body.id : null;
-  const url = typeof body.url === "string" ? body.url.trim() : "";
-  const name = cloneDirectoryName(url);
-  if (!id || clones.has(id)) return Response.json({ error: "Invalid request", code: "invalid_request" }, { status: 400 });
-  if (!name) return Response.json({ error: "Enter an https:// or ssh Git URL", code: "invalid_git_url" }, { status: 400 });
-  let target: string;
-  try {
-    target = join(validateProjectPath(typeof body.parent === "string" ? body.parent : ""), name);
+    const body: unknown = await parseJsonWithinLimit(request, 64 * 1024);
+    if (!isRecord(body) || typeof body.id !== "string" || typeof body.parent !== "string" || typeof body.url !== "string") return Response.json({ error: "Invalid clone request", code: "invalid_request" }, { status: 400 });
+    const resolved = await resolveWorkspaceHost(body.hostId, null);
+    if ("response" in resolved) return resolved.response;
+    const { host } = resolved;
+    const id = body.id;
+    let active = true;
+    const cancel = () => { void host.workspaceOps.cancelClone(id).catch(() => {}); };
+    const started = await host.workspaceOps.startClone(id, body.parent, body.url.trim());
+    if (!started.ok) { request.signal.removeEventListener("abort", cancel); return opErrorResponse(started); }
+    request.signal.addEventListener("abort", cancel, { once: true });
+    if (request.signal.aborted) cancel();
+    let cursor = 0;
+    const encoder = new TextEncoder();
+    disableIdleTimeout();
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          let page: CloneProgress;
+          do {
+            const result = await host.workspaceOps.readClone(id, cursor);
+            if (!active) return;
+            if (!result.ok) throw new Error(result.error);
+            page = result.value;
+          } while (!page.terminal && page.frames.length === 0);
+          cursor = page.cursor;
+          if (page.reset) controller.enqueue(encoder.encode(`${JSON.stringify({ type: "output", text: "", reset: true })}\n`));
+          for (const frame of page.frames) controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
+          if (page.terminal) { active = false; request.signal.removeEventListener("abort", cancel); controller.close(); }
+        } catch {
+          if (!active) return;
+          active = false;
+          request.signal.removeEventListener("abort", cancel);
+          controller.enqueue(encoder.encode(`${JSON.stringify({ type: "error", code: "clone_uncertain", error: "The clone connection was interrupted; its outcome is unknown. Check the destination before retrying." })}\n`));
+          controller.close();
+        }
+      },
+      cancel() { active = false; request.signal.removeEventListener("abort", cancel); cancel(); },
+    }, { highWaterMark: 0 });
+    return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store" } });
   } catch (error) {
-    if (error instanceof ProjectPathError) return Response.json({ error: error.message, code: error.code }, { status: 400 });
-    throw error;
+    return apiErrorResponse(error, error instanceof RequestBodyTooLargeError ? 413 : error instanceof SyntaxError ? 400 : 500);
   }
-  // Registered before any await so a cancel sent while the target is being
-  // created is not a 404; cloneRepository skips git and cleans up its own target.
-  const controller = new AbortController();
-  clones.set(id, controller);
-  req.signal.addEventListener("abort", () => controller.abort(), { once: true });
-  if (req.signal.aborted) controller.abort();
-  const encoder = new TextEncoder();
-  let streamController!: ReadableStreamDefaultController<Uint8Array>;
-  const stream = new ReadableStream<Uint8Array>({
-    start(value) {
-      streamController = value;
-    },
-    cancel() {
-      controller.abort();
-    },
-  });
-  const send = (frame: CloneFrame) => {
-    try {
-      streamController.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
-    } catch {
-      // Client gone; the clone still finishes its cleanup.
-    }
-  };
-  const outputReady = Promise.withResolvers<null>();
-  const operation = cloneRepository({
-    origin: url,
-    target,
-    signal: controller.signal,
-    onOutput(text) {
-      send({ type: "output", text });
-      outputReady.resolve(null);
-    },
-  }).then((result) => {
-    clones.delete(id);
-    if (result.ok) send({ type: "done", path: result.value.path });
-    else if (result.code === "clone_cancelled") send({ type: "cancelled", path: target });
-    else send({ type: "error", error: result.error, code: result.code });
-    try {
-      streamController.close();
-    } catch {
-      // Already closed by a disconnect.
-    }
-    return result;
-  });
-  // The helper owns atomic target acquisition. Wait for output or completion so
-  // acquisition conflicts still return HTTP 409 rather than a streamed error.
-  const first = await Promise.race([outputReady.promise, operation]);
-  if (first && !first.ok && (first.code === "clone_target_exists" || first.code === "clone_target_failed"
-    || first.code === "project_target_busy" || first.code === "project_reservation_failed")) {
-    return Response.json({ error: first.error, code: first.code }, { status: first.status });
-  }
-  disableIdleTimeout();
-  return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
-// DELETE /api/projects/clone  body: { id } — cancel an in-flight clone.
-export async function DELETE(req: Request) {
-  const body = await req.json().catch(() => ({})) as { id?: unknown };
-  const controller = typeof body.id === "string" ? clones.get(body.id) : undefined;
-  if (!controller) return Response.json({ error: "No clone in progress", code: "clone_not_found" }, { status: 404 });
-  controller.abort();
-  return Response.json({ ok: true });
+export async function DELETE(request: Request) {
+  try {
+    const body: unknown = await parseJsonWithinLimit(request, 64 * 1024);
+    if (!isRecord(body) || typeof body.id !== "string") return Response.json({ error: "Invalid clone request", code: "invalid_request" }, { status: 400 });
+    const resolved = await resolveWorkspaceHost(body.hostId, null);
+    if ("response" in resolved) return resolved.response;
+    const result = await resolved.host.workspaceOps.cancelClone(body.id);
+    return result.ok ? Response.json({ ok: true, ...result.value }) : opErrorResponse(result);
+  } catch (error) {
+    return apiErrorResponse(error, error instanceof RequestBodyTooLargeError ? 413 : error instanceof SyntaxError ? 400 : 500);
+  }
 }

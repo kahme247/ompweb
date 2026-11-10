@@ -1,9 +1,10 @@
 "use client";
 
 import { Children, cloneElement, isValidElement, useContext, useMemo, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { type Components, type UrlTransform } from "react-markdown";
 import { remarkInlineCodeFileLinks, resolveLocalFileHref } from "@/lib/file-links";
-import { encodeFilePathForApi } from "@/lib/file-paths";
+import { getFileApiUrl } from "@/lib/file-paths";
+import { WorkspaceFileContext } from "@/lib/workspace-file-context";
 import { AgentLinkContext, agentAwareUrlTransform, agentLinkIds, remarkAgentLinks } from "../lib/agent-links";
 import { GithubRepoContext, remarkGithubRefs } from "../lib/github-refs";
 import { normalizeDisplayMath, useMarkdownPlugins, type MarkdownPlugins } from "../lib/markdown";
@@ -11,7 +12,11 @@ import { markdownCodeRenderer } from "./MarkdownCode";
 import { ClickableImage } from "./ImageLightbox";
 import { TableChart } from "./TableChart";
 
-interface MarkdownBodyProps {
+// The default sanitizer reads `C:` as a scheme; a drive path (`\` arrives as `%5C`) is a local file the `a` renderer opens.
+const urlTransform: UrlTransform = (url, key, node) => (/^[A-Za-z]:(?:\/|%5C)/i.test(url) ? url : agentAwareUrlTransform(url, key, node));
+
+/** Props accepted by `MarkdownBody`. */
+export interface MarkdownBodyProps {
   children: string;
   className?: string;
   isStreaming?: boolean;
@@ -22,8 +27,19 @@ interface MarkdownBodyProps {
   autoCharts?: boolean;
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages = false, autoCharts = false }: MarkdownBodyProps) {
+/** Everything `MarkdownBody` hands to `ReactMarkdown`: source text, plugins, element renderers and URL transform. */
+export interface MarkdownBodyRendering {
+  markdown: string;
+  remarkPlugins: MarkdownPlugins["remarkPlugins"];
+  rehypePlugins: MarkdownPlugins["rehypePlugins"];
+  components: Components;
+  urlTransform: UrlTransform;
+}
+
+/** Builds omp-web's markdown rendering setup (links, images, tables, code) so any renderer can reuse it. */
+export function useMarkdownBodyRendering({ children, isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages = false, autoCharts = false }: Omit<MarkdownBodyProps, "className">): MarkdownBodyRendering {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
+  const fileSource = useContext(WorkspaceFileContext);
   const { remarkPlugins: baseRemarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
   const githubRepo = useContext(GithubRepoContext);
   // GitHub refs run first: `agent://Foo#12` must not become an issue link.
@@ -45,7 +61,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, sourceSess
       if (suppressImages) return alt ?? null;
       const filePath = typeof src === "string" ? resolveLocalFileHref(src, cwd) : null;
       const imageSrc = filePath
-        ? `/api/files/${encodeFilePathForApi(filePath)}?type=read${sourceSessionId ? `&sessionId=${encodeURIComponent(sourceSessionId)}` : ""}`
+        ? getFileApiUrl(filePath, "read", fileSource?.hostId ?? (sourceSessionId ? undefined : "local"), sourceSessionId ?? fileSource?.sessionId)
         : src;
       // Dynamic local paths are served directly by the file API.
       return <ClickableImage src={imageSrc} alt={alt ?? ""} loading="lazy" {...imgProps} />;
@@ -122,18 +138,20 @@ export function MarkdownBody({ children, className, isStreaming, cwd, sourceSess
         const anchor = <a href={href} {...props} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{textParts}</a>;
         return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
       }
-      const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
-      const openFile = onOpenFile;
-      if (filePath && openFile) {
+      const filePath = resolveLocalFileHref(href, cwd);
+      if (filePath) {
+        // Without a file panel (a remote host's session, a dialog) a path link has nowhere to go: show its text.
+        if (!onOpenFile) return <>{textParts}{imageParts}</>;
+        const openFile = onOpenFile;
         const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+          // No modifier escape hatch: the href is a filesystem path, which the browser cannot open in a new tab.
           if (event.defaultPrevented || event.button !== 0) return;
-          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           const target = event.currentTarget.getAttribute("target");
           if (target && target !== "_self") return;
           event.preventDefault();
           openFile(filePath);
         };
-        const anchor = <a href={href} {...props} onClick={handleClick}>{textParts}</a>;
+        const anchor = <a href={href} {...props} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{textParts}</a>;
         return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
       }
 
@@ -155,17 +173,24 @@ export function MarkdownBody({ children, className, isStreaming, cwd, sourceSess
       );
     },
     };
-  }, [isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages, openAgentLink, autoCharts]);
+  }, [isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages, openAgentLink, autoCharts, fileSource]);
+
+  return { markdown: normalizedMarkdown, remarkPlugins, rehypePlugins, components, urlTransform };
+}
+
+/** Render agent markdown with `useMarkdownBodyRendering`'s setup. */
+export function MarkdownBody({ className, ...props }: MarkdownBodyProps) {
+  const rendering = useMarkdownBodyRendering(props);
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
       <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
-        components={components}
-        urlTransform={agentAwareUrlTransform}
+        remarkPlugins={rendering.remarkPlugins}
+        rehypePlugins={rendering.rehypePlugins}
+        components={rendering.components}
+        urlTransform={rendering.urlTransform}
       >
-        {normalizedMarkdown}
+        {rendering.markdown}
       </ReactMarkdown>
     </div>
   );

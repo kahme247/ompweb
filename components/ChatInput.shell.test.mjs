@@ -28,7 +28,6 @@ function renderComposer(sendStatus) {
     onSend: record("onSend"),
     onSteer: record("onSteer"),
     onFollowUp: record("onFollowUp"),
-    onPromptWithStreamingBehavior: record("onPromptWithStreamingBehavior"),
   }));
   return calls;
 }

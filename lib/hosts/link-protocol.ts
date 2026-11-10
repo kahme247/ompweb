@@ -6,9 +6,12 @@ import { isValidSessionId } from "../session-file-references-core";
 import { UPLOAD_ID_RE } from "../upload-limits";
 import type { SessionOps } from "./session-ops";
 import type { HostCapacity } from "./capacity";
+import type { SpawnRequest } from "./host";
+import { isWorkspaceOp, WORKSPACE_OP_PARAMS } from "../workspace-types";
+import type { WorkspaceFileEvent } from "../workspace-types";
 
-/** 7: volatile capacity reports, stable creation identity and pooled project preparation. 6: composer uploads
- * (docs/specs/2026-11-02-file-uploads-design.md, U5): binary down frames carry upload bytes, the
+/** 7: shared host-owned channels, lifecycle, dialogs and callbacks; optional pool capacity, creation identity
+ * and project preparation. 6: composer uploads
  * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
  * `part` messages and a large result as several binary frames, both sent fair across channels
  * (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry the messages,
@@ -45,6 +48,8 @@ export const LINK_LIMITS = {
   maxLineBytes: 8 * 1024 * 1024,
   /** Per channel: open blocking requests past this are not replayed (the channel is not adoptable). */
   pendingBytes: 1024 * 1024,
+  /** A shared channel's `ready` wait (the legacy wrapper's allowance); an open waits for it plus opTimeoutMs. */
+  channelReadyMs: 120_000,
   /** Link head-of-line samples (metric "link"): each side writes or reports them at this count, else after statsFlushMs.
    * Also the most one `stats` message may carry, which bounds it to about 40 KB. */
   statsSamples: 256,
@@ -54,10 +59,26 @@ export const LINK_LIMITS = {
 /** WebSocket close codes the link uses. */
 export const LINK_CLOSE = { goingAway: 1001, invalidData: 1007, policy: 1008, tooBig: 1009, replaced: 4409, versionMismatch: 4426 } as const;
 
+/** Native commands that append to, replace or resume the active history: a history edit fences them on every link. */
+export const HISTORY_MUTATING_COMMANDS = new Set([
+  "edit_message", "prompt", "steer", "follow_up", "followUp", "abort", "abort_and_prompt",
+  "abort_and_restore_queue", "remove_queued_message", "promote_queued_message",
+  "fork", "branch", "new_session", "switch_session", "compact", "abort_compaction",
+  "reload", "bash", "abort_bash", "handoff", "set_todos", "set_session_name",
+  "set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level",
+  "set_fast_mode", "set_slow_mode", "set_auto_compaction", "set_auto_retry", "abort_retry",
+]);
+/** Commands whose user message a peer's identical echo could be mistaken for. */
+export const MESSAGE_COMMANDS = new Set(["prompt", "steer", "follow_up", "followUp", "abort_and_prompt"]);
+/** Shared-channel marker a daemon puts in the other members' output when one link writes a message command. */
+export const PEER_MESSAGE_FRAME = "peer_message_command";
+export type HostUriScheme = { scheme: string; writable: boolean };
+
 /** Named `req.args` keys for each session op, in parameter order. Named, not
  * positional, so an omitted optional argument never turns into `null`. */
 export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly string[] } = {
   listSessions: [],
+  listSessionIdsForRestore: [],
   readSession: ["id", "options"],
   readContext: ["id", "leafId", "options"],
   readThinking: ["id", "entryId", "block"],
@@ -67,6 +88,10 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   renameSessionFile: ["id", "title", "source"],
   deleteSession: ["id", "liveSessionIds"],
   archiveSession: ["id"],
+  listArchives: [],
+  restoreReserve: ["claim"],
+  restoreArchive: ["key", "claim"],
+  restoreFence: ["claim"],
   exportSession: ["id"],
   readMedia: ["hash"],
   listProjects: [],
@@ -75,18 +100,16 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   hideProject: ["path"],
   validateCwd: ["path"],
   preparePoolProject: ["input"],
-  workspaceRequest: ["input"],
-  workspaceRead: ["id"],
-  workspaceClose: ["id"],
-  workspaceWatch: ["context", "path"],
-  workspaceWatchPoll: ["id"],
-  workspaceUnwatch: ["id"],
 };
 
-/** Every op a daemon answers. Older daemons refuse unknown ops with 501; uploads require v6, pool preparation v7. */
-export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), "spawn", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach"] as const;
+/** Unknown additions are answered with 501; standalone v7 peers need not support pool preparation. */
+export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "open", "close", "editLease", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
+
+export type OpenChannelRequest = { sessionId: string | null; launch: SpawnRequest; replaceAdvisor?: boolean; preparing?: boolean; expectedChannel?: string };
+/** `supportsBashExcludeFromContext`: exact true only when the child's ready advertised it; an older daemon omits it, which is false. */
+export type OpenChannelResult = { ch: string; joined: boolean; pending: string[] | null; streaming: string | null; cwd: string; fellBack: boolean; launchAdvisor: boolean; advisorSpawned: boolean; autoApproveExtension: boolean; supportsBashExcludeFromContext?: boolean };
 
 /** A failed host op, as carried by `res {ok: false, error}`. */
 export class HostOpError extends Error {
@@ -109,6 +132,8 @@ export type DownMessage =
   | { type: "welcome"; v: number; hostId: string }
   | { type: "stdin"; seq: number; ch: string; line: string }
   | { type: "kill"; seq: number; ch: string; force: boolean }
+  | { type: "interest"; seq: number; ch: string; on: boolean; preparing: boolean }
+  | { type: "host_tools"; seq: number; ch: string; tools: unknown[]; schemes: HostUriScheme[] }
   /** `op` is whatever the sender named: the daemon answers one it does not know with 501 `unknown_op`. */
   | { type: "req"; seq: number; id: string; op: string; args: unknown }
   | { type: "ping" }
@@ -133,6 +158,8 @@ export type UpMessage =
       ompVersion: string | null;
       /** Running daemon's application version; absent on older hosts. */
       ompwebVersion?: string;
+      link?: { id: string; notifier: boolean };
+      workspaceOps?: string[];
       platform: string;
       home: string;
       /** omp's `tools.approval.extension: allow` on the host: a run adopted after a web restart had no spawn to report it. */
@@ -142,8 +169,12 @@ export type UpMessage =
     }
   | { type: "stdout"; seq: number; ch: string; line: string }
   | { type: "stderr"; seq: number; ch: string; chunk: string }
-  | { type: "exit"; seq: number; ch: string; code: number | null; signal: string | null }
+  /** `reason`: v7, the daemon stopped it on purpose (abandoned, idle, asked); absent for a crash. */
+  | { type: "exit"; seq: number; ch: string; code: number | null; signal: string | null; reason?: string }
   | { type: "resync"; seq: number; ch: string }
+  | { type: "notifier"; seq: number; on: boolean }
+  | { type: "sessions_changed"; seq: number }
+  | { type: "channels_changed"; seq: number; channels: HelloChannel[] }
   /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. Advisory: the
    * receiver keeps the valid ones and counts the rest in `invalid` (decodeUp only; a sender leaves it out). */
   | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
@@ -152,6 +183,7 @@ export type UpMessage =
   /** v6: the daemon has written `received` bytes of upload `id` for this start `attempt`, `done` once all of them are
    * written and synced; with `error` the upload failed and its staged file is gone. */
   | { type: "upload_ack"; seq: number; id: string; attempt: string; received: number; done: boolean; error?: { status: number; code: string; message: string } }
+  | { type: "workspace_file"; seq: number; id: string; epoch: string; event: WorkspaceFileEvent }
   | { type: "res"; seq: number; id: string; ok: true; result?: unknown; blob?: { bytes: number } }
   | {
       type: "res";
@@ -259,8 +291,8 @@ export function isHostOp(name: string): name is HostOpName {
   return (HOST_OP_NAMES as readonly string[]).includes(name);
 }
 
-const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "ping", "pong", "ack"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "capacity", "res", "upload_ack", "ping", "pong", "ack"];
+const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "interest", "host_tools", "req", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "notifier", "sessions_changed", "channels_changed", "stats", "capacity", "res", "upload_ack", "workspace_file", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -326,6 +358,14 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
       return { type: "stdin", seq: seqNum(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "kill":
       return { type: "kill", seq: seqNum(o, "seq"), ch: str(o, "ch"), force: bool(o, "force") };
+    case "interest":
+      return { type: "interest", seq: seqNum(o, "seq"), ch: str(o, "ch"), on: bool(o, "on"), preparing: bool(o, "preparing") };
+    case "host_tools": {
+      const schemes = o.schemes;
+      if (!Array.isArray(schemes) || !schemes.every((entry) => isObj(entry) && typeof entry.scheme === "string" && typeof entry.writable === "boolean")) fail("schemes must be an array of {scheme, writable}");
+      return { type: "host_tools", seq: seqNum(o, "seq"), ch: str(o, "ch"), tools: Array.isArray(o.tools) ? o.tools : fail("tools must be an array"),
+        schemes: (schemes as Obj[]).map((entry) => ({ scheme: entry.scheme as string, writable: entry.writable as boolean })) };
+    }
     case "req":
       return { type: "req", seq: seqNum(o, "seq"), id: str(o, "id"), op: str(o, "op"), args: "args" in o ? o.args : fail("args must be present") };
     case "ping":
@@ -418,6 +458,11 @@ function res(o: Obj): UpMessage {
   return fail("ok must be true or false");
 }
 
+function helloLink(value: unknown): { id: string; notifier: boolean } {
+  if (!isObj(value)) fail("link must be an object");
+  return { id: str(value, "id"), notifier: bool(value, "notifier") };
+}
+
 export function decodeUp(line: string): UpMessage | UnknownMessage {
   const o = parseLine(line);
   switch (o.type) {
@@ -427,6 +472,8 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
         v: int(o, "v"),
         ompVersion: nullable(o, "ompVersion", str),
         ...(o.ompwebVersion === undefined ? {} : { ompwebVersion: str(o, "ompwebVersion") }),
+        ...(o.workspaceOps === undefined ? {} : { workspaceOps: strings(o, "workspaceOps").slice(0, Object.keys(WORKSPACE_OP_PARAMS).length).filter(isWorkspaceOp) }),
+        ...(o.link === undefined ? {} : { link: helloLink(o.link) }),
         platform: str(o, "platform"),
         home: str(o, "home"),
         autoApproveExtension: bool(o, "autoApproveExtension"),
@@ -444,9 +491,16 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
         ch: str(o, "ch"),
         code: nullable(o, "code", int),
         signal: nullable(o, "signal", str),
+        ...(o.reason === undefined ? {} : { reason: str(o, "reason") }),
       };
     case "resync":
       return { type: "resync", seq: seqNum(o, "seq"), ch: str(o, "ch") };
+    case "notifier":
+      return { type: "notifier", seq: seqNum(o, "seq"), on: bool(o, "on") };
+    case "sessions_changed":
+      return { type: "sessions_changed", seq: seqNum(o, "seq") };
+    case "channels_changed":
+      return { type: "channels_changed", seq: seqNum(o, "seq"), channels: channels(o) };
     case "stats":
       return stats(o);
     case "capacity":
@@ -456,6 +510,14 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       if (!UPLOAD_ID_RE.test(attempt)) fail("attempt must be a UUIDv4");
       const ack = { type: "upload_ack" as const, seq: seqNum(o, "seq"), id: str(o, "id"), attempt, received: seqNum(o, "received"), done: bool(o, "done") };
       return o.error === undefined ? ack : { ...ack, error: errorBody(o.error) };
+    }
+    case "workspace_file": {
+      const event = o.event;
+      if (!isObj(event)) fail("event must be an object");
+      const value = event.type === "change"
+        ? { type: "change" as const, mtime: str(event, "mtime"), size: seqNum(event, "size") }
+        : event.type === "error" ? { type: "error" as const, message: str(event, "message") } : fail("Invalid workspace file event");
+      return { type: "workspace_file", seq: seqNum(o, "seq"), id: str(o, "id"), epoch: str(o, "epoch"), event: value };
     }
     case "res":
       return res(o);
@@ -605,6 +667,20 @@ export class LinkSender<T extends SendItem> {
     for (const { left } of this.queues.get(key) ?? []) this.queued -= left;
     this.queues.delete(key);
     if (this.active === key) this.active = null;
+  }
+
+  /** Drop unnumbered output without dropping an open result sharing its ordering key. */
+  dropWhere(key: string, predicate: (item: T) => boolean): void {
+    const queue = this.queues.get(key);
+    if (!queue) return;
+    const kept = queue.filter(entry => {
+      if (!predicate(entry.item)) return true;
+      this.queued -= entry.left;
+      if (this.active === key && entry === queue[0]) this.active = null;
+      return false;
+    });
+    if (kept.length === 0) this.queues.delete(key);
+    else this.queues.set(key, kept);
   }
 
   /** Forget every result's bytes not sent yet, a result part-way out included, but not the `res` behind them: after a
