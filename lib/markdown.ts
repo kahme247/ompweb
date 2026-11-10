@@ -109,10 +109,12 @@ interface MdNode {
 }
 
 /**
- * remark-math reads any `$…$` pair as math, so prices ("$5 and $10") render as
- * glued italics. Pandoc's rule decides instead: the opening `$` is followed by
- * non-space, the closing `$` is preceded by non-space and not followed by a
- * digit. Other single-dollar spans go back to their source text. Runs after remark-math.
+ * remark-math reads any `$…$` pair as math, so prices ("$5 and $10",
+ * "R$ 5 e R$ 10") render as glued italics. Pandoc's rule decides instead: the
+ * opening `$` is followed by non-space, the closing `$` is preceded by
+ * non-space and not followed by a digit. An opening `$` glued to a letter or
+ * digit (R$, US$) is a currency sign, not math. Other single-dollar spans go
+ * back to their source text. Runs after remark-math.
  */
 export function remarkLiteralDollars() {
   return (tree: MdNode, file: { toString(): string }) => {
@@ -123,7 +125,8 @@ export function remarkLiteralDollars() {
       if (node.type !== "inlineMath" || start === undefined || end === undefined) return null;
       const raw = source.slice(start, end);
       if (raw.startsWith("$$") || !raw.startsWith("$") || !raw.endsWith("$")) return null;
-      return /^\s|\s$/.test(raw.slice(1, -1)) || /\d/.test(source[end] ?? "") ? raw : null;
+      const literal = /^\s|\s$/.test(raw.slice(1, -1)) || /\d/.test(source[end] ?? "") || /[\p{L}\p{N}]/u.test(source[start - 1] ?? "");
+      return literal ? raw : null;
     };
     const walk = (node: MdNode) => {
       if (!node.children) return;

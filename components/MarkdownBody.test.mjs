@@ -51,10 +51,13 @@ test("renders LaTeX parenthesis delimiters as inline math", async () => {
 test("keeps dollar amounts literal while $x$ stays math", async () => {
   await loadMathMarkdownPlugins();
   const prices = renderMarkdown("Costs $5 and $10, or $ 3 $ each.");
+  const reais = renderMarkdown("De R$5,00 por R$ 10 e US$3.");
   const math = renderMarkdown("Let $x^2$ and $y$ be $3.");
 
   assert.doesNotMatch(prices, /class="katex"/);
   assert.match(prices, /Costs \$5 and \$10, or \$ 3 \$ each\./);
+  assert.doesNotMatch(reais, /class="katex"/);
+  assert.match(reais, /De R\$5,00 por R\$ 10 e US\$3\./);
   assert.equal(math.match(/class="katex"/g)?.length, 2);
   assert.match(math, /be \$3\./);
 });
