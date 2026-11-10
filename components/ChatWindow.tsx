@@ -11,6 +11,7 @@ import { resolveForkTargets } from "@/lib/chat-fork";
 import { renderTranscriptGroupRow, type RenderMessage } from "./ChatWindow-transcript-group-row";
 import { ChatLiveTail } from "./ChatWindow-live-tail";
 import { HeldMessageView, MessageView } from "./MessageView";
+import { AssistantOutputStep, AssistantTurnHeader, assistantModelName, hasAssistantOutput } from "./TranscriptOutput";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
@@ -173,6 +174,7 @@ function assistantSpeech(
   return null;
 }
 
+
 // Retain the last successful value across welcome-screen remounts, not reloads.
 let lastKnownOmpVersion: string | undefined;
 
@@ -208,12 +210,14 @@ export function OmpRuntimeVersion() {
   );
 }
 
+
 interface CommittedTranscriptProps {
   messages: AgentMessage[];
   entryIds: string[];
   conversationMeta: { toolResultsMap: Map<string, ToolResultMessage>; lastAnchorIdx: number; visibleRefIndexByMessage: Map<number, number> };
   messageRefs: React.RefObject<(HTMLDivElement | null)[]>;
   isStreaming: boolean;
+  streamingHasOutput: boolean;
   sessionBusy: boolean;
   isCompacting: boolean;
   /** A run started outside this UI looks active from the transcript tail (see
@@ -237,6 +241,7 @@ interface CommittedTranscriptProps {
   showToolCallsUnfolded: boolean;
   expandThinkingByDefault: boolean;
   hideThinkingBlock: boolean;
+  searchQuery: string;
   visibleCount: number;
   /** True while the viewport is near the bottom of the conversation. When
    *  false (user is reading history), the render window anchors its top so
@@ -253,15 +258,22 @@ interface CommittedTranscriptProps {
  * change `streamingMessage`, rendered separately) do not re-run the O(history)
  * grouping/splitting work at display-frame cadence.
  */
-const CommittedTranscript = memo(function CommittedTranscript({
-  messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
+export const CommittedTranscript = memo(function CommittedTranscript({
+  messages, entryIds, conversationMeta, messageRefs, isStreaming, streamingHasOutput, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
   handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
-  toolCallsDefaultCollapsed, hideToolActivity, neverFoldActivity, showToolCallsUnfolded, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  toolCallsDefaultCollapsed, hideToolActivity, neverFoldActivity, showToolCallsUnfolded, expandThinkingByDefault, hideThinkingBlock, searchQuery = "", visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
   // omp's `branch` command accepts a user entry only; see lib/chat-fork.ts.
   const forkTargets = useMemo(() => resolveForkTargets(messages, entryIds), [messages, entryIds]);
+  const latestOutputIndex = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (hasAssistantOutput(messages[index])) return index;
+      if (isGroupAnchor(messages[index])) break;
+    }
+    return -1;
+  }, [messages]);
 
   const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
     messageRefs.current[refIndex] = el;
@@ -293,7 +305,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
     const canOfferFork = !sessionBusy && !isNew && !!forkTarget && forkableRow;
     const canOfferEdit = !sessionBusy && !isCompacting && !isNew && msg.role === "user" && !msg.branchSummary && !!entryIds[idx];
     const historyMutationPending = forkingEntryId !== null || editingEntryId !== null;
-    const view = (
+    const focusedOutput = hasAssistantOutput(msg);
+    const messageView = (
       <MessageView
         key={`${keyPrefix}-view-${idx}`}
         message={msg}
@@ -317,8 +330,16 @@ const CommittedTranscript = memo(function CommittedTranscript({
         expandThinkingByDefault={expandThinkingByDefault}
         hideThinking={hideThinkingBlock}
         sourceBlockIndices={options.sourceBlockIndices}
+        hideModelLabel={focusedOutput}
+        compactActions={focusedOutput}
       />
     );
+    const view = focusedOutput ? (
+      <AssistantOutputStep key={`${keyPrefix}-output-${idx}`} latest={options.latest ?? (idx === latestOutputIndex && !streamingHasOutput)} final={options.final}>
+        {messageView}
+        {options.followingActivity}
+      </AssistantOutputStep>
+    ) : <Fragment key={`${keyPrefix}-container-${idx}`}>{messageView}{options.followingActivity}</Fragment>;
     if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
     return (
       <div key={`${keyPrefix}-${idx}`} data-message-index={idx} ref={attachVisibleRef(idx, currentRefIdx)}>
@@ -371,10 +392,17 @@ const CommittedTranscript = memo(function CommittedTranscript({
   for (let rowIdx = startIndex; rowIdx < rows.length; rowIdx++) {
     const row = rows[rowIdx];
     if (row.kind === "message") {
+      const message = messages[row.index];
+      if (message.role === "assistant" && hasAssistantOutput(message)) rendered.push(<AssistantTurnHeader key={`orphan-model-${row.index}`} model={assistantModelName(message, modelNames)} />);
       rendered.push(renderMessage(row.index));
       continue;
     }
-    rendered.push(...renderTranscriptGroupRow(row, { messages, renderMessage, flat: rendersFlat(row), messageRefs, visibleRefIndexByMessage }));
+    rendered.push(...renderTranscriptGroupRow(row, {
+      messages, renderMessage, flat: rendersFlat(row), messageRefs, visibleRefIndexByMessage,
+      entryIds, modelNames,
+      turnActive: row.endIndex === messages.length && row.userIndex === lastAnchorIdx && (sessionBusy || externalRunActive || isStreaming),
+      latestOutputIndex, streamingHasOutput, searchQuery, expandThinkingByDefault, showToolCallsUnfolded,
+    }));
   }
   return (
     <>
@@ -820,13 +848,18 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     let hasCompaction = false;
     const visibleRefIndexByMessage = new Map<number, number>();
     let refIdx = 0;
+    let lastOutputModel: string | null = null;
 
     messages.forEach((message, index) => {
       if (message.role === "custom" && message.customType === "compaction") hasCompaction = true;
-      if (isGroupAnchor(message)) lastAnchorIdx = index;
+      if (isGroupAnchor(message)) {
+        lastAnchorIdx = index;
+        lastOutputModel = null;
+      }
+      if (message.role === "assistant" && hasAssistantOutput(message)) lastOutputModel = `${message.provider}:${message.model}`;
       if (message.role === "user" || message.role === "assistant") visibleRefIndexByMessage.set(index, refIdx++);
     });
-    return { toolResultsMap, lastAnchorIdx, hasCompaction, visibleRefIndexByMessage };
+    return { toolResultsMap, lastAnchorIdx, hasCompaction, visibleRefIndexByMessage, lastOutputModel };
   }, [messages]);
   // Runtime tool results span committed messages plus the tool calls omp is
   // still executing. A committed result always wins; the live snapshot only
@@ -1289,6 +1322,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
               conversationMeta={conversationMetaWithLive}
               messageRefs={messageRefs}
               isStreaming={streamState.isStreaming}
+              streamingHasOutput={hasAssistantOutput(streamState.streamingMessage)}
               sessionBusy={sessionBusy}
               isCompacting={isCompacting}
               externalRunActive={externalRunActive}
@@ -1307,6 +1341,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
               showToolCallsUnfolded={showToolCallsUnfolded}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
+              searchQuery={searchQuery}
               visibleCount={visibleCount}
               nearBottom={nearBottom}
               sentinelRef={sentinelRef}
@@ -1314,6 +1349,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
             />
             <ChatLiveTail
               streamingMessage={streamState.streamingMessage}
+              isStreaming={streamState.isStreaming}
+              previousOutputModel={conversationMeta.lastOutputModel}
               liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
               pendingToolHeaders={pendingToolHeaders}
               deferredBash={deferredBash}
