@@ -61,6 +61,8 @@ test("keeps dollar amounts literal while $x$ stays math", async () => {
     ["open https://x.com/?q=$HOME and $5", /href="https:\/\/x\.com\/\?q=\$HOME"[^>]*>https:\/\/x\.com\/\?q=\$HOME<\/a> and \$5/],
     ["Price $5<br>and $6", /Price \$5<br\/?>and \$6/],
     ["<b>Note:</b> costs $5 and $10", /<b>Note:<\/b> costs \$5 and \$10/],
+    [">     echo $HOME", /<code[^>]*>echo \$HOME\n?<\/code>/],
+    ["<div>\nPrice $5 and $6\n</div>", /<div>\nPrice \$5 and \$6\n<\/div>/],
   ];
   for (const [markdown, expected] of literal) {
     const html = renderMarkdown(markdown);
@@ -71,6 +73,7 @@ test("keeps dollar amounts literal while $x$ stays math", async () => {
   assert.equal(katexCount(renderMarkdown("Let $x^2$ and $y$ be $3.")), 2);
   assert.equal(katexCount(renderMarkdown("price is $5, then $x$ later")), 1);
   assert.equal(katexCount(renderMarkdown("设$x$为实数，$y$也是")), 2);
+  assert.equal(katexCount(renderMarkdown(String.raw`see $\text{https://example.com}$ and $a +` + "\n" + "b$")), 2);
   assert.deepEqual(renderedTextNodes("Costs $5 and $10 each"), ["Costs $5 and $10 each"]);
 });
 

@@ -80,7 +80,7 @@ export function loadMathMarkdownPlugins(): Promise<MarkdownPlugins> {
   if (!mathMarkdownPluginsPromise) {
     mathMarkdownPluginsPromise = (async () => {
       const [remarkMath, rehypeKatex] = await Promise.all([
-        import("remark-math").then((m) => m.default),
+        import("./remark-pandoc-math").then((m) => m.default),
         import("rehype-katex").then((m) => m.default),
       ]);
       if (typeof document !== "undefined") await loadKatexCss();
@@ -177,15 +177,9 @@ export function normalizeDisplayMath(markdown: string): string {
       continue;
     }
 
-    if (inlineCodeMarkerSize) {
+    if (inlineCodeMarkerSize || line.includes("`")) {
       inlineCodeMarkerSize = updateInlineCodeMarker(line, inlineCodeMarkerSize);
       normalized.push(line);
-      continue;
-    }
-
-    if (line.includes("`")) {
-      inlineCodeMarkerSize = updateInlineCodeMarker(line, 0);
-      normalized.push(escapeLiteralDollars(line));
       continue;
     }
 
@@ -272,7 +266,7 @@ export function normalizeDisplayMath(markdown: string): string {
       }
     }
 
-    normalized.push(normalizeInlineLatexMath(escapeLiteralDollars(line)));
+    normalized.push(normalizeInlineLatexMath(line));
   }
 
   return normalized.join(lineBreak);
@@ -376,86 +370,6 @@ function updateInlineCodeMarker(line: string, initialMarkerSize: number): number
     cursor = end;
   }
   return markerSize;
-}
-
-const HTML_TAG = /<[A-Za-z/!][^>]*>/y;
-const BARE_URL = /(?:https?:\/\/|www\.)\S+/iy;
-// CommonMark HTML block starts (types 1, 2 and 6); a line opening with an inline tag (`<b>`) is a paragraph.
-const HTML_BLOCK_START =
-  /^ {0,3}(?:<!--|<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul|pre|script|style|textarea)(?:[\s/>]|$))/i;
-
-/**
- * remark-math pairs any two `$`, so prices ("$5 and $10", "R$5 or US$10")
- * render as glued italics. Escapes every single `$` that Pandoc's rule does
- * not pair: an opener is followed by non-space, the next `$` closes it only
- * when preceded by non-space and not followed by a digit. A letter glued
- * before an opener that precedes a digit (R$5, US$10) is a currency sign.
- */
-// shortcut: pairs within one line, so inline math spanning lines renders as text; upgrade to a micromark extension if that shows up.
-function escapeLiteralDollars(line: string): string {
-  // An HTML block keeps backslashes literally; inline tags are skipped below.
-  if (!line.includes("$") || HTML_BLOCK_START.test(line)) return line;
-  const escaped: number[] = [];
-  let opener = -1;
-  for (let index = 0; index < line.length; index++) {
-    const char = line[index];
-    if (char === "\\") {
-      index++;
-      continue;
-    }
-    // Tags, autolinks and bare URLs keep a `\` literally, so their `$` stay as typed.
-    const opaque = char === "<" ? HTML_TAG : /[hHwW]/.test(char) && !/[A-Za-z0-9]/.test(line[index - 1] ?? "") ? BARE_URL : null;
-    if (opaque) {
-      opaque.lastIndex = index;
-      if (opaque.test(line)) {
-        index = opaque.lastIndex - 1;
-        continue;
-      }
-    }
-    if (char === "`") {
-      const close = codeSpanEnd(line, index);
-      if (close === -1) break; // the span continues on a later line
-      index = close - 1;
-      continue;
-    }
-    if (char !== "$") continue;
-    if (line[index + 1] === "$") {
-      while (line[index + 1] === "$") index++; // `$$` runs are display/double math
-      continue;
-    }
-    const before = line[index - 1] ?? "";
-    const after = line[index + 1] ?? "";
-    if (opener !== -1) {
-      const closes = /\S/.test(before) && !/\d/.test(after);
-      if (!closes) escaped.push(opener);
-      opener = -1;
-      if (closes) continue;
-    }
-    if (/\S/.test(after) && !(/[A-Za-z]/.test(before) && /\d/.test(after))) opener = index;
-    else escaped.push(index);
-  }
-  if (opener !== -1) escaped.push(opener);
-  let result = line;
-  for (const index of escaped.reverse()) result = `${result.slice(0, index)}\\${result.slice(index)}`;
-  return result;
-}
-
-/** End of the code span opened by the backtick run at `start`, or -1 when this line does not close it. */
-function codeSpanEnd(line: string, start: number): number {
-  let end = start;
-  while (line[end] === "`") end++;
-  const size = end - start;
-  for (let cursor = end; cursor < line.length;) {
-    if (line[cursor] !== "`") {
-      cursor++;
-      continue;
-    }
-    let runEnd = cursor;
-    while (line[runEnd] === "`") runEnd++;
-    if (runEnd - cursor === size) return runEnd;
-    cursor = runEnd;
-  }
-  return -1;
 }
 
 function normalizeInlineLatexMath(line: string): string {

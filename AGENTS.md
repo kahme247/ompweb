@@ -173,6 +173,7 @@ lib/
   git-clone.ts         pure clone helpers: URL→directory name (https/ssh only), \r-aware progress log
   github-repo.ts       server: pick the gh-default GitHub remote from git config
   markdown.ts          shared markdown helpers
+  remark-pandoc-math.ts  remark-math with Pandoc's single-dollar rule, so prices ("$5 and $10", "R$5") stay text; chat and search listing
   npx.ts               npx runner used by skill install
   pi-types.ts          local structural types for agent/RPC objects
   project-command-env.ts  child-process environments: strips PORT/NODE_ENV/NEXT_* and omp-web's secrets
