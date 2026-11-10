@@ -775,7 +775,7 @@ async function deliver(entry: Row): Promise<Outcome> {
     || (competingPending && !wrapper.hasPendingMessageCommands())) return "next";
   if (competingPending && !wrapper.isRunning()) {
     try {
-      if (await wrapper.renewMessageProofBoundaryIfIdle()) return "next";
+      if (await wrapper.clearMessageProofTaintIfSettled()) return "next";
     } catch (error) {
       return refused(current, commandErrorResponse(error), false);
     }
@@ -867,7 +867,7 @@ async function deliver(entry: Row): Promise<Outcome> {
     const body = await response.json() as { data?: { agentInvoked?: boolean } };
     if (row(current.id)?.state === "failed") return "next";
     const handOff = body.data?.agentInvoked === false ? {} : await replacement.handOff();
-    // Proven dropped (spec O6) leaves the child untainted, like a delivery: no renewal before the next message.
+    // Proven dropped (spec O6) leaves the child untainted, like a delivery: no settle read before the next message.
     if (!handOff.error || handOff.mayHaveBeenSent === false) wrapper.confirmMessageCommandGeneration((priorWrapper === wrapper ? generation : 0) + 1);
     if (handOff.error) return fail(current, handOff.error, handOff.mayHaveBeenSent === true);
     retire(current.id, body.data?.agentInvoked === false ? "none" : correlated ? "native" : "uncorrelated");
