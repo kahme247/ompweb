@@ -7,7 +7,7 @@ import { UPLOAD_ID_RE } from "../upload-limits";
 import type { SessionOps } from "./session-ops";
 import type { HostCapacity } from "./capacity";
 
-/** 7: volatile capacity reports and stable creation identity. 6: composer uploads
+/** 7: volatile capacity reports, stable creation identity and pooled project preparation. 6: composer uploads
  * (docs/specs/2026-11-02-file-uploads-design.md, U5): binary down frames carry upload bytes, the
  * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
  * `part` messages and a large result as several binary frames, both sent fair across channels
@@ -74,9 +74,10 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   updateProject: ["updates"],
   hideProject: ["path"],
   validateCwd: ["path"],
+  preparePoolProject: ["input"],
 };
 
-/** Every op a daemon answers. Older daemons refuse newer ops with unknown_op; upload ops require v6. */
+/** Every op a daemon answers. Older daemons refuse unknown ops with 501; uploads require v6, pool preparation v7. */
 export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), "spawn", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];

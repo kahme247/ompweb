@@ -179,8 +179,10 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   const creations = new Map<string, Creation>();
   // Spawns not yet in `channels`: their omp child may already be running.
   let spawnsInFlight = 0;
+  let preparationsInFlight = 0;
   configureHostUpdateSafety(() => channels.size > 0 || spawnsInFlight > 0
     ? "Close this host's sessions before updating its daemon; sessions and subagents must not be interrupted."
+    : preparationsInFlight > 0 ? "Wait for pooled project preparation to finish before updating this daemon."
     : null);
   let updateStateWarningLogged = false;
   // Upload acks go under the upload's own key, fair with the channels.
@@ -568,7 +570,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   async function runOp(op: string, args: unknown): Promise<unknown> {
-    // An older daemon than main: callers fall back on the 501.
+    // Preserve typed refusal for operations this daemon does not implement.
     if (!isHostOp(op)) throw new HostOpError(501, "unknown_op", `Unknown host op: ${op}`);
     if (!isRecord(args)) throw new HostOpError(400, "invalid_request", "Host op arguments must be an object");
     switch (op) {
@@ -592,7 +594,17 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         return uploads.attach(args.id, sessionsPath(args.sessionFile), args.sessionId);
       default: {
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
-        return run.apply(sessionOps, SESSION_OP_PARAMS[op].map((name) => args[name]));
+        const params = SESSION_OP_PARAMS[op].map((name) => args[name]);
+        if (op !== "preparePoolProject") return run.apply(sessionOps, params);
+        if (getHostUpdateOperation()?.state === "running") {
+          throw new HostUpdateError("host_updating", "This host is updating; new project preparation must wait");
+        }
+        preparationsInFlight += 1;
+        try {
+          return await run.apply(sessionOps, params);
+        } finally {
+          preparationsInFlight -= 1;
+        }
       }
     }
   }

@@ -3,6 +3,7 @@
 // `RemoteHost`. Everything a daemon sends is untrusted input.
 // No `next/*` or `@/` imports.
 import { createHash, randomUUID } from "node:crypto";
+import { posix, win32 } from "node:path";
 import { readBodyWithinLimit } from "../bounded-form-data";
 import type { RpcTransport } from "../omp/rpc-transport";
 import type { ProjectRegistryEntry } from "../project-registry";
@@ -912,6 +913,9 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
     // Main uses these paths (spawn cwd, project keys): they must be strings.
     case "validateCwd":
       return isRecord(value) && typeof value.cwd === "string" && typeof value.projectRoot === "string";
+    case "preparePoolProject":
+      return isRecord(value) && preparedPath(value.cwd) && preparedPath(value.projectRoot)
+        && typeof value.baseCommit === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value.baseCommit);
     case "exportSession":
       return isRecord(value) && typeof value.html === "string" && typeof value.fileName === "string";
     case "readSession":
@@ -933,6 +937,13 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
     default:
       return true;
   }
+}
+
+/** Paths belong to the daemon's OS, which need not be the web server's OS. */
+function preparedPath(value: unknown): boolean {
+  if (typeof value !== "string" || value.includes("\0")) return false;
+  const path = value.startsWith("/") ? posix : win32;
+  return path.isAbsolute(value) && path.normalize(value) === value;
 }
 
 const optionalString = (value: unknown) => value === undefined || typeof value === "string";
@@ -978,6 +989,9 @@ function remoteSessionOps(hostId: string): SessionOps {
     ops[op] = async (...args) => {
       if (op === "readMedia" && !MEDIA_HASH_RE.test(String(args[0]))) {
         return { ok: false, status: 400, code: "invalid_hash", error: "Invalid media hash" };
+      }
+      if (op === "preparePoolProject" && (linkFor(hostId).hostVersion ?? 0) < 7) {
+        throw new HostOpError(426, "host_upgrade_required", `${labelOf(hostId)} needs a newer ompweb to prepare pooled projects`);
       }
       if (ORPHAN_SENSITIVE_OPS[op]) await orphanExit(hostId, String(args[0]));
       const result = await request(hostId, op, Object.fromEntries(params.map((name, i) => [name, args[i]])));
