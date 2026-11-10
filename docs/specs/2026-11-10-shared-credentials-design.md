@@ -77,7 +77,7 @@ The host token is deliberately not put in the process environment:
 A host with sharing on never runs a session with its own stored logins:
 
 - Daemon too old: refused (C6).
-- The host's OMP too old to act on the broker variables: the daemon refuses the spawn and names the required OMP version. The plan takes that version from OMP's changelog.
+- The host's OMP older than 15.13.1: the daemon refuses the spawn and names that version. It is the earliest release whose changelog shows `OMP_AUTH_BROKER_URL` handling OAuth logins correctly; an older OMP could ignore the variables and use its own logins.
 - Broker or web server unreachable, host revoked (401) or sharing turned off (403): OMP reports the authentication failure in the session. A run that is in progress continues until one of its access tokens needs a refresh.
 
 ## Security
