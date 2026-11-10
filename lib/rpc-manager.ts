@@ -89,7 +89,8 @@ const GET_STATE_TIMEOUT_MS = 5_000;
  * events (agent_start/agent_end), so an ack that never arrives means the child
  * is wedged: without this the API request (and the UI spinner behind it) would
  * stay pending forever. Generous enough to cover slow local startup work the
- * child does before acking. */
+ * child does before acking. Finite pooled model/thinking/name setup shares
+ * this budget; ordinary commands keep their existing semantics. */
 const PROMPT_ACK_TIMEOUT_MS = 30_000;
 /** Title generation is an LLM call on omp's side. */
 const GENERATE_TITLE_TIMEOUT_MS = 60_000;
@@ -298,6 +299,8 @@ export class AgentSessionWrapper {
   /** Ids this conversation had before omp moved it to a new file. */
   private readonly movedFromIds: string[] = [];
   private initPromise: Promise<void> | null = null;
+  /** Retained until native adoption has replayed pending requests and released live frames. */
+  private adoptionReplay?: string[];
   private restarting = false;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Synchronous mutex for getMcpList: checked+set before any await, so two
@@ -655,7 +658,8 @@ export class AgentSessionWrapper {
    * the startup handshake minus the ready wait, every command bounded so a
    * wedged child fails the adoption, then the daemon's lines of its open requests.
    */
-  async adopt(replay: string[]): Promise<void> {
+  async adopt(replay?: string[]): Promise<void> {
+    if (replay !== undefined) this.adoptionReplay = replay;
     this.handshaking = true;
     this._adopted = true;
     this.hostToolsUnknown = true;
@@ -676,12 +680,13 @@ export class AgentSessionWrapper {
       await optional({ type: "get_btw_history" });
       this.replaying = true;
       try {
-        this.proc.replay(replay);
+        this.proc.replay(this.adoptionReplay ?? []);
       } finally {
         this.replaying = false;
       }
       // Frames omp sent during the handshake are live: its agent tool calls there run normally.
       this.proc.release();
+      this.adoptionReplay = undefined;
     } finally {
       this.handshaking = false;
       this.noteActivity();
@@ -2242,7 +2247,7 @@ export class AgentSessionWrapper {
 
       case "set_model": {
         const { provider, modelId } = command as { provider: string; modelId: string };
-        const model = await this.proc.sendCommand<OmpModel>({ type: "set_model", provider, modelId });
+        const model = await this.proc.sendCommand<OmpModel>({ type: "set_model", provider, modelId }, preserveUnknownDelivery ? PROMPT_ACK_TIMEOUT_MS : undefined);
         invalidateModelsCache();
         this.invalidateSessionLists();
         return { id: model.id, provider: model.provider };
@@ -2323,7 +2328,7 @@ export class AgentSessionWrapper {
       case "set_session_name": {
         const name = (command.name as string | undefined)?.trim();
         if (!name) throw new Error("Session name cannot be empty");
-        await this.proc.sendCommand({ type: "set_session_name", name });
+        await this.proc.sendCommand({ type: "set_session_name", name }, preserveUnknownDelivery ? PROMPT_ACK_TIMEOUT_MS : undefined);
         this._sessionName = name;
         this.invalidateSessionLists();
         return null;
@@ -2458,7 +2463,7 @@ export class AgentSessionWrapper {
           }
           const result: unknown = await this.proc.sendCommand(
             command as { type: string },
-            type === "predict_word" ? PREDICT_WORD_TIMEOUT_MS : undefined,
+            type === "predict_word" ? PREDICT_WORD_TIMEOUT_MS : preserveUnknownDelivery && type === "set_thinking_level" ? PROMPT_ACK_TIMEOUT_MS : undefined,
           );
           if (type === "set_thinking_level") this.invalidateSessionLists();
           return result ?? null;
@@ -2883,8 +2888,8 @@ export function getRpcCreationSession(creationId: string): Promise<{ session: Ag
   if (pending) return pending;
   const session = getRegistry().get(key);
   if (!session?.isAlive()) return null;
-  if (session.sessionId) return Promise.resolve({ session, realSessionId: session.sessionId });
-  const recovering = session.adopt([]).then(() => {
+  if (session.sessionId && getRegistry().get(session.sessionId) === session) return Promise.resolve({ session, realSessionId: session.sessionId });
+  const recovering = session.adopt().then(() => {
     registerSession(session);
     getRegistry().set(key, session);
     return { session, realSessionId: session.sessionId };
