@@ -74,6 +74,7 @@ test("keeps dollar amounts literal while $x$ stays math", async () => {
   assert.equal(katexCount(renderMarkdown("price is $5, then $x$ later")), 1);
   assert.equal(katexCount(renderMarkdown("设$x$为实数，$y$也是")), 2);
   assert.equal(katexCount(renderMarkdown(String.raw`see $\text{https://example.com}$ and $a +` + "\n" + "b$")), 2);
+  assert.equal(katexCount(renderMarkdown(String.raw`\( x + y \) and \(x\)2`)), 2);
   assert.deepEqual(renderedTextNodes("Costs $5 and $10 each"), ["Costs $5 and $10 each"]);
 });
 

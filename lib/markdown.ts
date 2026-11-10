@@ -383,8 +383,9 @@ function normalizeInlineLatexMath(line: string): string {
     return line;
   }
 
+  // `$$…$$` inline: explicit `\(…\)` is math, so the single-dollar price rule (remark-pandoc-math) must not apply.
   return line.replace(
     /(?<!\\)\\\(([^`\r\n$]+?)(?<!\\)\\\)/g,
-    (match, math: string) => (math.trim() ? `$${math}$` : match),
+    (match, math: string) => (math.trim() ? `$$${math}$$` : match),
   );
 }
