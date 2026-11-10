@@ -80,7 +80,7 @@ export function loadMathMarkdownPlugins(): Promise<MarkdownPlugins> {
   if (!mathMarkdownPluginsPromise) {
     mathMarkdownPluginsPromise = (async () => {
       const [remarkMath, rehypeKatex] = await Promise.all([
-        import("remark-math").then((m) => m.default),
+        import("./remark-pandoc-math").then((m) => m.default),
         import("rehype-katex").then((m) => m.default),
       ]);
       if (typeof document !== "undefined") await loadKatexCss();
@@ -383,8 +383,9 @@ function normalizeInlineLatexMath(line: string): string {
     return line;
   }
 
+  // `$$…$$` inline: explicit `\(…\)` is math, so the single-dollar price rule (remark-pandoc-math) must not apply.
   return line.replace(
     /(?<!\\)\\\(([^`\r\n$]+?)(?<!\\)\\\)/g,
-    (match, math: string) => (math.trim() ? `$${math}$` : match),
+    (match, math: string) => (math.trim() ? `$$${math}$$` : match),
   );
 }

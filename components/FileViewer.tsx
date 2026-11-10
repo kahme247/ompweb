@@ -885,6 +885,11 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
     setLanguageOverride(null);
   }, [filePath]);
 
+  // Reset per file, not per activation: switching tabs back keeps the user's pick.
+  useEffect(() => {
+    setLanguageOverride(null);
+  }, [filePath]);
+
   // Initial load + SSE watch setup
   useEffect(() => {
     if (!active) {

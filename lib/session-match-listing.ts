@@ -5,7 +5,7 @@
 // found again in the chat.
 import type { Nodes } from "mdast";
 import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
+import remarkMath from "./remark-pandoc-math";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 import { containsMathSyntax, normalizeDisplayMath } from "./markdown";
