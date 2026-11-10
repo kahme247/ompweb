@@ -668,7 +668,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     }
     const file = sessionFile ? sessionsPath(sessionFile) : "";
     // Only this machine knows which directories exist here.
-    const resolved = resolveSpawnCwdResult(recordedCwd ?? cwd);
+    const resolved = creationId === undefined ? resolveSpawnCwdResult(recordedCwd ?? cwd) : { cwd, fellBack: false };
     const spawned = await localHost.spawnRpc({ cwd: resolved.cwd, recordedCwd: recordedCwd ?? null, sessionFile: file, toolNames, advisor, spawnModel, creationId });
     const { transport } = spawned;
     if (stopped) {

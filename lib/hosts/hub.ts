@@ -42,6 +42,7 @@ import {
 } from "./link-protocol";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
+import { confirmPooledChild, pooledStartForChild } from "./pool-starts";
 import type { HostSoftwareUpdate, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
 import { isUpdateDisabled } from "../update-policy";
 
@@ -768,12 +769,31 @@ function reattach(link: Link, listed: HelloChannel[]): void {
     transport.lost = true;
     transport.deliverExit(null, null);
   }
-  for (const { ch, sessionId, cwd, pending } of listed) {
-    if (link.channels.has(ch)) continue;
+  for (const hello of listed) {
+    const { ch, sessionId, cwd, pending } = hello;
+    const existing = link.channels.get(ch);
+    if (existing) {
+      existing.spawned = true;
+      existing.creationHello = hello.creationId ? hello : undefined;
+      continue;
+    }
     const child = new RemoteRpcTransport(link.id, ch, sessionId);
     child.spawned = true;
+    child.creationHello = hello.creationId ? hello : undefined;
     link.channels.set(ch, child);
-    // A null `pending` lost open requests to the daemon's cap: adopted, the run would wait on them forever.
+    if (hello.creationId) {
+      try {
+        const owned = pooledStartForChild(link.id, hello);
+        if (owned) {
+          child.adoption = adopt(link, child, sessionId ?? owned.sessionId ?? "", cwd, pending ?? [], owned.creationId);
+          continue;
+        }
+      } catch {
+        // An unreadable journal cannot prove this creation is an orphan. Keep it for owner reconciliation.
+        continue;
+      }
+    }
+    // Legacy children without pooled ownership keep their existing orphan policy.
     if (sessionId && pending) child.adoption = adopt(link, child, sessionId, cwd, pending);
     else killOrphan(child);
   }
@@ -789,15 +809,20 @@ function killOrphan(orphan: RemoteRpcTransport): void {
 
 /** Spec "Adopting live children": a session wrapper takes the child over, by
  * the identity the child itself reports (a new session is in no list before
- * its first reply is written). One that cannot re-sync is killed. True when adopted. */
-async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, cwd: string, replay: string[]): Promise<boolean> {
+ * its first reply is written). Failed legacy adoptions are killed; pooled creations are retained. */
+async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, cwd: string, replay: string[], creationId?: string): Promise<boolean> {
   try {
     // Dynamic: rpc-manager imports this module.
     const { adoptRpcSession } = await import("../rpc-manager");
-    await adoptRpcSession({ host: link.host, transport: child, sessionId, cwd, replay });
+    const session = await adoptRpcSession({ host: link.host, transport: child, sessionId, cwd, replay, creationId });
+    if (creationId !== undefined) confirmPooledChild(creationId, link.id, cwd, session.sessionId);
     return true;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    if (creationId !== undefined) {
+      console.warn(`[omp-web] retained creation ${creationId} on ${labelOf(link.id)} for owner reconciliation: ${reason}`);
+      return false;
+    }
     if (hub().frozen) {
       // Nothing reaches the daemon now, a kill included: the child runs on for the next server.
       console.warn(`[omp-web] left the omp child of session ${sessionId} on ${labelOf(link.id)} to the next server: this one stopped while adopting it (${reason})`);
@@ -1033,6 +1058,8 @@ export class RemoteRpcTransport implements RpcTransport {
   orphaned = false;
   /** A listed child being taken over (see reattach): resolves true once adopted, false once killed instead. */
   adoption: Promise<boolean> | null = null;
+  /** A retained creation hello is also the authority for retrying adoption after journal recovery. */
+  creationHello?: HelloChannel;
   private readonly lineListeners: Array<(line: string) => void> = [];
   private readonly stderrListeners: Array<(chunk: string) => void> = [];
   private readonly exitListeners: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
@@ -1402,7 +1429,7 @@ export function onHostsChange(listener: () => void): () => void {
 }
 
 /** Fires on every accepted hello with the omp children the daemon still runs. Listeners
- * run after reattach: lost channels have exited, the rest are being adopted or killed. */
+ * run after reattach: lost channels have exited, others are adopted, retained by the journal, or killed. */
 export function onHostHello(listener: (hostId: string, channels: HelloChannel[]) => void): () => void {
   const listeners = hub().helloListeners;
   listeners.add(listener);
@@ -1415,6 +1442,21 @@ export function onHostHello(listener: (hostId: string, channels: HelloChannel[])
 export async function adoptedChild(hostId: string, sessionId: string): Promise<boolean> {
   const listed = [...(hub().links.get(hostId)?.channels.values() ?? [])].filter((child) => child.sessionId === sessionId);
   return (await Promise.all(listed.map((child) => child.adoption))).includes(true);
+}
+
+/** Revisit an owned hello retained while the journal was unreadable, using the native adoption path. */
+export async function reconcilePooledChild(hostId: string, creationId: string): Promise<boolean> {
+  const link = hub().links.get(hostId);
+  if (!link || link.status !== "online") return false;
+  const children = [...link.channels.values()].filter((child) => child.creationHello?.creationId === creationId);
+  if (children.length > 1) throw new HostOpError(409, "creation_conflict", "Worker listed more than one child for a creation");
+  const child = children[0];
+  if (!child?.creationHello) return false;
+  const hello = child.creationHello;
+  const owned = pooledStartForChild(hostId, hello);
+  if (!owned) return false;
+  child.adoption ??= adopt(link, child, hello.sessionId ?? owned.sessionId ?? "", hello.cwd, hello.pending ?? [], creationId);
+  return child.adoption;
 }
 
 /** Resolves once every child of `sessionId` the host listed in a hello has exited or been adopted.

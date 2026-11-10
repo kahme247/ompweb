@@ -36,6 +36,7 @@ import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, Extensio
 import { isLinkUp, type Host, type HostStatus } from "./hosts/host";
 import { freezeHostLinks, getHost, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
 import { LOCAL_HOST_ID } from "./hosts/registry";
+import { CREATION_ID_RE } from "./hosts/link-protocol";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
@@ -2059,7 +2060,7 @@ export class AgentSessionWrapper {
     }
   }
 
-  async send(command: Record<string, unknown>): Promise<unknown> {
+  async send(command: Record<string, unknown>, options?: { preserveUnknownDelivery: boolean }): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
     if (!this.isAlive()) throw new Error("Session is no longer running");
@@ -2073,13 +2074,13 @@ export class AgentSessionWrapper {
     }
     if (mutatesHistory) this.historyMutationPendingCount += 1;
     try {
-      return await this.withPendingCommand(() => this.dispatchCommand(command));
+      return await this.withPendingCommand(() => this.dispatchCommand(command, options?.preserveUnknownDelivery === true));
     } finally {
       if (mutatesHistory) this.historyMutationPendingCount -= 1;
     }
   }
 
-  private async dispatchCommand(command: Record<string, unknown>): Promise<unknown> {
+  private async dispatchCommand(command: Record<string, unknown>, preserveUnknownDelivery = false): Promise<unknown> {
     const type = command.type as string;
 
     if (IMAGE_BEARING_COMMANDS.has(type)) {
@@ -2135,6 +2136,9 @@ export class AgentSessionWrapper {
             this.awaitingAgentStartDeadline = Date.now() + AWAITING_AGENT_START_TIMEOUT_MS;
           }
         } catch (error) {
+          if (preserveUnknownDelivery && error instanceof RpcCommandTimeoutError) {
+            throw new WebRpcError("The initial prompt may have reached its session; check that session before sending it again.", "host_offline", "unknown");
+          }
           this.promptRunning = false;
           this.awaitingAgentStart = false;
           this.awaitingAgentStartDeadline = 0;
@@ -2871,6 +2875,24 @@ function createAgentToolOps(): AgentToolSessionOps {
   };
 }
 
+/** A creation uses the existing startup locks/registry, including a child whose handshake was interrupted. */
+export function getRpcCreationSession(creationId: string): Promise<{ session: AgentSessionWrapper; realSessionId: string }> | null {
+  const key = `__new__${creationId}`;
+  const locks = getLocks();
+  const pending = locks.get(key);
+  if (pending) return pending;
+  const session = getRegistry().get(key);
+  if (!session?.isAlive()) return null;
+  if (session.sessionId) return Promise.resolve({ session, realSessionId: session.sessionId });
+  const recovering = session.adopt([]).then(() => {
+    registerSession(session);
+    getRegistry().set(key, session);
+    return { session, realSessionId: session.sessionId };
+  }).finally(() => { if (locks.get(key) === recovering) locks.delete(key); });
+  locks.set(key, recovering);
+  return recovering;
+}
+
 /**
  * Spawn a brand-new session on `host` in `cwd`, checked where it lives: the
  * host answers with the path it will use. Registers this machine's cwd with
@@ -2881,13 +2903,29 @@ export async function startNewRpcSession(
   cwd: string,
   toolNames?: string[],
   advisor?: boolean,
+  creationId?: string,
 ): Promise<OpResult<{ session: AgentSessionWrapper; realSessionId: string }>> {
+  if (creationId !== undefined && !CREATION_ID_RE.test(creationId)) {
+    return { ok: false, status: 400, code: "invalid_creation_id", error: "Invalid creation identity" };
+  }
+  if (creationId !== undefined) {
+    const existing = getRpcCreationSession(creationId);
+    if (existing) {
+      const value = await existing;
+      if (value.session.host.id !== host.id || value.session.cwd !== cwd) {
+        return { ok: false, status: 409, code: "creation_conflict", error: "Creation identity belongs to a different host or worktree" };
+      }
+      return { ok: true, value };
+    }
+  }
   const validated = await host.sessionOps.validateCwd(cwd);
   if (!validated.ok) return validated;
   const spawnCwd = validated.value.cwd;
-  // Unique per call: startRpcSession coalesces concurrent callers that share a key onto one session.
-  const tempKey = `__new__${randomUUID()}`;
-  const started = await startRpcSession(tempKey, "", spawnCwd, toolNames, advisor, undefined, undefined, host);
+  if (creationId !== undefined && spawnCwd !== cwd) {
+    return { ok: false, status: 409, code: "prepared_cwd_changed", error: "The prepared worktree is no longer available" };
+  }
+  const tempKey = `__new__${creationId ?? randomUUID()}`;
+  const started = await startRpcSession(tempKey, "", spawnCwd, toolNames, advisor, undefined, undefined, host, creationId);
   // Without this a file request under a brand-new cwd would 403 for up to the allowed-roots cache TTL.
   // Never for another host: its paths do not exist on this machine.
   if (host.id === LOCAL_HOST_ID) allowFileRoot(spawnCwd);
@@ -2917,6 +2955,8 @@ export async function startRpcSession(
    * the user is never stuck on the unrestorable model. */
   spawnModel?: string,
   host: Host = getHost(LOCAL_HOST_ID),
+  /** Stable independent creation; never set for ordinary standalone starts or resumes. */
+  creationId?: string,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -2945,7 +2985,7 @@ export async function startRpcSession(
     // advisor opinion (undefined) simply reuse whatever is running. An adopted
     // child's flag is unknown, so it is never replaced over it.
     if (advisor === undefined || existing.adopted || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
-      return { session: existing, realSessionId: sessionId };
+      return { session: existing, realSessionId: existing.sessionId };
     }
     await existing.destroyAndWait();
   }
@@ -2973,7 +3013,7 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
-    const spawned = await host.spawnRpc({ cwd, recordedCwd: recordedCwd ?? null, sessionFile, toolNames, advisor: advisor === true, spawnModel });
+    const spawned = await host.spawnRpc({ cwd, recordedCwd: recordedCwd ?? null, sessionFile, toolNames, advisor: advisor === true, spawnModel, ...(creationId === undefined ? {} : { creationId }) });
     const proc = new RpcProcess({
       cwd: spawned.cwd,
       transport: spawned.transport,
@@ -3014,6 +3054,11 @@ export async function startRpcSession(
         await created.send({ type: "set_host_tools", tools: AGENT_TOOL_DEFINITIONS }).catch(() => {});
       }
     } catch (error) {
+      if (creationId !== undefined) {
+        // Its daemon may still own the child: reconciliation reuses this native wrapper, never a replacement spawn.
+        registry.set(`__new__${creationId}`, created);
+        throw error;
+      }
       // Await the child's full exit before the `finally` releases the startup
       // lock: a fire-and-forget destroy() would let a retry spawn a second
       // OMP child while the failed one is still flushing/exiting, and
@@ -3036,6 +3081,7 @@ export async function startRpcSession(
 
     const realSessionId = created.sessionId;
     registerSession(created);
+    if (creationId !== undefined) registry.set(`__new__${creationId}`, created);
     // A successful respawn supersedes the crash record.
     clearExitedRpcSession(sessionId);
     if (realSessionId !== sessionId) clearExitedRpcSession(realSessionId);
@@ -3063,22 +3109,25 @@ function registerSession(created: AgentSessionWrapper): void {
 /**
  * Take over an omp child that outlived the server that spawned it (its host
  * listed it in `hello`): no spawn and no ready wait. `replay` holds the host's
- * raw stdout lines of the child's still-open blocking requests. Rejects, with
- * the child being killed, when this server already starts or keeps a wrapper
- * for the session (never two children on one file) or when the re-sync fails.
+ * raw stdout lines of the child's still-open blocking requests. Legacy failed
+ * adoptions kill their child; a durable creation is retained for owner-only
+ * reconciliation, including a sessionless child with an interrupted handshake.
  */
-export async function adoptRpcSession({ host, transport, sessionId, cwd, replay }: {
+export async function adoptRpcSession({ host, transport, sessionId, cwd, replay, creationId }: {
   host: Host;
   transport: RpcTransport;
   sessionId: string;
   cwd: string;
   replay: string[];
+  creationId?: string;
 }): Promise<AgentSessionWrapper> {
   const registry = getRegistry();
   const locks = getLocks();
-  if (locks.has(sessionId) || registry.has(sessionId)) {
-    transport.killTree(false);
-    throw new Error(`Session ${sessionId} is already started on this server`);
+  const creationKey = creationId === undefined ? undefined : `__new__${creationId}`;
+  const keys = creationKey === undefined ? [sessionId] : sessionId ? [creationKey, sessionId] : [creationKey];
+  if (keys.some((key) => locks.has(key) || registry.has(key))) {
+    if (creationId === undefined) transport.killTree(false);
+    throw new Error(`Session ${sessionId || creationId} is already started on this server`);
   }
   const holder: { wrapper?: AgentSessionWrapper } = {};
   const proc = new RpcProcess({ cwd, transport, adopted: { protocolVersion: 2 }, onExit: (info) => holder.wrapper?.handleProcessExit(info, proc) });
@@ -3095,6 +3144,11 @@ export async function adoptRpcSession({ host, transport, sessionId, cwd, replay 
         throw new Error(`Session ${created.sessionId} is already started on this server`);
       }
     } catch (error) {
+      if (creationKey !== undefined) {
+        // An uncertain creation is never an orphan to destroy; a later owner retry can re-sync this same child.
+        registry.set(creationKey, created);
+        throw error;
+      }
       const disposing = created.destroyAndWait("adoption-failed");
       // As for a failed resume: until the child really exits, a start for this
       // session waits for it (destroyAndWait returns early behind a dropped link).
@@ -3106,15 +3160,16 @@ export async function adoptRpcSession({ host, transport, sessionId, cwd, replay 
       throw error;
     }
     registerSession(created);
+    if (creationKey !== undefined) registry.set(creationKey, created);
     // The run goes on: any crash record for the session is stale.
     clearExitedRpcSession(sessionId);
     if (created.sessionId !== sessionId) clearExitedRpcSession(created.sessionId);
     notifyRunningChange();
     return { session: created, realSessionId: created.sessionId };
   })().finally(() => {
-    if (locks.get(sessionId) === adopting) locks.delete(sessionId);
+    for (const key of keys) if (locks.get(key) === adopting) locks.delete(key);
   });
   // A start for this session meanwhile joins the adoption instead of spawning a second child beside it.
-  locks.set(sessionId, adopting);
+  for (const key of keys) locks.set(key, adopting);
   return (await adopting).session;
 }
