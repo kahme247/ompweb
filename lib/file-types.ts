@@ -95,7 +95,7 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   c: "c", cpp: "cpp", cc: "cpp", cxx: "cpp", h: "c", hpp: "cpp", hh: "cpp", cs: "csharp",
   html: "html", htm: "html", css: "css", scss: "scss", less: "css",
   json: "json", jsonl: "json", yaml: "yaml", yml: "yaml",
-  toml: "toml", xml: "xml", svg: "xml", md: "markdown", mdx: "markdown",
+  toml: "toml", xml: "xml", md: "markdown", mdx: "markdown",
   sh: "bash", bash: "bash", zsh: "bash", fish: "bash",
   sql: "sql", graphql: "graphql", gql: "graphql",
   dockerfile: "dockerfile", tf: "hcl", hcl: "hcl",
