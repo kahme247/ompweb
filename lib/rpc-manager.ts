@@ -41,7 +41,7 @@ import { CREATION_ID_RE, HostOpError } from "./hosts/link-protocol";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
 import { loadPools, poolProjectBindings } from "./hosts/pools";
-import { startPooledSession } from "./hosts/pool-starts";
+import { PoolStartError, startPooledSession } from "./hosts/pool-starts";
 import { comparableProjectPath } from "./comparable-path";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
 
@@ -1638,7 +1638,14 @@ export class AgentSessionWrapper {
       const result = await executeAgentTool(toolName, args, createAgentToolOps(context, this.replaying), context);
       sendResult(typeof result === "string" ? result : JSON.stringify(result));
     } catch (error) {
-      sendResult(error instanceof Error ? error.message : String(error), true);
+      if (error instanceof PoolStartError) {
+        sendResult(JSON.stringify({
+          error: error.message.slice(0, 1024), code: error.code.slice(0, 128),
+          sessionId: error.sessionId, hostId: error.hostId, cwd: error.cwd, delivery: error.delivery,
+        }), true);
+      } else {
+        sendResult(error instanceof Error ? error.message : String(error), true);
+      }
     }
   }
 
