@@ -983,6 +983,9 @@ const MEDIA_HASH_RE = /^[0-9a-f]{64}$/;
 /** Ops that rewrite or move a session's file: an exiting orphan of that session may still flush it. */
 const ORPHAN_SENSITIVE_OPS: Partial<Record<keyof SessionOps, true>> = { archiveSession: true, deleteSession: true, renameSessionFile: true };
 
+/** A clone/fetch may outlast ordinary operations, but preparation still has a bounded deadline. */
+const POOL_PREPARE_TIMEOUT_MS = 10 * 60_000;
+
 function remoteSessionOps(hostId: string): SessionOps {
   const ops: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
   for (const [op, params] of Object.entries(SESSION_OP_PARAMS) as [keyof SessionOps, readonly string[]][]) {
@@ -994,7 +997,8 @@ function remoteSessionOps(hostId: string): SessionOps {
         throw new HostOpError(426, "host_upgrade_required", `${labelOf(hostId)} needs a newer ompweb to prepare pooled projects`);
       }
       if (ORPHAN_SENSITIVE_OPS[op]) await orphanExit(hostId, String(args[0]));
-      const result = await request(hostId, op, Object.fromEntries(params.map((name, i) => [name, args[i]])));
+      const result = await request(hostId, op, Object.fromEntries(params.map((name, i) => [name, args[i]])),
+        op === "preparePoolProject" ? POOL_PREPARE_TIMEOUT_MS : linkTimings.opTimeoutMs);
       const list: ((value: unknown) => object | null) | null = op === "listSessions" ? sessionEntry : op === "listProjects" ? projectEntry : null;
       // Untrusted list entries: malformed ones are dropped, the rest keep only their known fields.
       if (list && Array.isArray(result)) return result.map(list).filter((entry) => entry !== null);
