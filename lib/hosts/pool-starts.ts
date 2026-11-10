@@ -222,11 +222,14 @@ async function reconcile(entry: PoolStart, host: Host): Promise<PoolStart> {
   return readJournal().starts.find((candidate) => candidate.creationId === entry.creationId)!;
 }
 
-async function run(entry: PoolStart, start: Start): Promise<PoolCreateResult> {
+async function run(entry: PoolStart, start: Start, authorize?: (host: Host) => Promise<boolean>): Promise<PoolCreateResult> {
   const host = getHost(entry.hostId);
   if (!host) throw unknown(entry);
   let unlock: (() => void) | undefined;
   try {
+    if (entry.creation === "preparing" && authorize && !(await authorize(host))) {
+      throw new HostOpError(403, "agent_start_declined", `The user declined to start a session on ${host.label}.`);
+    }
     if (entry.creation === "unknown" || entry.creation === "starting" || entry.creation === "started") {
       entry = await reconcile(entry, host);
     }
@@ -277,8 +280,8 @@ async function run(entry: PoolStart, start: Start): Promise<PoolCreateResult> {
   } finally { unlock?.(); }
 }
 
-/** Admission is deliberately synchronous through durable reservation; only host work runs after it. */
-export function startPooledSession(input: PoolCreateInput, start: Start): Promise<PoolCreateResult> {
+/** Reserve durably before host work; trusted authorization runs before preparation and never on completed replay. */
+export function startPooledSession(input: PoolCreateInput, start: Start, authorize?: (host: Host) => Promise<boolean>): Promise<PoolCreateResult> {
   try {
     if (!isRecord(input) || typeof input.creationId !== "string" || !CREATION_ID_RE.test(input.creationId)
       || typeof input.poolId !== "string" || !CREATION_ID_RE.test(input.poolId) || typeof input.projectId !== "string" || !CREATION_ID_RE.test(input.projectId)
@@ -331,7 +334,7 @@ export function startPooledSession(input: PoolCreateInput, start: Start): Promis
     // Install the promise before any callback or host operation can yield back to a duplicate caller.
     const gate = Promise.withResolvers<PoolCreateResult>();
     inflight.set(key, gate.promise);
-    void run(entry, start).then(gate.resolve, gate.reject).finally(() => { if (inflight.get(key) === gate.promise) inflight.delete(key); });
+    void run(entry, start, authorize).then(gate.resolve, gate.reject).finally(() => { if (inflight.get(key) === gate.promise) inflight.delete(key); });
     return gate.promise;
   } catch (error) { return Promise.reject(error); }
 }

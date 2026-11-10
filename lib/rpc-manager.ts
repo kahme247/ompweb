@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { applyMessageDelta, isDeltaUpdate, withStreamedArguments } from "./message-delta";
@@ -14,6 +14,7 @@ import {
   AGENT_TOOL_NAMES,
   AgentToolGuard,
   executeAgentTool,
+  type AgentToolContext,
   type AgentToolDeliverResult,
   type AgentToolSessionOps,
 } from "./agent-tools";
@@ -36,9 +37,12 @@ import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, Extensio
 import { isLinkUp, type Host, type HostStatus } from "./hosts/host";
 import { freezeHostLinks, getHost, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
 import { LOCAL_HOST_ID } from "./hosts/registry";
-import { CREATION_ID_RE } from "./hosts/link-protocol";
+import { CREATION_ID_RE, HostOpError } from "./hosts/link-protocol";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
+import { loadPools, poolProjectBindings } from "./hosts/pools";
+import { startPooledSession } from "./hosts/pool-starts";
+import { comparableProjectPath } from "./comparable-path";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
 
 // ============================================================================
@@ -1044,8 +1048,8 @@ export class AgentSessionWrapper {
         // browser routing, so they work with no tab open. A disabled gate
         // is an explicit error, not a silent hang and not a browser call.
         if (id && toolName && AGENT_TOOL_NAMES.has(toolName)) {
-          // A replayed call may have run before the restart: only the read-only listing runs again.
-          if (this.replaying && toolName !== "list_sessions") {
+          // Independent pooled creations have durable native-request identity; other mutations stay unknown.
+          if (this.replaying && toolName !== "list_sessions" && (toolName !== "new_session" || !loadWebServerSettings().agentToolsEnabled)) {
             this.proc.sendFrame({
               type: "host_tool_result",
               id,
@@ -1619,14 +1623,19 @@ export class AgentSessionWrapper {
     };
     try {
       const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
-      const result = await executeAgentTool(toolName, args, createAgentToolOps(), {
+      const context: AgentToolContext = {
         sourceSessionId: this.sessionId,
+        sourceRequestId: id,
         sourceCwd: this.cwd,
         sourceHostId: this.host.id,
         enabled: loadWebServerSettings().agentToolsEnabled,
         guard: getAgentToolGuard(),
         confirm: (title) => this.confirmFromServer(title),
-      });
+      };
+      if (this.replaying && toolName === "new_session" && (
+        args.shareWorkspace === true || args.host != null || !poolProjectBindings(loadPools()).get(this.host.id)?.size
+      )) throw new Error(AGENT_TOOL_UNKNOWN_OUTCOME);
+      const result = await executeAgentTool(toolName, args, createAgentToolOps(context, this.replaying), context);
       sendResult(typeof result === "string" ? result : JSON.stringify(result));
     } catch (error) {
       sendResult(error instanceof Error ? error.message : String(error), true);
@@ -2802,7 +2811,7 @@ function getAgentToolGuard(): AgentToolGuard {
  * A waited delivery registers its turn-end waiter BEFORE sending, then
  * reads the turn's final text with get_last_assistant_text.
  */
-function createAgentToolOps(): AgentToolSessionOps {
+function createAgentToolOps(source: AgentToolContext, replaying: boolean): AgentToolSessionOps {
   return {
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
@@ -2818,18 +2827,49 @@ function createAgentToolOps(): AgentToolSessionOps {
       ];
     },
 
-    async createSession(input) {
+    async createSession(input, authorize) {
+      const authorizeHost = (host: Host) => {
+        const configured = this.listHosts().find((candidate) => candidate.id === host.id);
+        if (!configured) throw new Error(`Unknown host: ${host.id}`);
+        return authorize(configured);
+      };
+      const initialize = async (session: AgentSessionWrapper, preserveUnknownDelivery: boolean) => {
+        if (input.provider && input.modelId) {
+          await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId }, { preserveUnknownDelivery });
+        }
+        if (input.name) await session.send({ type: "set_session_name", name: input.name }, { preserveUnknownDelivery });
+        if (input.prompt) await session.send({ type: "prompt", message: input.prompt }, { preserveUnknownDelivery });
+      };
+      if (!input.shareWorkspace && !input.explicitHost && input.hostId === source.sourceHostId) {
+        const sessions = await listSessionsAllHosts();
+        const origin = sessions.find((session) => session.id === source.sourceSessionId && (session.hostId ?? LOCAL_HOST_ID) === source.sourceHostId);
+        const bindings = poolProjectBindings(loadPools()).get(source.sourceHostId);
+        const binding = bindings?.get(comparableProjectPath(input.cwd === source.sourceCwd
+          ? origin?.projectRoot ?? origin?.cwd ?? source.sourceCwd : input.cwd));
+        if (binding) {
+          const creationId = createHash("sha256").update("ompweb:agent-creation:v1:")
+            .update(JSON.stringify([source.sourceSessionId, source.sourceRequestId])).digest("hex");
+          const result = await startPooledSession({ creationId, poolId: binding.pool.id, projectId: binding.project.id, intent: { ...input } }, async (host, prepared, id, onStarted) => {
+            const started = await startNewRpcSession(host, prepared.cwd, undefined, false, id);
+            if (!started.ok) throw new HostOpError(started.status, started.code, started.error);
+            const { session, realSessionId } = started.value;
+            await onStarted(realSessionId);
+            await initialize(session, true);
+            return { sessionId: realSessionId };
+          }, authorizeHost);
+          return { sessionId: result.sessionId };
+        }
+      }
+      // Standalone/shared creations have no durable admission identity and cannot safely be replayed.
+      if (replaying) throw new Error(AGENT_TOOL_UNKNOWN_OUTCOME);
       const host = getHost(input.hostId);
       if (!host) throw new Error(`Unknown host: ${input.hostId}`);
+      if (!(await authorizeHost(host))) throw new Error(`The user declined to start a session on ${host.label}.`);
       const started = await startNewRpcSession(host, input.cwd);
       if (!started.ok) throw new Error(started.error);
       const { session, realSessionId } = started.value;
       try {
-        if (input.provider && input.modelId) {
-          await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
-        }
-        if (input.name) await session.send({ type: "set_session_name", name: input.name });
-        if (input.prompt) await session.send({ type: "prompt", message: input.prompt });
+        await initialize(session, false);
       } catch (error) {
         // As /api/agent/new: behind a dropped link the prompt may be running there, so the wrapper stays.
         if (!(error instanceof WebRpcError && error.code === "host_offline")) await session.destroyAndWait();
