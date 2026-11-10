@@ -1143,8 +1143,9 @@ during the wait.
   The taint lifts on the same child, never by a restart: only a `get_state`
   issued after every message command was answered, reporting native settlement
   with no active/queued/background work, plus no dialog, history mutation or
-  unrelated pending command and stable child/admission identity across that read
-  (`clearMessageProofTaintIfSettled`, at an idle dispatch and on `session_settled`).
+  unrelated pending command and stable admission generation, peer admissions and
+  identity across that read (`clearMessageProofTaintIfSettled`, one read at a time,
+  joined by a dispatch arriving during it; at an idle dispatch and on `session_settled`).
   Never infer old acceptance from time or settlement events, and never replay
   old uncertain entries.
   A prompt's bubble leaves when the server sees omp's reply and echo;

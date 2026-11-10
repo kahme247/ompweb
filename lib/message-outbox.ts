@@ -776,8 +776,9 @@ async function deliver(entry: Row): Promise<Outcome> {
   if (competingPending && !wrapper.isRunning()) {
     try {
       if (await wrapper.clearMessageProofTaintIfSettled()) return "next";
-    } catch (error) {
-      return refused(current, commandErrorResponse(error), false);
+    } catch {
+      // Nothing of this entry was written: a failed or timed-out read leaves it unsent, so it is tried again.
+      return retry(current);
     }
   }
   const idle = !wrapper.isRunning();

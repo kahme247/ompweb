@@ -426,6 +426,8 @@ export class AgentSessionWrapper {
   private frameGaps = 0;
   private confirmedMessageCommandGeneration = 0;
   private pendingMessageCommands = 0;
+  /** The settle read in flight (clearMessageProofTaintIfSettled): a send during it joins it instead of seeing it as busy. */
+  private taintRead: Promise<boolean> | null = null;
   private nativeQueuedMessages: unknown = { steering: [], followUp: [] };
   private readonly startedEmpty: boolean;
   private messageReplacement: MessageReplacementWatch | null = null;
@@ -485,7 +487,7 @@ export class AgentSessionWrapper {
   private _alive = true;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
-  /** Accepted browser definitions only: server tools follow the current enablement policy when a child is renewed. */
+  /** Accepted browser definitions only: registered again, with server tools under the current enablement policy, when a shared child is restarted or adopted. */
   private registeredHostTools: Array<{ name?: unknown; [key: string]: unknown }> | null = null;
   /** Feeding an adopted child's open requests (see adopt): server agent tools there may already have run. */
   private replaying = false;
@@ -1261,7 +1263,11 @@ export class AgentSessionWrapper {
         this.unsettled = false;
         this.deliveredCallbacks.clear();
         // Each run's end may lift the taint, so a user who only sends during runs is not stuck with it.
-        if (this.hasPendingMessageCommands()) void this.clearMessageProofTaintIfSettled().catch(() => {});
+        if (this.hasPendingMessageCommands()) {
+          void this.clearMessageProofTaintIfSettled().catch((error) => {
+            console.warn(`[omp-web] could not read whether session ${this._sessionId} settled: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
         break;
       case "prompt_result":
         // Local-only prompt (builtin/extension slash command) — no agent run.
@@ -2446,22 +2452,28 @@ export class AgentSessionWrapper {
 
   /** Lifts the taint of OLD uncertain admissions once none can echo any more; never confirms or replays them. Settlement
    * events and elapsed time alone never clear it: only a get_state read after every admission was answered, reporting
-   * no live, admitted or scheduled run, queued message or background work (omp's isSettled). */
-  async clearMessageProofTaintIfSettled(): Promise<boolean> {
-    if (!this.hasPendingMessageCommands() || this.restarting || this.hostDown() || this.messageBoundaryBusy()) return false;
-    return this.withPendingCommand(async () => {
-      const proc = this.proc;
+   * no live, admitted or scheduled run, queued message or background work (omp's isSettled). One read at a time: a
+   * caller arriving while it runs gets the same answer. True only when the taint is gone. */
+  clearMessageProofTaintIfSettled(): Promise<boolean> {
+    if (this.taintRead) return this.taintRead;
+    if (!this.hasPendingMessageCommands() || this.restarting || this.hostDown() || this.messageBoundaryBusy()) return Promise.resolve(false);
+    const read = this.withPendingCommand(async () => {
+      // A restart (the only child swap) advances the generation, so it needs no separate check. An admission
+      // completed during the read advances it too; the taint then remains and the answer must be false.
       const generation = this.messageCommandGeneration;
+      const peers = this.peerMessageCommands;
       const state = await this.getStateWithTimeout();
       if (state.isSettled !== true || state.hasPendingAsyncWork === true
         || state.isStreaming !== false || state.isCompacting !== false
         || state.queuedMessageCount > 0 || queueTexts(state.queuedMessages).length > 0
         || state.sessionId !== this._sessionId || state.sessionFile !== this._sessionFile
-        || this.proc !== proc || this.messageCommandGeneration !== generation
+        || this.messageCommandGeneration !== generation || this.peerMessageCommands !== peers
         || this.restarting || this.messageBoundaryBusy(1) || !this.hasPendingMessageCommands()) return false;
       this.confirmedMessageCommandGeneration = generation;
       return true;
-    });
+    }).finally(() => { this.taintRead = null; });
+    this.taintRead = read;
+    return read;
   }
 
   /** The outbox supplies its persisted pre-dispatch boundary; direct writes reuse this same proof below. */
