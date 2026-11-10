@@ -85,7 +85,7 @@ export function loadMathMarkdownPlugins(): Promise<MarkdownPlugins> {
       ]);
       if (typeof document !== "undefined") await loadKatexCss();
       mathMarkdownPlugins = {
-        remarkPlugins: [...baseMarkdownPlugins.remarkPlugins, remarkMath],
+        remarkPlugins: [...baseMarkdownPlugins.remarkPlugins, remarkMath, remarkLiteralDollars],
         rehypePlugins: [
           ...baseMarkdownPlugins.rehypePlugins,
           [rehypeKatex, { throwOnError: false, strict: false }],
@@ -99,6 +99,51 @@ export function loadMathMarkdownPlugins(): Promise<MarkdownPlugins> {
     });
   }
   return mathMarkdownPluginsPromise;
+}
+
+interface MdNode {
+  type: string;
+  value?: string;
+  children?: MdNode[];
+  position?: { start: { offset?: number }; end: { offset?: number } };
+}
+
+/**
+ * remark-math reads any `$…$` pair as math, so prices ("$5 and $10") render as
+ * glued italics. Pandoc's rule decides instead: the opening `$` is followed by
+ * non-space, the closing `$` is preceded by non-space and not followed by a
+ * digit. Other single-dollar spans go back to their source text. Runs after remark-math.
+ */
+export function remarkLiteralDollars() {
+  return (tree: MdNode, file: { toString(): string }) => {
+    const source = String(file);
+    const literal = (node: MdNode) => {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (node.type !== "inlineMath" || start === undefined || end === undefined) return null;
+      const raw = source.slice(start, end);
+      if (raw.startsWith("$$") || !raw.startsWith("$") || !raw.endsWith("$")) return null;
+      return /^\s|\s$/.test(raw.slice(1, -1)) || /\d/.test(source[end] ?? "") ? raw : null;
+    };
+    const walk = (node: MdNode) => {
+      if (!node.children) return;
+      const children: MdNode[] = [];
+      for (const child of node.children) {
+        const raw = literal(child);
+        const next = raw === null ? child : { type: "text", value: raw, position: child.position };
+        const previous = children.at(-1);
+        // Join with neighbouring text, as an unmatched `$` would be: search counts hits per rendered text node.
+        if (next.type === "text" && previous?.type === "text") {
+          children[children.length - 1] = { ...previous, value: `${previous.value}${next.value}` };
+        } else {
+          children.push(next);
+          walk(next);
+        }
+      }
+      node.children = children;
+    };
+    walk(tree);
+  };
 }
 
 /**

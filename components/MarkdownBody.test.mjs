@@ -48,6 +48,17 @@ test("renders LaTeX parenthesis delimiters as inline math", async () => {
   assert.match(html, /r_c/);
 });
 
+test("keeps dollar amounts literal while $x$ stays math", async () => {
+  await loadMathMarkdownPlugins();
+  const prices = renderMarkdown("Costs $5 and $10, or $ 3 $ each.");
+  const math = renderMarkdown("Let $x^2$ and $y$ be $3.");
+
+  assert.doesNotMatch(prices, /class="katex"/);
+  assert.match(prices, /Costs \$5 and \$10, or \$ 3 \$ each\./);
+  assert.equal(math.match(/class="katex"/g)?.length, 2);
+  assert.match(math, /be \$3\./);
+});
+
 test("renders paired LaTeX bracket delimiters as display math", async () => {
   await loadMathMarkdownPlugins();
   const html = renderMarkdown(String.raw`\[

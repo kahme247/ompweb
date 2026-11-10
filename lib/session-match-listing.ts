@@ -8,7 +8,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
-import { containsMathSyntax, normalizeDisplayMath } from "./markdown";
+import { containsMathSyntax, normalizeDisplayMath, remarkLiteralDollars } from "./markdown";
 import { compileSearchQuery, findSearchMatches, type CompiledSearchQuery } from "./session-search";
 import { SEARCH_MATCH_PAGE_SIZE, type SessionSearchMatchPage } from "./session-search-matches";
 import type { AgentMessage } from "./types";
@@ -19,7 +19,7 @@ const SNIPPET_AFTER = 90;
 
 // Same parse as lib/markdown.ts (remark-math only where the chat loads it).
 const parser = unified().use(remarkParse).use(remarkGfm, { singleTilde: false }).freeze();
-const mathParser = unified().use(remarkParse).use(remarkGfm, { singleTilde: false }).use(remarkMath).freeze();
+const mathParser = unified().use(remarkParse).use(remarkGfm, { singleTilde: false }).use(remarkMath).use(remarkLiteralDollars).freeze();
 
 /** Text of the content blocks; a malformed message (no content, a bare string) must not fail the listing. */
 function textBlocks(content: unknown): string[] {
@@ -65,7 +65,8 @@ export function renderedTextNodes(markdown: string): string[] {
       for (const child of node.children) walk(child);
     }
   };
-  walk((containsMathSyntax(source) ? mathParser : parser).parse(source));
+  const tree = containsMathSyntax(source) ? mathParser.runSync(mathParser.parse(source), source) : parser.parse(source);
+  walk(tree as Nodes);
   // A definition can reference another footnote: the loop also visits ones appended meanwhile.
   for (const identifier of referenced) {
     const definition = definitions.get(identifier);
