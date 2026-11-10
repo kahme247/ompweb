@@ -21,6 +21,7 @@ import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterrup
 import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
+import { isClientMessageId, readQueueSnapshot } from "./client-message-ids";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
 import { publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
@@ -169,6 +170,7 @@ const PASSTHROUGH_COMMANDS = new Set([
   "btw",
   "btw_cancel",
   "get_btw_history",
+  "get_client_message_status",
 ]);
 
 // Outlasts omp's cold prediction-daemon start (up to 3 × 30s start rounds plus a
@@ -270,10 +272,16 @@ function matchesNativeSkill(message: Record<string, unknown>, submitted: string)
 function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, unknown>, baseline: unknown, generation: number, competingPending: boolean, previousEntryIds?: string[]): MessageReplacementWatch {
   const { promise, resolve } = Promise.withResolvers<HandOff>();
   const ambiguous: HandOff = { error: "Another message was dispatched while this message's native replacement was being confirmed", mayHaveBeenSent: true };
-  // A peer server's admission (the daemon's marker) also contends: its identical echo is not this command's proof.
+  const clientMessageId = isClientMessageId(command.clientMessageId) ? command.clientMessageId : null;
+  // A peer server's admission (the daemon's marker) also contends: its identical echo is not this command's proof. An
+  // exact ID names this command's message whoever else writes meanwhile, so only text inference needs the sole window.
   const peers = wrapper.peerMessageCommands;
-  const ownsWindow = () => !competingPending && wrapper.getMessageCommandGeneration() === generation + 1 && wrapper.peerMessageCommands === peers;
-  const initialQueue = queueTexts(baseline);
+  const ownsWindow = () => clientMessageId !== null || (!competingPending && wrapper.getMessageCommandGeneration() === generation + 1 && wrapper.peerMessageCommands === peers);
+  // The text rules need omp's user attribution. An exact ID identifies a native custom message by itself, but only a
+  // displayed one: the browser never shows a hidden message, so it cannot replace the pending row there.
+  const isUserInput = (message: Record<string, unknown>) => message.role === "user"
+    || (message.role === "custom" && (clientMessageId !== null ? message.display !== false : message.attribution === "user"));
+  const initialQueue = clientMessageId ? [] : queueTexts(baseline);
   let priorQueue = initialQueue;
   let echoDebt: number | undefined;
   let seen = false;
@@ -334,15 +342,20 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
   };
   const detach = wrapper.onEvent((event) => {
     if (seen) return;
-    if (competingPending || wrapper.getMessageCommandGeneration() > generation + 1 || wrapper.peerMessageCommands !== peers) { finish(ambiguous); return; }
+    if (!clientMessageId && (competingPending || wrapper.getMessageCommandGeneration() > generation + 1 || wrapper.peerMessageCommands !== peers)) { finish(ambiguous); return; }
     if (!ownsWindow() && event.type !== "process_exit") return;
     const text = expectedText();
-    if (echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
-    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message)
-      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))) userMessageSeen = true;
+    if (!clientMessageId && echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
+    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message) && isUserInput(event.message)
+      && (!clientMessageId || event.clientMessageId === clientMessageId)) userMessageSeen = true;
     if (event.type === "message_start" && typeof event.messageId === "string" && isRecord(event.message) && event.message.role === "user") {
       openedUserMessages.add(event.messageId);
     } else if (event.type === "queue_update") {
+      if (clientMessageId) {
+        const ids = readQueueSnapshot(event)?.clientMessageIds;
+        if (ids?.steering.includes(clientMessageId) || ids?.followUp.includes(clientMessageId)) finish({});
+        return;
+      }
       const next = queueTexts(event);
       const counts = new Map<string, number>();
       for (const item of priorQueue) counts.set(item, (counts.get(item) ?? 0) + 1);
@@ -354,10 +367,12 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
       }
       if (text && (added.includes(text) || (command.type === "prompt" && text.trimStart().startsWith("/") && added.length === 1))) finish({});
       priorQueue = next;
-    } else if (event.type === "message_end" && isRecord(event.message)
-      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))) {
-      if (text && (messageText(event.message) === text || matchesNativeSkill(event.message, text))) {
-        if (echoDebt > 0) echoDebt -= 1;
+    } else if (event.type === "message_end" && isRecord(event.message) && isUserInput(event.message)) {
+      if (clientMessageId) {
+        if (event.clientMessageId === clientMessageId) finish({});
+      } else if (text && (messageText(event.message) === text || matchesNativeSkill(event.message, text))) {
+        const debt = echoDebt ?? 0;
+        if (debt > 0) echoDebt = debt - 1;
         else finish({});
       } else if (event.message.role === "user" && (typeof event.messageId !== "string" || openedUserMessages.has(event.messageId))) {
         void checkExpandedUser(event.message);
@@ -2108,6 +2123,7 @@ export class AgentSessionWrapper {
       messageCount: state.messageCount,
       queuedMessageCount: state.queuedMessageCount,
       queuedMessages: state.queuedMessages ?? { steering: [], followUp: [] },
+      ...(state.supportsClientMessageIds === true ? { supportsClientMessageIds: true } : {}),
       tokensPerSecond: state.tokensPerSecond ?? null,
       contextUsage: state.contextUsage ?? null,
       systemPrompt: state.systemPrompt?.join("\n\n") ?? "",
@@ -2566,6 +2582,7 @@ export class AgentSessionWrapper {
             message: command.message as string,
             ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
             ...(streamingBehavior ? { streamingBehavior } : {}),
+            ...(isClientMessageId(command.clientMessageId) ? { clientMessageId: command.clientMessageId } : {}),
           }, PROMPT_ACK_TIMEOUT_MS, command);
           // Slash commands fully consumed by a builtin report agentInvoked:false
           // in the ack itself — no prompt_result frame follows.
@@ -2616,6 +2633,7 @@ export class AgentSessionWrapper {
           type,
           message: command.message as string,
           ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
+          ...(isClientMessageId(command.clientMessageId) ? { clientMessageId: command.clientMessageId } : {}),
         }, undefined, command);
         return null;
       }
@@ -2973,6 +2991,7 @@ export class AgentSessionWrapper {
       type: "follow_up",
       message: command.message as string,
       ...(images ? { images } : {}),
+      ...(isClientMessageId(command.clientMessageId) ? { clientMessageId: command.clientMessageId } : {}),
     }, undefined, command);
     return { queued: true, queue: "followUp", reason: "shellRunning" };
   }

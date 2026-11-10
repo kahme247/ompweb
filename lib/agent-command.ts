@@ -5,6 +5,8 @@ import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { attachUploads, forgetUploads, takeUploads, type OutboxUploadReceipt } from "@/lib/uploads";
 import { runOutboxCommand } from "@/lib/message-outbox";
+import { readClientMessageIds } from "@/lib/client-message-ids";
+import { reconcileOutboxHandoffs } from "@/lib/outbox-handoff";
 
 // Commands that ride whatever child is alive and never spawn or replace one:
 // keystroke predictions, and the side-question reads/cancel omp-web sends in
@@ -67,6 +69,11 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     const type = command.type;
     // Held messages: stored and answered here; the outbox's dispatcher sends them to omp (lib/message-outbox.ts).
     if (type === "outbox_add" || type === "outbox_remove" || type === "outbox_scope") return await runOutboxCommand(id, command, advisor, owner);
+    if (type === "get_client_message_status") {
+      const ids = readClientMessageIds(command.clientMessageIds);
+      if (!ids) return Response.json({ error: "clientMessageIds must contain 1 to 32 unique valid IDs", code: "invalid_client_message_ids" }, { status: 400 });
+      return Response.json({ success: true, data: await reconcileOutboxHandoffs(id, ids) });
+    }
     // Attached files go to the session's host first; nothing reaches omp when one fails (spec U3).
     const uploads = takeUploads(command, owner, trustedUploads);
     // Hold later wrapper selection as well as dispatch behind attachment preparation, so an

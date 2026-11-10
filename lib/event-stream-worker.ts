@@ -61,6 +61,7 @@ import type { LocalOutboxEntry } from "./event-stream";
 import { LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow, type Part } from "./hosts/link-protocol";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
 import { diagnosticStats } from "./transport-stats";
+import { isRecord } from "./type-guards";
 import { UPLOAD_STALL_MS, UPLOAD_WINDOW_BYTES } from "./upload-limits";
 
 const CONNECTING = 0;
@@ -1943,6 +1944,7 @@ function acceptedOutboxEntry(body: unknown, id: string): unknown {
     (entry.uploads === undefined || Array.isArray(entry.uploads) && entry.uploads.every((upload) => typeof upload === "string")) &&
     (entry.error === undefined || typeof entry.error === "string") &&
     (entry.mayHaveBeenSent === undefined || typeof entry.mayHaveBeenSent === "boolean") &&
+    (entry.settlement === undefined || ["native", "none", "uncorrelated"].includes(entry.settlement as string)) &&
     typeof entry.message === "string" && typeof entry.createdAt === "number" && Number.isFinite(entry.createdAt) && entry.createdAt >= 0
     ? entry : null;
 }
@@ -1960,7 +1962,16 @@ async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Pr
   if (status >= 200 && status < 300) {
     if (!(await writeOutbox((store) => store.delete(id)))) return outboxAnswer(item, 0, null);
     outboxItems.delete(id);
-    for (const client of clients) post(client, { outboxStored: accepted });
+    const stored = isRecord(accepted) && accepted.state === "delivered"
+      && (accepted.settlement === "native" || accepted.settlement === "uncorrelated")
+      ? {
+          ...accepted,
+          message: item.entry.message,
+          ...(item.entry.images ? { images: item.entry.images } : {}),
+          ...(item.entry.uploads ? { uploads: item.entry.uploads } : {}),
+        }
+      : accepted;
+    for (const client of clients) post(client, { outboxStored: stored });
   } else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
     item.inFlight = false;
     item.retryTimer = setTimeout(() => {

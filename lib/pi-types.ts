@@ -1,4 +1,5 @@
 import type { SkillDiagnosticsSnapshot } from "./skill-diagnostics";
+import type { AgentMessage } from "./types";
 
 // Local mirrors of the omp shapes used by omp-web. omp's SDK packages are
 // Bun-only, so these types are hand-maintained against
@@ -61,6 +62,17 @@ export interface TodoPhase {
 export interface QueuedMessages {
   steering: string[];
   followUp: string[];
+  /** Native intent IDs aligned with the visible queue slots; null denotes an older uncorrelated message. */
+  clientMessageIds?: { steering: (string | null)[]; followUp: (string | null)[] };
+}
+
+export interface ClientMessageStatus {
+  messages: { clientMessageId: string; message: AgentMessage }[];
+  /** Null when the native queue snapshot exceeded the response budget; the browser then reads history. */
+  queuedMessages: QueuedMessages | null;
+  resolvedClientMessageIds: string[];
+  persistedClientMessageIds: string[];
+  unresolvedClientMessageIds: string[];
 }
 
 /** Mirror of omp's RpcSessionState (the raw `get_state` payload). */
@@ -84,6 +96,8 @@ export interface RpcSessionState {
   hasPendingAsyncWork?: boolean;
   /** Displayable queue-chip texts (omp ≥ 18.4.4); mirrored live by `queue_update`. */
   queuedMessages?: QueuedMessages;
+  /** Native RPC/session metadata can correlate accepted input without matching its text. */
+  supportsClientMessageIds?: boolean;
   todoPhases: TodoPhase[];
   systemPrompt?: string[];
   contextUsage?: { tokens: number; contextWindow: number; percent: number };
@@ -126,6 +140,7 @@ export interface WebSessionState {
   messageCount: number;
   queuedMessageCount: number;
   queuedMessages: QueuedMessages;
+  supportsClientMessageIds?: boolean;
   contextUsage: ContextUsage | null;
   systemPrompt: string;
   thinkingLevel: string;

@@ -1,6 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync, statSync, type Stats } from "fs";
 import { normalize as normalizePath } from "path";
 import { getAgentDir } from "./omp/paths";
+import { isClientMessageId } from "./client-message-ids";
 import {
   containsBlobRef,
   invalidateAllSessionScanCaches,
@@ -597,6 +598,7 @@ function historyEntryMetadata(entry: SessionEntry): SessionEntry {
   const compact: Record<string, unknown> = {
     type: entry.type, id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp,
   };
+  if (isClientMessageId(entry.clientMessageId)) compact.clientMessageId = entry.clientMessageId;
   if (entry.type === "message" && isRecord(entry.message)) {
     const message = entry.message;
     compact.message = {
@@ -618,6 +620,10 @@ function historyEntryMetadata(entry: SessionEntry): SessionEntry {
   } else if (entry.type === "custom" && entry.customType === "user_todo_edit") {
     compact.customType = entry.customType;
     compact.data = isRecord(entry.data) ? { phases: entry.data.phases } : undefined;
+  } else if (entry.type === "custom" && entry.customType === "client-message-resolution") {
+    compact.customType = entry.customType;
+    compact.data = { clientMessageIds: isRecord(entry.data) && Array.isArray(entry.data.clientMessageIds)
+      ? entry.data.clientMessageIds.filter(isClientMessageId) : [] };
   }
   return compact as unknown as SessionEntry;
 }
@@ -866,7 +872,15 @@ function selectSessionContext(
   // Explicit defaults take precedence over temporary assistant fallbacks.
   let hasExplicitDefaultModel = false;
   let compaction: CompactionEntry | null = null;
+  const persistedClientMessageIds = new Set<string>();
+  const resolvedClientMessageIds = new Set<string>();
   for (const entry of path) {
+    if ((entry.type === "message" || entry.type === "custom_message") && isClientMessageId(entry.clientMessageId)) {
+      persistedClientMessageIds.add(entry.clientMessageId);
+    } else if (entry.type === "custom" && entry.customType === "client-message-resolution"
+      && isRecord(entry.data) && Array.isArray(entry.data.clientMessageIds)) {
+      for (const id of entry.data.clientMessageIds) if (isClientMessageId(id)) resolvedClientMessageIds.add(id);
+    }
     if (entry.type === "thinking_level_change") {
       thinkingLevel = entry.thinkingLevel ?? "off";
     } else if (entry.type === "model_change") {
@@ -918,7 +932,11 @@ function selectSessionContext(
       ? { provider: defaultModel.slice(0, separator), modelId: defaultModel.slice(separator + 1) }
       : { provider: "", modelId: defaultModel };
   }
-  return { selected, compactionId: compaction?.id ?? null, thinkingLevel, model, todoPhases: getTodoPhasesFromEntries(entries, leafId) };
+  return {
+    selected, compactionId: compaction?.id ?? null, thinkingLevel, model, todoPhases: getTodoPhasesFromEntries(entries, leafId),
+    ...(persistedClientMessageIds.size ? { persistedClientMessageIds: [...persistedClientMessageIds] } : {}),
+    ...(resolvedClientMessageIds.size ? { resolvedClientMessageIds: [...resolvedClientMessageIds] } : {}),
+  };
 }
 
 function parseEntryTimestamp(timestamp: string): number | undefined {
@@ -1147,7 +1165,7 @@ export function entryToUiMessage(
       // object is missing; skip them like any other unmappable entry instead
       // of crashing every reader of the file.
       if (!isRecord(entry.message)) return null;
-      const raw = entry.message;
+      const raw = isClientMessageId(entry.clientMessageId) ? { ...entry.message, clientMessageId: entry.clientMessageId } : entry.message;
       // omp-only roles are folded into displayable custom messages so the
       // existing role-keyed UI renders them without new components.
       if (raw.role === "developer") {
@@ -1226,6 +1244,7 @@ export function entryToUiMessage(
         display: entry.display,
         details: entry.details,
         timestamp: parseEntryTimestamp(entry.timestamp),
+        ...(isClientMessageId(entry.clientMessageId) ? { clientMessageId: entry.clientMessageId } : {}),
       };
     default:
       // model_change, thinking_level_change, service_tier_change, label,

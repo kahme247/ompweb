@@ -126,7 +126,7 @@ export async function sendAgentCommand<T = unknown>(
     const message = body.error || body.code ? formatApiError(body) : `HTTP ${reply.status}`;
     if (reply.status === 503 && body.hostOffline) throw new HostOfflineError(message, body.delivery === "unknown");
     if (reply.status === 503 && body.code === "transport_lost") throw new TransportLostError(message);
-    throw new Error(message);
+    throw Object.assign(new Error(message), { code: body.code });
   }
   return body.data as T;
 }

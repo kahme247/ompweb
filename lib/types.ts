@@ -26,6 +26,8 @@ export interface SessionEntryBase {
   id: string;
   parentId: string | null;
   timestamp: string;
+  /** Client intent metadata stored on native message/custom-message entries, never sent to the model. */
+  clientMessageId?: string;
 }
 
 export interface TextContent {
@@ -73,6 +75,7 @@ export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
   timestamp?: number;
+  clientMessageId?: string;
   /** Rendered from a `branch_summary` entry, not a real prompt: omp cannot branch at it. */
   branchSummary?: true;
 }
@@ -125,6 +128,7 @@ export interface CustomMessage {
   display: boolean;
   details?: unknown;
   timestamp?: number;
+  clientMessageId?: string;
 }
 
 export interface BashExecutionMessage {
@@ -516,6 +520,10 @@ export interface SessionContext {
   model: { provider: string; modelId: string } | null;
   /** Latest persisted todo snapshot on the selected session branch. */
   todoPhases: TodoPhase[];
+  /** Correlated native messages retained in the session's append history, including compacted entries. */
+  persistedClientMessageIds?: string[];
+  /** Explicit native withdrawals/consumption records; absence alone never resolves a handoff. */
+  resolvedClientMessageIds?: string[];
 }
 
 /** An omp child that exited unexpectedly; retained until that session starts again. */
@@ -564,6 +572,8 @@ export interface OutboxEntry {
   mayHaveBeenSent?: boolean;
   /** Only while delivering: authoritative persisted history captured before dispatch, never retained in tombstones. */
   previousEntryIds?: string[];
+  /** Delivered native input still needs its correlated view; none is an explicit non-message completion. */
+  settlement?: "native" | "none" | "uncorrelated";
   createdAt: number;
 }
 
@@ -573,4 +583,5 @@ export interface OutboxUpdateFrame {
   entries: OutboxEntry[];
   /** Recent delivered/removed ids: a late first subscription can retire browser copies without seeing their removal. */
   settledIds: string[];
+  nativeSettledIds?: string[];
 }
