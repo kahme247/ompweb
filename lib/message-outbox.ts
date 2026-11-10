@@ -776,8 +776,9 @@ async function deliver(entry: Row): Promise<Outcome> {
   if (competingPending && !wrapper.isRunning()) {
     try {
       if (await wrapper.clearMessageProofTaintIfSettled()) return "next";
-    } catch {
+    } catch (error) {
       // Nothing of this entry was written: a failed or timed-out read leaves it unsent, so it is tried again.
+      console.warn(`[omp-web] outbox: settle read failed: ${error instanceof Error ? error.message : String(error)}`);
       return retry(current);
     }
   }
