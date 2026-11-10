@@ -35,6 +35,28 @@ export interface ProjectRegistryEntry {
   launchConfig?: ProjectLaunchConfig;
 }
 
+export interface ProjectPresentationUpdate {
+  alias?: string | null;
+  sortOrder?: number | null;
+  pinOrder?: number | null;
+  launchConfig?: ProjectLaunchConfig | null;
+}
+
+/** Presentation changes never inspect or modify the project's filesystem. */
+export function applyProjectPresentation<T extends ProjectPresentationUpdate>(project: T, update: ProjectPresentationUpdate): T {
+  const next = { ...project };
+  if (update.alias !== undefined) {
+    const alias = update.alias?.trim();
+    if (alias) next.alias = alias;
+    else delete next.alias;
+  }
+  for (const field of ["sortOrder", "pinOrder", "launchConfig"] as const) {
+    if (update[field] === null) delete next[field];
+    else if (update[field] !== undefined) Object.assign(next, { [field]: update[field] });
+  }
+  return next;
+}
+
 export interface ProjectRegistryFile {
   version: 1;
   projects: ProjectRegistryEntry[];
@@ -168,7 +190,7 @@ export function upsertProject(
  *  managed must register them in the same cycle (see /api/projects PATCH). */
 export function updateProjectsPresentation(
   registry: ProjectRegistryFile,
-  updates: ReadonlyArray<{ path: string; alias?: string | null; sortOrder?: number | null; pinOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }>,
+  updates: ReadonlyArray<ProjectPresentationUpdate & { path: string }>,
 ): ProjectRegistryFile {
   const keyed = new Map(updates.map((update) =>
     [comparableProjectPath(canonicalProjectPath(update.path)), update] as const,
@@ -178,25 +200,7 @@ export function updateProjectsPresentation(
     projects: registry.projects.map((project) => {
       const update = keyed.get(comparableProjectPath(project.path));
       if (!update) return project;
-      const next = { ...project };
-      if (update.alias !== undefined) {
-        const alias = update.alias?.trim();
-        if (alias) next.alias = alias;
-        else delete next.alias;
-      }
-      if (update.sortOrder !== undefined) {
-        if (update.sortOrder === null) delete next.sortOrder;
-        else next.sortOrder = update.sortOrder;
-      }
-      if (update.pinOrder !== undefined) {
-        if (update.pinOrder === null) delete next.pinOrder;
-        else next.pinOrder = update.pinOrder;
-      }
-      if (update.launchConfig !== undefined) {
-        if (update.launchConfig === null) delete next.launchConfig;
-        else next.launchConfig = update.launchConfig;
-      }
-      return next;
+      return applyProjectPresentation(project, update);
     }),
   };
 }

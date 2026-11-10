@@ -1,9 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { comparableProjectPath } from "../comparable-path";
 import { cloneDirectoryName } from "../git-clone";
 import { getAgentDir } from "../omp/paths";
 import { isReservedLaunchArg, type ProjectRegistryEntry } from "../project-registry";
 import { isRecord } from "../type-guards";
+import type { ManagedProject } from "../types";
 import type { HostStatus } from "./host";
 import type { CapacitySnapshot } from "./hub";
 
@@ -43,7 +45,7 @@ const nonnegative = (value: unknown): value is number => typeof value === "numbe
 const absoluteRoot = (value: unknown): value is string => typeof value === "string" && !value.includes("\0")
   && isAbsolute(value) && resolve(value) === value && dirname(value) !== value;
 
-function validOrigin(value: unknown): value is string {
+export function isValidPoolOrigin(value: unknown): value is string {
   if (typeof value !== "string" || value !== value.trim() || !cloneDirectoryName(value)) return false;
   if (!value.startsWith("https://")) return true;
   try {
@@ -82,7 +84,7 @@ function validatePools(value: unknown): asserts value is HostPool[] {
     const projectIds = new Set<string>();
     for (const project of pool.projects) {
       if (!isRecord(project) || !safeId(project.id) || projectIds.has(project.id)
-        || typeof project.name !== "string" || !project.name.trim() || !validOrigin(project.origin)
+        || typeof project.name !== "string" || !project.name.trim() || !isValidPoolOrigin(project.origin)
         || !(project.defaultRef === undefined || typeof project.defaultRef === "string") || !isRecord(project.clonePaths)
         || typeof project.addedAt !== "string" || typeof project.hidden !== "boolean"
         || !(project.alias === undefined || typeof project.alias === "string")
@@ -95,6 +97,7 @@ function validatePools(value: unknown): asserts value is HostPool[] {
       }
     }
   }
+  poolProjectBindings(value);
 }
 
 /** Missing configuration means no pools; damaged configuration never means a local default. */
@@ -128,6 +131,37 @@ export function savePools(pools: HostPool[]): void {
   } finally {
     if (existsSync(temp)) rmSync(temp, { force: true });
   }
+}
+
+/** Domain-separated from physical path keys; pool/project IDs cannot contain colons. */
+export function poolProjectKey(poolId: string, projectId: string): string {
+  return `pool:${poolId}:${projectId}`;
+}
+
+/** Retained bindings, not current membership, determine an existing session's identity. */
+export function poolProjectBindings(pools: readonly HostPool[]): Map<string, Map<string, { pool: HostPool; project: PoolProject }>> {
+  const bindings = new Map<string, Map<string, { pool: HostPool; project: PoolProject }>>();
+  for (const pool of pools) for (const project of pool.projects) {
+    for (const [hostId, root] of Object.entries(project.clonePaths)) {
+      let roots = bindings.get(hostId);
+      if (!roots) bindings.set(hostId, roots = new Map());
+      const key = comparableProjectPath(root);
+      if (roots.has(key)) throw new Error("Ambiguous pool project clone binding");
+      roots.set(key, { pool, project });
+    }
+  }
+  return bindings;
+}
+
+/** The representative is diagnostic, never proof that a checkout has been prepared. */
+export function poolManagedProject(pool: HostPool, project: PoolProject): ManagedProject {
+  const [hostId, path] = Object.entries(project.clonePaths)[0] ?? [];
+  return {
+    poolId: pool.id, projectId: project.id, projectKey: poolProjectKey(pool.id, project.id),
+    path: path ?? "", hostId, name: project.name, origin: project.origin, defaultRef: project.defaultRef,
+    addedAt: project.addedAt, alias: project.alias, sortOrder: project.sortOrder,
+    pinOrder: project.pinOrder, launchConfig: project.launchConfig,
+  };
 }
 
 /** Only explicit, ready members compete; this does not collect or refresh trusted hub snapshots. */
