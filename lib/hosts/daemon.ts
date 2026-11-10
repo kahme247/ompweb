@@ -15,6 +15,7 @@ import { isRecord } from "../type-guards";
 import { isLoopbackHost, readHostLogin } from "./host-login";
 import { sampleHostCapacity } from "./capacity";
 import type { SpawnRequest } from "./host";
+import type { HostControlCommand, HostControlStatus } from "./host-control";
 import {
   CREATION_ID_RE,
   decodeBlobFrame,
@@ -90,6 +91,7 @@ interface Queued {
   /** Its link sample, set on the line that completes a message (a whole line, or its last part), with `t`, its queue
    * time on the monotonic clock. Null for a `stats` message and for a part before the last. */
   sample: (Omit<LinkStatSample, "ackMs"> & { t: number }) | null;
+  pending: Pending | null;
 }
 
 /** A message's link sample as taken when it is queued: the time (wall and monotonic), the bytes of a result queued ahead of this `res`
@@ -163,9 +165,15 @@ function updateCompatibility(value: unknown): HostUpdateCompatibility {
   return { min: Number(value.min), max: Number(value.max) };
 }
 
+export interface HostDaemon {
+  stop(): Promise<void>;
+  done: Promise<number>;
+  control(command: HostControlCommand): HostControlStatus;
+}
+
 /** Dial the main server and keep the link up until stopped, revoked (exit 1),
  * outdated (close 4426, exit 1) or replaced by a newer link with this token (close 4409, exit 0). */
-export function runHostDaemon(options: { url: string; token: string; allowHttp: boolean }): { stop(): Promise<void>; done: Promise<number> } {
+export function runHostDaemon(options: { url: string; token: string; allowHttp: boolean }): HostDaemon {
   if (!dialable(options.url, options.allowHttp)) {
     throw new Error("ompweb host needs an https:// server URL (http:// only for loopback, or with --allow-http)");
   }
@@ -180,10 +188,13 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   // Spawns not yet in `channels`: their omp child may already be running.
   let spawnsInFlight = 0;
   let preparationsInFlight = 0;
-  configureHostUpdateSafety(() => channels.size > 0 || spawnsInFlight > 0
-    ? "Close this host's sessions before updating its daemon; sessions and subagents must not be interrupted."
-    : preparationsInFlight > 0 ? "Wait for pooled project preparation to finish before updating this daemon."
-    : null);
+  let drained = false;
+  let operationsInFlight = 0;
+  let nativeUpdatesInFlight = 0;
+  const reliablePending = new Map<Pending, string>();
+  const executable = realpathSync(process.execPath);
+  const entrypoint = canonicalPath(process.argv[1] || process.execPath) || resolve(process.argv[1] || process.execPath);
+  configureHostUpdateSafety(() => drained ? "This host is locally drained for maintenance." : busyReason());
   let updateStateWarningLogged = false;
   // Upload acks go under the upload's own key, fair with the channels.
   const uploads = new StagedUploads((ack) => void queue({ type: "upload_ack", ...ack }, `up:${ack.id}`));
@@ -234,6 +245,26 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   const samples: LinkStatSample[] = [];
   let statsTimer: NodeJS.Timeout | undefined;
   let capacityTimer: NodeJS.Timeout | undefined;
+  function busyReason(): string | null {
+    if (channels.size > 0 || spawnsInFlight > 0) return "Close this host's sessions before updating its daemon; sessions and subagents must not be interrupted.";
+    if (preparationsInFlight > 0) return "Wait for pooled project preparation to finish before updating this daemon.";
+    if (uploads.busy()) return "Wait for this host's active uploads and control writes to finish.";
+    if (operationsInFlight > 0) return "Wait for pending host operations to finish.";
+    if (reliablePending.size > 0) return "Wait for reliable host results to be delivered.";
+    return null;
+  }
+
+  function control(command: HostControlCommand): HostControlStatus {
+    if (command === "drain" && !drained) {
+      if (stopped) throw new HostOpError(503, "host_stopping", "This host is stopping");
+      const busy = busyReason();
+      if (busy) throw new HostOpError(409, "host_busy", busy);
+      if (nativeUpdatesInFlight > 0 || getHostUpdateOperation()?.state === "running") throw new HostOpError(409, "host_busy", "Wait for the native host update/check to finish.");
+      drained = true;
+    } else if (command === "resume") drained = false;
+    return { pid: process.pid, version: packageJson.version, protocol: LINK_PROTOCOL_VERSION, linked: !stopped && linked?.readyState === 1, drained, executable, entrypoint };
+  }
+
 
   function reportCapacity(): void {
     const ws = linked;
@@ -273,7 +304,10 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     // Ahead of it: what is unacked and what is queued to go (counters, no scan; a queued line counts at its size before
     // its seq is filled in). A `stats` message is not measured itself: its sample would need another one.
     const sample = body.type === "stats" ? null : { at: Date.now(), t: performance.now(), blob, bytesAhead: Math.max(0, ahead ?? unackedBytes + sender.queuedBytes), session };
-    sender.push(key, { line, size, counted, sample });
+    const pending: Pending = { line, size, counted, sample };
+    // Live channels cover their output; their reliable exit is FIFO behind any remaining bytes.
+    if (body.type === "res" || body.type === "upload_ack" || body.type === "exit" || body.type === "resync") reliablePending.set(pending, key);
+    sender.push(key, pending);
     unsentBytes += size;
     scheduleFlush();
     return size;
@@ -295,6 +329,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       // lib/hosts/daemon.test.mjs parses this line (`dropped N bytes`) to wait for the overflow.
       log(`channel ${ch}: dropped ${channel.buffered} bytes of output the server has not taken; resync`);
       sender.drop(ch);
+      for (const [pending, key] of reliablePending) if (key === ch) reliablePending.delete(pending);
       for (const item of outbox.drop((item) => item.key === ch)) unackedBytes -= item.unacked;
       resend = resend.slice(resendAt).filter((item) => item.key !== ch);
       resendAt = 0;
@@ -311,6 +346,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       const channel = channels.get(item.key);
       if (channel) channel.buffered -= item.bytes;
       unackedBytes -= item.unacked;
+      if (item.pending) reliablePending.delete(item.pending);
       // One sample per message: a split one carries it on its last part, acked with the whole message.
       if (item.sample) {
         const { t, ...sample } = item.sample;
@@ -365,7 +401,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     const sample = unit.done && item.sample
       ? { session: item.sample.session, bytes: unit.messageBytes + item.sample.blob, bytesAhead: item.sample.bytesAhead, at: item.sample.at, t: item.sample.t }
       : null;
-    outbox.push({ seq: unit.seq, line: unit.line, key: unit.key, bytes, unacked: size + sentBlob, sample });
+    outbox.push({ seq: unit.seq, line: unit.line, key: unit.key, bytes, unacked: size + sentBlob, sample, pending: unit.done && reliablePending.has(item) ? item : null });
     unackedBytes += size;
     return unit.line;
   }
@@ -539,6 +575,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   async function answer(id: string, op: string, args: unknown): Promise<void> {
     // A session op names its session `id`; host ops serve none.
     const session = isRecord(args) && typeof args.id === "string" && isValidSessionId(args.id) ? args.id : null;
+    const nativeUpdate = op === "checkUpdates" || op === "updateSoftware";
+    if (nativeUpdate) nativeUpdatesInFlight += 1;
+    else operationsInFlight += 1;
     try {
       const result = await runOp(op, args);
       const media = op === "readMedia" && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
@@ -566,6 +605,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           ? { status: 400, code: error.code, message: error.message }
           : { status: 500, code: "host_op_failed", message: reason(error) };
       queue({ type: "res", id, ok: false, error: failure }, id, { session });
+    } finally {
+      if (nativeUpdate) nativeUpdatesInFlight -= 1;
+      else operationsInFlight -= 1;
     }
   }
 
@@ -573,6 +615,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     // Preserve typed refusal for operations this daemon does not implement.
     if (!isHostOp(op)) throw new HostOpError(501, "unknown_op", `Unknown host op: ${op}`);
     if (!isRecord(args)) throw new HostOpError(400, "invalid_request", "Host op arguments must be an object");
+    if (drained) throw new HostOpError(409, "host_drained", "This host is locally drained for maintenance; resume it before starting new work");
     switch (op) {
       case "spawn":
         return spawnChannel(args);
@@ -734,7 +777,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         // acked soon, at once past a piece, so main's unacked window moves (spec D7).
         if (typeof data !== "string") {
           const { id, bytes } = decodeBlobFrame(new Uint8Array(data as ArrayBuffer));
-          uploads.write(id, bytes);
+          if (!drained) uploads.write(id, bytes);
           return;
         }
         const applied = down.acked;
@@ -863,5 +906,5 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   void keepLinked();
-  return { stop: () => shutdown(0), done };
+  return { stop: () => shutdown(0), done, control };
 }

@@ -111,6 +111,11 @@ export class StagedUploads {
     private readonly send: (ack: UploadAck) => void,
     readonly dir: string = join(getAgentDir(), "omp-web", "uploads"),
   ) {}
+  /** Includes accepted controls before their first await, queued writes and still-open transfers. */
+  busy(): boolean {
+    return this.open.size > 0 || this.controls.size > 0;
+  }
+
 
   private path(id: string, kind: "part" | "json"): string {
     return join(this.dir, `${id}.${kind}`);
