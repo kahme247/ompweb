@@ -128,7 +128,7 @@ interface Link {
   status: HostStatus;
   /** Link protocol version the daemon last presented (Settings shows it on a 426). */
   hostVersion: number | null;
-  /** Shared lifecycle is advertised independently of optional v7 pool extensions. */
+  /** Shared lifecycle (v7) is advertised independently of the v8 pool extensions. */
   shared: boolean;
   capacity: CapacitySnapshot | null;
   ompVersion: string | null;
@@ -913,7 +913,7 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
   if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
   if (message.type === "capacity") {
-    if (link.hostVersion === 7) link.capacity = { sample: message.sample, receivedAt: performance.now() };
+    if ((link.hostVersion ?? 0) >= 8) link.capacity = { sample: message.sample, receivedAt: performance.now() };
     return;
   }
   if (message.type === "unknown") {
@@ -1131,7 +1131,7 @@ function remoteSessionOps(hostId: string): SessionOps {
       if (op === "readMedia" && !MEDIA_HASH_RE.test(String(args[0]))) {
         return { ok: false, status: 400, code: "invalid_hash", error: "Invalid media hash" };
       }
-      if (op === "preparePoolProject" && (linkFor(hostId).hostVersion ?? 0) < 7) {
+      if (op === "preparePoolProject" && (linkFor(hostId).hostVersion ?? 0) < 8) {
         throw new HostOpError(426, "host_upgrade_required", `${labelOf(hostId)} needs a newer ompweb to prepare pooled projects`);
       }
       if (ORPHAN_SENSITIVE_OPS[op]) await orphanExit(hostId, String(args[0]));
@@ -1484,7 +1484,7 @@ export class RemoteHost implements Host {
       if (typeof creationId !== "string" || !CREATION_ID_RE.test(creationId)) {
         throw new HostOpError(400, "invalid_request", "Invalid creation identity");
       }
-      if ((link.hostVersion ?? 0) < 7) {
+      if ((link.hostVersion ?? 0) < 8) {
         throw new HostOpError(426, "host_upgrade_required", `${this.label} needs a newer ompweb to use creation identity`);
       }
     }

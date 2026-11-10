@@ -10,14 +10,14 @@ import type { SpawnRequest } from "./host";
 import { isWorkspaceOp, WORKSPACE_OP_PARAMS } from "../workspace-types";
 import type { WorkspaceFileEvent } from "../workspace-types";
 
-/** 7: shared host-owned channels, lifecycle, dialogs and callbacks; optional pool capacity, creation identity
- * and project preparation. 6: composer uploads
+/** 8: pool capacity reports, creation identity and project preparation. 7: shared host-owned channels, lifecycle,
+ * dialogs and callbacks. 6: composer uploads
  * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
  * `part` messages and a large result as several binary frames, both sent fair across channels
  * (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry the messages,
  * binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
-export const LINK_PROTOCOL_VERSION = 7;
+export const LINK_PROTOCOL_VERSION = 8;
 /** The first daemon link version that takes uploads: main answers 426 below it (host_upgrade_required, or
  * host_restart_required on this machine, whose daemon an in-place upgrade leaves running). */
 export const UPLOADS_SINCE_VERSION = 6;
@@ -102,7 +102,7 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   preparePoolProject: ["input"],
 };
 
-/** Unknown additions are answered with 501; standalone v7 peers need not support pool preparation. */
+/** Unknown additions are answered with 501; pool preparation needs a v8 peer. */
 export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "open", "close", "editLease", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
@@ -178,7 +178,7 @@ export type UpMessage =
   /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. Advisory: the
    * receiver keeps the valid ones and counts the rest in `invalid` (decodeUp only; a sender leaves it out). */
   | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
-  /** v7: a fresh resource sample; unsequenced and never retained for replay. */
+  /** v8: a fresh resource sample; unsequenced and never retained for replay. */
   | { type: "capacity"; sample: HostCapacity }
   /** v6: the daemon has written `received` bytes of upload `id` for this start `attempt`, `done` once all of them are
    * written and synced; with `error` the upload failed and its staged file is gone. */

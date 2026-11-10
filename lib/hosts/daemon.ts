@@ -165,10 +165,10 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
   function reportCapacity(): void {
     if (stopped) return;
     let linked = false;
-    for (const link of links.values()) if (link.version >= 7 && link.isUp()) { linked = true; break; }
+    for (const link of links.values()) if (link.version >= 8 && link.isUp()) { linked = true; break; }
     if (!linked) return;
     const sample = sampleHostCapacity(channels.activeTurns);
-    if (sample) for (const link of links.values()) if (link.version >= 7) link.reportCapacity(sample);
+    if (sample) for (const link of links.values()) if (link.version >= 8) link.reportCapacity(sample);
   }
   const capacityTimer = setInterval(reportCapacity, 5_000); capacityTimer.unref?.();
 
