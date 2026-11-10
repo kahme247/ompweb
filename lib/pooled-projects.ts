@@ -1,5 +1,5 @@
-import { execFile } from "child_process";
-import { lstat, mkdir, mkdtemp, realpath, rename, rm } from "fs/promises";
+import { execFile, spawn } from "child_process";
+import { lstat, mkdir, realpath } from "fs/promises";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "path";
 import { promisify } from "util";
 import { cloneDirectoryName } from "./git-clone";
@@ -76,6 +76,23 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+/** A fetch must also lose the controlling terminal: empty askpass alone does not stop SSH /dev/tty prompts. */
+async function fetchRemoteRef(cwd: string, ref: string): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const child = spawn("git", ["-C", cwd, "fetch", "--no-tags", "origin", ref], {
+    stdio: "ignore",
+    env: createChildProcessEnvironment({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
+    detached: process.platform !== "win32",
+    windowsHide: true,
+  });
+  child.on("error", () => reject(new PreparationError("pool_fetch_failed", "Could not run git fetch", 500)));
+  child.on("close", (code) => {
+    if (code === 0) resolve();
+    else reject(new PreparationError("pool_fetch_failed", "Could not fetch the registered project ref", 502));
+  });
+  return promise;
+}
+
 /** Reject symlinks at every existing component, including the destination itself. */
 async function directoryExists(path: string): Promise<boolean> {
   const root = parse(path).root;
@@ -119,27 +136,32 @@ async function prepare(input: {
   }
 
   if (!existingClone) {
-    const temporary = await mkdtemp(join(parent, `.${basename(cloneRoot)}_clone-`));
-    try {
-      const staging = join(temporary, "repository");
-      const cloned = await cloneRepository({ origin, target: staging });
-      if (!cloned.ok) throw new PreparationError(cloned.code, cloned.error, cloned.status);
-      if (await directoryExists(cloneRoot)) throw new PreparationError("clone_target_exists", "Clone target appeared during preparation");
-      await rename(staging, cloneRoot);
-    } finally {
-      // Only this attempt's mkdtemp directory is removed; published/previous clones survive.
-      await rm(temporary, { recursive: true, force: true, maxRetries: 5 });
-    }
+    // Clone into the helper's exclusively mkdir-acquired final root. A rename
+    // cannot publish safely here: POSIX rename may replace somebody else's empty reservation.
+    const cloned = await cloneRepository({ origin, target: cloneRoot });
+    if (!cloned.ok) throw new PreparationError(cloned.code, cloned.error, cloned.status);
   }
 
   const gitDirectory = join(cloneRoot, ".git");
-  const gitStat = await lstat(gitDirectory);
+  let gitStat;
+  try {
+    gitStat = await lstat(gitDirectory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PreparationError("pool_clone_conflict", "Clone target is not a completed repository");
+    throw error;
+  }
   if (!gitStat.isDirectory() || gitStat.isSymbolicLink() || await git(cloneRoot, "rev-parse", "--show-toplevel") !== cloneRoot) {
     throw new PreparationError("pool_clone_conflict", "Clone root must be an independent repository");
   }
+  // Reject multiple literal URLs: Git fetches the first, whereas config --get returns the last.
   // remote get-url expands insteadOf rewrites and cannot verify the registered literal origin.
-  if (await git(cloneRoot, "config", "--get", "remote.origin.url") !== origin) {
-    throw new PreparationError("pool_origin_mismatch", "Clone origin does not match the registered project");
+  if (await git(cloneRoot, "config", "--null", "--get-all", "remote.origin.url") !== `${origin}\0`) {
+    throw new PreparationError("pool_origin_mismatch", "Clone must have exactly one origin matching the registered project");
+  }
+  try {
+    await git(cloneRoot, "rev-parse", "--verify", "HEAD^{commit}");
+  } catch {
+    throw new PreparationError("pool_clone_incomplete", "Clone target has no completed checkout");
   }
 
   if (existingWorktree) {
@@ -165,7 +187,7 @@ async function prepare(input: {
   }
 
   // Fetch the remote ref itself, not a possibly unpublished local branch. Never reset or clean.
-  await git(cloneRoot, "fetch", "--no-tags", "origin", ref ?? "HEAD");
+  await fetchRemoteRef(cloneRoot, ref ?? "HEAD");
   const baseCommit = await git(cloneRoot, "rev-parse", "--verify", "FETCH_HEAD^{commit}");
   await mkdir(sessionRoot, { recursive: true });
   if (!await directoryExists(sessionRoot) || await directoryExists(cwd)) {
