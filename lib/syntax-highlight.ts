@@ -60,6 +60,9 @@ for (const [name, grammar] of Object.entries(GRAMMARS)) {
   PrismLight.registerLanguage(name, grammar);
 }
 
+/** Grammar names the file viewer offers in its language picker. */
+export const HIGHLIGHT_LANGUAGES = Object.keys(GRAMMARS);
+
 /**
  * True for every language — all grammars are registered eagerly, so nothing
  * ever needs a pending load. Unknown languages are passed through and fall
