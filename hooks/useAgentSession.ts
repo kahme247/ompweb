@@ -14,6 +14,7 @@ import type {
   SessionInfo,
   SessionTreeNode,
   ToolResultMessage,
+  UserMessage,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { hasVisibleAssistantContent } from "@/lib/assistant-response";
@@ -32,7 +33,7 @@ import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib
 import { displayMessage } from "@/lib/message-delta";
 import { looksLikeRunningTurn } from "@/lib/chat-transcript-plan";
 import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
-import type { BashResultInfo } from "@/lib/pi-types";
+import type { BashResultInfo, ClientMessageStatus } from "@/lib/pi-types";
 import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import { toast } from "@/components/ui/toast";
@@ -62,7 +63,8 @@ import {
 export type { SubagentInfo } from "@/lib/subagent-types";
 
 // Pure helpers extracted to sibling modules (extraction only — no logic changes).
-import { EMPTY_QUEUE, EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, isQueuedWhileShellRunning, mergeHeldMessages, readQueueSnapshot } from "./useAgentSession-queue";
+import { EMPTY_QUEUE, EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, isQueuedWhileShellRunning, markOutboxUncertain, mergeHeldMessages, rememberLocalOutbox, rememberOutboxEntries, representOutboxIds } from "./useAgentSession-queue";
+import { readQueueSnapshot } from "@/lib/client-message-ids";
 import type { QueuedMessages, ServerOutbox } from "./useAgentSession-queue";
 import {
   NOTICE_ERROR_VISIBLE_MS,
@@ -148,6 +150,12 @@ export type PromptSubmissionResult =
   | { status: "accepted" }
   | { status: "rejected"; recoveryKey?: string }
   | { status: "superseded" };
+
+/** What the composer knows about a prompt that its text no longer shows. */
+export interface PromptSendOptions {
+  /** Explicit model input (inline files or a recovered queue entry), even when its text starts with `!`. */
+  promptOnly?: boolean;
+}
 
 const MAX_HANDLED_EDIT_HISTORY_MARKERS = 64;
 // A running-channel lookup that failed is retried after 1 s, 2 s and 4 s, then waits for the next frame.
@@ -242,10 +250,33 @@ export interface UseAgentSessionOptions {
   onOpenUrl?: (url: string) => string;
 }
 
-/** omp's echo and the saved copy are one message object: same timestamp and text. */
+/** Correlation distinguishes identical submitted intents; legacy echoes still dedupe by native timestamp and text. */
 function isSameUserMessage(message: AgentMessage, other: AgentMessage): boolean {
-  return message.role === "user" && message.timestamp === other.timestamp
+  return message.role === "user" && other.role === "user" && message.timestamp === other.timestamp
+    && (!(message.clientMessageId || other.clientMessageId) || message.clientMessageId === other.clientMessageId)
     && extractMessageText(message as Partial<AgentMessage>) === extractMessageText(other as Partial<AgentMessage>);
+}
+
+function isSameNativeMessage(message: AgentMessage, other: AgentMessage): boolean {
+  return (message.role === "user" || message.role === "custom") && (other.role === "user" || other.role === "custom")
+    && message.clientMessageId === other.clientMessageId && message.role === other.role
+    && message.timestamp === other.timestamp
+    && (message.role !== "custom" || (message as CustomMessage).customType === (other as CustomMessage).customType)
+    && extractMessageText(message) === extractMessageText(other);
+}
+
+/** A message's image blocks as one comparable string: the text alone cannot tell two attachments apart. */
+function imageSignature(message: UserMessage | CustomMessage): string {
+  if (typeof message.content === "string") return "[]";
+  return JSON.stringify(message.content.flatMap((block) => block.type === "image" ? [[block.mimeType, block.data, block.url, block.source]] : []));
+}
+
+/** A daemon from before correlation saves history without `clientMessageId`: the same native role, timestamp, type,
+ * text and images is still the echo's saved copy. A saved message carrying another intent's ID never is. */
+function isSavedCopyOf(saved: AgentMessage, echo: AgentMessage): boolean {
+  if ((saved.role !== "user" && saved.role !== "custom") || (echo.role !== "user" && echo.role !== "custom")) return false;
+  if (saved.clientMessageId) return isSameNativeMessage(saved, echo);
+  return isSameNativeMessage({ ...saved, clientMessageId: echo.clientMessageId }, echo) && imageSignature(saved) === imageSignature(echo);
 }
 
 /** Toast a send its connection stopped: the host's link (HostOfflineError) or
@@ -299,10 +330,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // omp's echo of a user message, shown until the transcript catch-up has its saved copy (same omp timestamp): the echo
   // is a frame, the copy arrives over HTTP a moment later, and the held bubble it replaces is already gone.
   const [echoedUserMessage, setEchoedUserMessage] = useState<AgentMessage | null>(null);
+  const [correlatedMessages, setCorrelatedMessages] = useState<{ sessionId: string; message: AgentMessage; epoch: number }[]>([]);
+  const [showCorrelatedMessages, setShowCorrelatedMessages] = useState(true);
+  // Each echo is stamped with the rewind count when it arrives. A native history rewind makes the echoes before it stale:
+  // `pruneBeforeEpochRef` is the first epoch that survives, applied by the next readable history (a failed reload keeps
+  // them), so an echo received after the rewind began is never pruned. 0 = no rewind pending.
+  const rewindEpochRef = useRef(0);
+  const pruneBeforeEpochRef = useRef(0);
   const messages = useMemo(() => {
     const pending = optimisticUserMessage ?? echoedUserMessage;
-    return pending ? [...confirmedMessages, pending] : confirmedMessages;
-  }, [confirmedMessages, optimisticUserMessage, echoedUserMessage]);
+    const base = pending ? [...confirmedMessages, pending] : confirmedMessages;
+    const native = showCorrelatedMessages ? correlatedMessages.filter((entry) => entry.sessionId === session?.id
+      && !base.some((message) => isSavedCopyOf(message, entry.message))).map((entry) => entry.message) : [];
+    return native.length ? [...base, ...native] : base;
+  }, [confirmedMessages, optimisticUserMessage, echoedUserMessage, correlatedMessages, showCorrelatedMessages, session?.id]);
   const confirmedMessagesRef = useRef(confirmedMessages);
   confirmedMessagesRef.current = confirmedMessages;
   const [entryIds, setEntryIds] = useState<string[]>([]);
@@ -347,13 +388,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [serverOutbox, setServerOutbox] = useState<ServerOutbox>(EMPTY_SERVER_OUTBOX);
   const serverOutboxRef = useRef(EMPTY_SERVER_OUTBOX);
   const [storedOutbox, setStoredOutbox] = useState<OutboxEntry[]>([]);
+  const outboxRevisionRef = useRef(0);
+  const handoffReadRef = useRef<{ source: EventStream | null; view: number; revision: number; startedAt: number } | null>(null);
+  const reconcileHandoffRef = useRef<() => Promise<void>>(async () => {});
+  const markOutboxRepresented = useCallback((ids: Iterable<string>) => {
+    const next = representOutboxIds(serverOutboxRef.current, ids);
+    if (next === serverOutboxRef.current) return;
+    serverOutboxRef.current = next;
+    setServerOutbox(next);
+  }, []);
   // Bumped when an outbox add is acknowledged: the follow-scroll effect runs even if the held entry rendered earlier.
   const [heldFollow, setHeldFollow] = useState(0);
   const outboxFrameSeenRef = useRef(false);
+  useEffect(() => {
+    outboxFrameSeenRef.current = false;
+    outboxRevisionRef.current += 1;
+    handoffReadRef.current = null;
+    setShowCorrelatedMessages(true);
+    pruneBeforeEpochRef.current = 0;
+  }, [session?.id]);
   // The server's persisted history captured before it dispatched the delivering entry: the next turn's boundary.
-  const dispatchBaselineRef = useRef<string[] | null>(null);
+  // Keyed by entry: a peer's later poll republishes the same delivering row, whose boundary its run already took.
+  const dispatchBaselineRef = useRef<{ id: string; entryIds: string[] } | null>(null);
+  const consumedBaselineIdRef = useRef<string | null>(null);
+  const takeDispatchBaseline = () => {
+    const baseline = dispatchBaselineRef.current;
+    dispatchBaselineRef.current = null;
+    if (baseline) consumedBaselineIdRef.current = baseline.id;
+    return baseline?.entryIds;
+  };
   // Set once connectEvents exists: the state route's held messages, and a subscription to follow them.
-  const applyStateOutboxRef = useRef<(sid: string, entries: OutboxEntry[], settledIds: string[]) => void>(() => {});
+  const applyStateOutboxRef = useRef<(sid: string, entries: OutboxEntry[], settledIds: string[], nativeSettledIds: string[]) => void>(() => {});
   const heldMessages = useMemo(
     () => mergeHeldMessages(session?.id ?? null, localOutbox, storedOutbox, serverOutbox),
     [session?.id, localOutbox, storedOutbox, serverOutbox],
@@ -478,12 +543,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const queueSeqRef = useRef(0);
   const queueAppliedSeqRef = useRef(0);
   const updateQueuedMessages = useCallback((next: QueuedMessages) => {
+    markOutboxRepresented([...(next.clientMessageIds?.steering ?? []), ...(next.clientMessageIds?.followUp ?? [])].filter((id): id is string => id !== null));
     // Unchanged snapshots keep their identity (the Delete confirmation is
     // bound to the queue object it was opened against).
     if (JSON.stringify(next) === JSON.stringify(queuedMessagesRef.current)) return;
     queuedMessagesRef.current = next;
     setQueuedMessagesState(next);
-  }, []);
+  }, [markOutboxRepresented]);
   /** Apply a get_state queue snapshot unless a newer snapshot or queue_update was applied. */
   const applyQueueStateSnapshot = useCallback((seq: number, value: unknown) => {
     if (seq <= queueAppliedSeqRef.current) return;
@@ -692,6 +758,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
         setMessages(context.messages);
+        markOutboxRepresented([
+          ...context.messages.flatMap((message) => (message.role === "user" || message.role === "custom") && message.clientMessageId ? [message.clientMessageId] : []),
+          ...(context.persistedClientMessageIds ?? []), ...(context.resolvedClientMessageIds ?? []),
+        ]);
+        setShowCorrelatedMessages(!catchUpRef.current?.view().leafId);
+        const pruneBefore = pruneBeforeEpochRef.current;
+        pruneBeforeEpochRef.current = 0;
+        setCorrelatedMessages((current) => current.filter((entry) => entry.epoch >= pruneBefore
+          && !context.messages.some((message) => isSavedCopyOf(message, entry.message))
+          && !((entry.message.role === "user" || entry.message.role === "custom")
+            && entry.message.clientMessageId && context.persistedClientMessageIds?.includes(entry.message.clientMessageId))));
         setEntryIds(context.entryIds);
         setData((current) => current ? { ...current, context } : current);
         if (metadata) syncActionsRef.current?.metadata(context, metadata.version, metadata.hasLive);
@@ -718,6 +795,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }
   const catchUp = catchUpRef.current;
 
+  const receiveCorrelatedMessage = useCallback((clientMessageId: string, native: AgentMessage) => {
+    const sid = sessionIdRef.current;
+    if (!sid || !hookAliveRef.current || !clientMessageId || clientMessageId.length > 128
+      || catchUp.view().leafId || (native.role !== "user" && native.role !== "custom")) return;
+    if (native.role === "custom" && "display" in native && native.display === false) return;
+    const message = { ...native, clientMessageId };
+    const epoch = rewindEpochRef.current;
+    setCorrelatedMessages((current) => {
+      if (confirmedMessagesRef.current.some((saved) => isSavedCopyOf(saved, message))) return current;
+      const existing = current.findIndex((entry) => entry.sessionId === sid && isSameNativeMessage(entry.message, message));
+      return existing < 0 ? [...current, { sessionId: sid, message, epoch }]
+        : current.map((entry, index) => index === existing ? { ...entry, message } : entry);
+    });
+    markOutboxRepresented([clientMessageId]);
+  }, [catchUp, markOutboxRepresented]);
   /** Stamp a quota error onto the live assistant bubble so it renders as the
    * inline chat error banner (MessageView) instead of toast-only. No-op when
    * nothing is streaming. */
@@ -1035,11 +1127,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       queueRevision: ++queueSeqRef.current,
       skillDiagnosticsRevision: ++skillDiagnosticsSeqRef.current,
       response: fetch(`/api/sessions/${encodeURIComponent(sid)}/state`).then(async (stateRes) => {
-        const agentState = await stateRes.json().catch(() => ({})) as { running: boolean; state?: AgentStateResponse; exited?: ExitedRpcSession; outbox?: OutboxEntry[]; outboxScope?: string; outboxSettledIds?: string[] };
+        const agentState = await stateRes.json().catch(() => ({})) as { running: boolean; state?: AgentStateResponse; exited?: ExitedRpcSession; outbox?: OutboxEntry[]; outboxScope?: string; outboxSettledIds?: string[]; nativeSettledIds?: string[] };
         if (hookAliveRef.current && sessionIdRef.current === sid && contextRequestSeqRef.current === requestSeq
           && promptRunIdRef.current === requestRun && (fenceRunId === undefined || promptRunIdRef.current === fenceRunId)) {
           if (typeof agentState.outboxScope === "string") rememberOutboxScope(agentState.outboxScope);
-          if (Array.isArray(agentState.outbox)) applyStateOutboxRef.current(sid, agentState.outbox, agentState.outboxSettledIds ?? []);
+          if (Array.isArray(agentState.outbox)) applyStateOutboxRef.current(sid, agentState.outbox, agentState.outboxSettledIds ?? [], agentState.nativeSettledIds ?? []);
         }
         return { stateRes, agentState };
       }).catch((e) => {
@@ -1171,6 +1263,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const runId = promptRunIdRef.current;
     catchUp.select({ leafId, includePreCompaction });
     setEchoedUserMessage(null);
+    setShowCorrelatedMessages(!leafId);
     const position = catchUp.position();
     eventCoalescer.reset();
     dispatch({ type: "reset" });
@@ -1200,6 +1293,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setShowPreCompactionHistory(false);
     setOptimisticUserMessage(null);
     setEchoedUserMessage(null);
+    // Native history moved (an edit rewound it): once the new history is readable it replaces the echoes received so far,
+    // which bridge the old tail; an echo received from here on belongs to the new one.
+    pruneBeforeEpochRef.current = ++rewindEpochRef.current;
+    setShowCorrelatedMessages(true);
     eventCoalescer.reset();
     dispatch({ type: "reset" });
     clearLiveToolResults();
@@ -1370,6 +1467,74 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot]);
 
+  const reconcileHandoff = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    if (!sid || !hookAliveRef.current || catchUp.view().leafId) return;
+    const current = serverOutboxRef.current;
+    const ids = [...current.nativeSettled].filter((id) =>
+      !current.represented.has(id) && !current.uncertain.has(id) && current.known.get(id)?.sessionId === sid);
+    if (ids.length === 0) return;
+    const token = {
+      source: eventSourceRef.current, view: contextRequestSeqRef.current,
+      revision: outboxRevisionRef.current, startedAt: Date.now(),
+    };
+    const pending = handoffReadRef.current;
+    if (pending && pending.source === token.source && pending.view === token.view && pending.revision === token.revision
+      && token.startedAt - pending.startedAt < 30_000) return;
+    handoffReadRef.current = token;
+    const owned = () => hookAliveRef.current && sessionIdRef.current === sid && handoffReadRef.current === token
+      && eventSourceRef.current === token.source && contextRequestSeqRef.current === token.view
+      && outboxRevisionRef.current === token.revision && !catchUp.view().leafId;
+    // Native has no trace of these (or no child is left to ask, after history caught up): stop waiting, let the user dismiss.
+    const giveUp = (ids: string[]) => {
+      serverOutboxRef.current = markOutboxUncertain(serverOutboxRef.current, ids.filter((id) => !serverOutboxRef.current.represented.has(id)));
+      setServerOutbox(serverOutboxRef.current);
+    };
+    try {
+      for (let index = 0; index < ids.length && owned(); index += 32) {
+        const clientMessageIds = ids.slice(index, index + 32).filter((id) => !serverOutboxRef.current.represented.has(id));
+        if (clientMessageIds.length === 0) continue;
+        const requested = new Set(clientMessageIds);
+        const queueRevision = ++queueSeqRef.current;
+        let status: ClientMessageStatus | null;
+        try {
+          status = await sendAgentCommand<ClientMessageStatus>(sid, { type: "get_client_message_status", clientMessageIds });
+        } catch (error) {
+          if ((error as { code?: unknown })?.code !== "handoff_child_unavailable" || !owned()) throw error;
+          // The child ended: only its saved history can still show these messages.
+          await catchUp.request();
+          if (owned()) giveUp(clientMessageIds);
+          return;
+        }
+        if (!owned() || !status) return;
+        for (const envelope of status.messages ?? []) {
+          if (requested.has(envelope.clientMessageId) && envelope.message) receiveCorrelatedMessage(envelope.clientMessageId, envelope.message);
+        }
+        // A selective read shares the queue's ordering fence; rejected snapshots never represent bridge IDs.
+        if (readQueueSnapshot(status.queuedMessages)) applyQueueStateSnapshot(queueRevision, status.queuedMessages);
+        markOutboxRepresented((status.resolvedClientMessageIds ?? []).filter((id) => requested.has(id)));
+        const persisted = (status.persistedClientMessageIds ?? []).filter((id) => requested.has(id));
+        // Only the successful history callback can confirm the peer actually read those persisted IDs.
+        if (persisted.length > 0) await catchUp.request();
+        if (owned()) giveUp((status.unresolvedClientMessageIds ?? []).filter((id) => requested.has(id)));
+      }
+    } catch {
+      // Missing/failed/older native reads leave the original intent visible until a later reconciliation.
+    } finally {
+      if (handoffReadRef.current === token) handoffReadRef.current = null;
+    }
+  }, [applyQueueStateSnapshot, catchUp, markOutboxRepresented, receiveCorrelatedMessage]);
+  reconcileHandoffRef.current = reconcileHandoff;
+
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid || ![...serverOutbox.nativeSettled].some((id) =>
+      !serverOutbox.represented.has(id) && !serverOutbox.uncertain.has(id) && serverOutbox.known.get(id)?.sessionId === sid)) return;
+    void reconcileHandoff();
+    const timer = setInterval(() => { void reconcileHandoff(); }, 2000);
+    return () => clearInterval(timer);
+  }, [reconcileHandoff, serverOutbox, session?.id]);
+
   // A held-message stream ("connected" mode) was opened without asking omp whether a run is going; the running
   // channel treats an open stream as carrying the run, so the chat asks once that stream attaches (below).
   const adoptObservedRunRef = useRef<(sid: string, source: EventStream) => void>(() => {});
@@ -1429,6 +1594,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Subscribe, then snapshot: OMP does not replay queue or diagnostics
         // updates emitted before this stream opened.
         void refreshAgentSnapshots(sid);
+        void reconcileHandoffRef.current();
         if (restoreWrapper === "connected") adoptObservedRunRef.current(sid, es);
       };
       es.onopen = () => {
@@ -1461,6 +1627,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const order = catchUp.observe(event);
           if (order === "stale") return;
           if (order === "epoch") {
+            outboxRevisionRef.current += 1;
             responseRunVersionRef.current += 1;
             runHadContentRef.current = false;
             lastQuotaErrorRef.current = null;
@@ -1528,10 +1695,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!hookAliveRef.current || sessionIdRef.current !== sid || eventSourceRef.current) return;
     void connectEvents(sid);
   };
-  applyStateOutboxRef.current = (sid, entries, settledIds) => {
+  applyStateOutboxRef.current = (sid, entries, settledIds, nativeSettledIds) => {
     // A channel snapshot is newer than any HTTP answer.
     if (!outboxFrameSeenRef.current) {
-      serverOutboxRef.current = applyOutboxSnapshot(serverOutboxRef.current, entries, settledIds);
+      outboxRevisionRef.current += 1;
+      serverOutboxRef.current = applyOutboxSnapshot(serverOutboxRef.current, entries, settledIds, nativeSettledIds);
       setServerOutbox(serverOutboxRef.current);
     }
     // Held messages open the session channel even without a wrapper: subscribe to follow them.
@@ -1541,11 +1709,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => subscribeOutbox((event) => {
     if ("entries" in event) {
       setLocalOutbox(event.entries);
+      serverOutboxRef.current = rememberLocalOutbox(serverOutboxRef.current, event.entries, sessionIdRef.current);
+      setServerOutbox(serverOutboxRef.current);
       return;
     }
     const { stored } = event;
     const sid = sessionIdRef.current;
     if (stored.sessionId !== sid) return;
+    serverOutboxRef.current = rememberOutboxEntries(serverOutboxRef.current, [stored]);
+    setServerOutbox(serverOutboxRef.current);
     // An add reply may arrive after the frame that removed its already-delivered entry: never resurrect it.
     if (!serverOutboxRef.current.seen.has(stored.id)) setStoredOutbox((current) => [...current.filter((entry) => entry.id !== stored.id), stored]);
     // The server holds it now, so the channel opens even without a wrapper (a first try may have been refused).
@@ -2258,7 +2430,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    *  queue snapshot; resolves to the removed message's images (empty when it
    *  had none or omp does not return them) only when omp confirms the
    *  removal, else false. */
-  const removeQueuedMessage = useCallback(async (text: string, queue: keyof QueuedMessages): Promise<ChatDraftImage[] | false> => {
+  const removeQueuedMessage = useCallback(async (text: string, queue: "steering" | "followUp"): Promise<ChatDraftImage[] | false> => {
     const sid = sessionIdRef.current;
     if (!hookAliveRef.current || !sid || !text) return false;
     if (!queuedMessagesRef.current[queue].includes(text)) {
@@ -2312,6 +2484,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice]);
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
+    if ((event.type === "message_start" || event.type === "message_end") && typeof event.clientMessageId === "string" && event.message) {
+      const message = event.message as AgentMessage;
+      if (event.type === "message_end" || message.role === "user") receiveCorrelatedMessage(event.clientMessageId, message);
+      if (event.type === "message_start" && (message.role === "user" || message.role === "custom")) return;
+    }
     switch (event.type) {
       case "session_history_changed": {
         const sid = sessionIdRef.current;
@@ -2344,8 +2521,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (Array.isArray(event.entries)) {
           outboxFrameSeenRef.current = true;
           const delivering = (event.entries as OutboxEntry[]).find((entry) => entry.state === "delivering" && Array.isArray(entry.previousEntryIds));
-          dispatchBaselineRef.current = delivering?.previousEntryIds ?? null;
-          serverOutboxRef.current = applyOutboxSnapshot(serverOutboxRef.current, event.entries as OutboxEntry[], Array.isArray(event.settledIds) ? event.settledIds as string[] : []);
+          dispatchBaselineRef.current = delivering?.previousEntryIds && delivering.id !== consumedBaselineIdRef.current
+            ? { id: delivering.id, entryIds: delivering.previousEntryIds } : null;
+          outboxRevisionRef.current += 1;
+          serverOutboxRef.current = applyOutboxSnapshot(
+            serverOutboxRef.current, event.entries as OutboxEntry[],
+            Array.isArray(event.settledIds) ? event.settledIds as string[] : [],
+            Array.isArray(event.nativeSettledIds) ? event.nativeSettledIds as string[] : [],
+          );
           setServerOutbox(serverOutboxRef.current);
           // Retire only confirmations the server has listed or settled; an older empty snapshot can overtake an ACK.
           setStoredOutbox((current) => current.filter((entry) => !serverOutboxRef.current.seen.has(entry.id)));
@@ -2364,8 +2547,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // Outbox and external turns start here, not at Send: fence the previous turn's pending reads and remember
           // its saved entries so terminal recovery cannot reuse an older answer.
           promptRunIdRef.current += 1;
-          runPreviousEntryIdsRef.current = dispatchBaselineRef.current ?? catchUp.history()?.entryIds ?? [];
-          dispatchBaselineRef.current = null;
+          runPreviousEntryIdsRef.current = takeDispatchBaseline() ?? catchUp.history()?.entryIds ?? [];
           if (sessionIdRef.current) void refreshSubagentRoster(sessionIdRef.current);
         }
         catchUp.invalidate();
@@ -2684,7 +2866,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // loadSession already loaded this message from the session file —
         // appending it again would duplicate it.
         if (!agentRunningRef.current) break;
-        if (completed?.role === "user" && !catchUp.view().leafId
+        if (completed?.role === "user" && !event.clientMessageId && !catchUp.view().leafId
           && !confirmedMessagesRef.current.some((message) => isSameUserMessage(message, completed))) {
           setEchoedUserMessage(completed);
         }
@@ -3004,7 +3186,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addUnconfirmedRunErrorNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, reconcileAgentState, refreshLiveModelState, refreshSubagentRoster, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, beginAuthoritativeModelSync, setCompacting, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
+  }, [addNotice, addUnconfirmedRunErrorNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, receiveCorrelatedMessage, reconcileAgentState, refreshLiveModelState, refreshSubagentRoster, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, beginAuthoritativeModelSync, setCompacting, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
   handleAgentEventRef.current = handleAgentEvent;
   syncActionsRef.current = {
     metadata: (context, version, hasLive = liveModelMeta !== null || currentModelOverride !== null) => {
@@ -3045,8 +3227,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (fields.lifecycle) {
         if (promptBusy && !agentRunningRef.current) {
           promptRunIdRef.current += 1;
-          runPreviousEntryIdsRef.current = dispatchBaselineRef.current ?? catchUp.history()?.entryIds ?? [];
-          dispatchBaselineRef.current = null;
+          runPreviousEntryIdsRef.current = takeDispatchBaseline() ?? catchUp.history()?.entryIds ?? [];
           if (sessionIdRef.current) void refreshSubagentRoster(sessionIdRef.current);
           responseRunVersionRef.current += 1;
           runHadContentRef.current = false;
@@ -3149,14 +3330,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return snapshot.entryIds;
   }, []);
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>): Promise<PromptSubmissionResult> => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>, options?: PromptSendOptions): Promise<PromptSubmissionResult> => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length && !uploads?.length) return { status: "rejected" };
     if (bashRunningRef.current || editInFlightRef.current) return { status: "rejected" };
     if (initialHydrationPendingRef.current) return { status: "rejected" };
     // Shell commands run during a turn too, as in omp's terminal: omp holds the
     // result back until a later prompt starts.
-    const isBashCommand = !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
+    const isBashCommand = !options?.promptOnly && !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
@@ -3413,7 +3594,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const mayHaveRun = toastStoppedSend(e);
       if (mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       if (mayHaveRun) return true;
-      if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage);
+      if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage, { promptOnly: true });
       return false;
     }
   }, [addNotice, catchUp, eventCoalescer, ensureEventsConnected, refreshSubagentRoster, clearTerminalReconcileTimer, opts.chatInputRef, snapshotRunEntries]);
@@ -3511,7 +3692,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         .map((entry) => entry.text)
         .filter((text): text is string => typeof text === "string" && text.length > 0);
       const images = entries.flatMap((entry) => toDraftImages(entry.images));
-      if (texts.length > 0 || images.length > 0) recoverDraft(sid, { text: texts.join("\n\n"), images });
+      if (texts.length > 0 || images.length > 0) recoverDraft(sid, { text: texts.join("\n\n"), images, promptOnly: true });
       // A failed attempt may have withdrawn messages whose texts were in the
       // lost response; say so unless the retry brought texts back.
       if (failures > 0 && texts.length === 0 && hookAliveRef.current && sessionIdRef.current === sid) {
@@ -3540,7 +3721,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (fresh.length === 0) return;
       entries.forEach((_, i) => { if (removed[i]) restored[i] = true; });
       const block = entries.filter((_, i) => restored[i]).map((entry) => entry.text).join("\n\n");
-      recoverDraft(sid, { text: block, replace: recoveredBlock ? { lead: recoveredBlock, fallback: fresh.join("\n\n") } : undefined });
+      recoverDraft(sid, { text: block, replace: recoveredBlock ? { lead: recoveredBlock, fallback: fresh.join("\n\n") } : undefined, promptOnly: true });
       recoveredBlock = block;
     };
     const removals = Promise.all(entries.map(async (entry, i) => {
@@ -3675,10 +3856,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Free the source slot before inserting an absent target: moving a
         // draft at capacity must not evict an unrelated conversation's draft.
         clearDraft(sid);
+        // Model text prefilled into an empty merged draft is model input even when it starts with `!` (its images are not restored).
+        const prefilled = loaded && !value.trim() && content.trim() !== "";
         setDraft(edit.sessionId, {
           value: loaded && !value.trim() ? content : value,
           images: destination ? [...draft.images, ...destination.images] : draft.images,
           files: destination ? [...draft.files, ...destination.files] : draft.files,
+          ...((prefilled || draft.promptOnly || destination?.promptOnly) ? { promptOnly: true } : {}),
           // The same upload may sit in both drafts (an id is one file): keep its first occurrence.
           uploads: destination
             ? [...(draft.uploads ?? []), ...(destination.uploads ?? [])].filter((upload, at, all) => all.findIndex((other) => other.id === upload.id) === at)
@@ -3689,7 +3873,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!loaded) throw new Error(translate("agentSession.commandFailed"));
       // A moved composer adopts the merged target snapshot during its identity
       // transition; writing through the old ref could overwrite target text.
-      if (!moved) opts.chatInputRef?.current?.insertIfEmpty(content);
+      if (!moved) opts.chatInputRef?.current?.insertIfEmpty(content, { promptOnly: true });
       return true;
     } catch (error) {
       if (isCurrent()) {
@@ -3727,7 +3911,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       const { cancelled, newSessionId, text } = result ?? {};
       if (!cancelled && newSessionId) {
-        if (editPrompt && text) setDraft(newSessionId, { value: text, images: [], files: [] });
+        if (editPrompt && text) setDraft(newSessionId, { value: text, images: [], files: [], promptOnly: true });
         // The forked child keeps its spawn flags: carry the advisor choice to
         // the new id, or the toggle flips off on switch and the next prompt
         // respawns the fork without --advisor.
@@ -4223,23 +4407,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const heldMessagesRef = useRef(heldMessages);
   heldMessagesRef.current = heldMessages;
+  const localOutboxRef = useRef(localOutbox);
+  localOutboxRef.current = localOutbox;
   const heldDeletionsRef = useRef(new Set<string>());
   /** Delete of a held bubble: one this browser still holds leaves IndexedDB; the server's only until dispatched (omp
-   * may have it from then on, answered 409 outbox_dispatched). */
+   * may have it from then on, answered 409 outbox_dispatched). An uncertain bridge is a view of an id the server
+   * settled, so only the browser's own copy of it (the worker still holds it if the server settled the id before the
+   * worker saw its add receipt) leaves IndexedDB, and the row hides once that commits: a reload cannot bring it back. */
   const deleteHeldMessage = useCallback(async (id: string) => {
     const sid = sessionIdRef.current;
     const held = heldMessagesRef.current.find((entry) => entry.id === id);
     if (!sid || !held || held.state === "sending" || held.state === "delivering" || heldDeletionsRef.current.has(id)) return;
     heldDeletionsRef.current.add(id);
     try {
-      if (held.local) await dropFromOutbox(id);
+      if (serverOutboxRef.current.uncertain.has(id)) {
+        if (localOutboxRef.current.some((entry) => entry.id === id)) await dropFromOutbox(id);
+        markOutboxRepresented([id]);
+        setStoredOutbox((entries) => entries.filter((entry) => entry.id !== id));
+        setLocalOutbox((entries) => entries.filter((entry) => entry.id !== id));
+      } else if (held.local) await dropFromOutbox(id);
       else await sendAgentCommand(sid, { type: "outbox_remove", id });
     } catch (e) {
       if (hookAliveRef.current && sessionIdRef.current === sid) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     } finally {
       heldDeletionsRef.current.delete(id);
     }
-  }, [addNotice]);
+  }, [addNotice, markOutboxRepresented]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;

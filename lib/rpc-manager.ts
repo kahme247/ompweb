@@ -21,6 +21,7 @@ import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterrup
 import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
+import { isClientMessageId, readQueueSnapshot } from "./client-message-ids";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
 import { publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
@@ -105,7 +106,7 @@ const NON_TERMINAL_CONTINUATION_GRACE_MS = 2_000;
 const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
 const BASH_EXCLUDE_MESSAGE =
-  "omp cannot run a shell command with its output excluded from the model context (`!!`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single `!` to share the output with the model, or use a terminal outside omp web.";
+  "Nothing was run: this session cannot confirm shell output exclusion (`!!`). Use OMP 18.18.1 or newer, update and restart the ompweb host daemon (including This machine), then reload the session.";
 /** Answer to a replayed server agent tool call that changes things: it may have run before the restart. */
 const AGENT_TOOL_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with list_sessions before retrying";
 
@@ -169,6 +170,7 @@ const PASSTHROUGH_COMMANDS = new Set([
   "btw",
   "btw_cancel",
   "get_btw_history",
+  "get_client_message_status",
 ]);
 
 // Outlasts omp's cold prediction-daemon start (up to 3 × 30s start rounds plus a
@@ -270,10 +272,16 @@ function matchesNativeSkill(message: Record<string, unknown>, submitted: string)
 function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, unknown>, baseline: unknown, generation: number, competingPending: boolean, previousEntryIds?: string[]): MessageReplacementWatch {
   const { promise, resolve } = Promise.withResolvers<HandOff>();
   const ambiguous: HandOff = { error: "Another message was dispatched while this message's native replacement was being confirmed", mayHaveBeenSent: true };
-  // A peer server's admission (the daemon's marker) also contends: its identical echo is not this command's proof.
+  const clientMessageId = isClientMessageId(command.clientMessageId) ? command.clientMessageId : null;
+  // A peer server's admission (the daemon's marker) also contends: its identical echo is not this command's proof. An
+  // exact ID names this command's message whoever else writes meanwhile, so only text inference needs the sole window.
   const peers = wrapper.peerMessageCommands;
-  const ownsWindow = () => !competingPending && wrapper.getMessageCommandGeneration() === generation + 1 && wrapper.peerMessageCommands === peers;
-  const initialQueue = queueTexts(baseline);
+  const ownsWindow = () => clientMessageId !== null || (!competingPending && wrapper.getMessageCommandGeneration() === generation + 1 && wrapper.peerMessageCommands === peers);
+  // The text rules need omp's user attribution. An exact ID identifies a native custom message by itself, but only a
+  // displayed one: the browser never shows a hidden message, so it cannot replace the pending row there.
+  const isUserInput = (message: Record<string, unknown>) => message.role === "user"
+    || (message.role === "custom" && (clientMessageId !== null ? message.display !== false : message.attribution === "user"));
+  const initialQueue = clientMessageId ? [] : queueTexts(baseline);
   let priorQueue = initialQueue;
   let echoDebt: number | undefined;
   let seen = false;
@@ -334,15 +342,20 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
   };
   const detach = wrapper.onEvent((event) => {
     if (seen) return;
-    if (competingPending || wrapper.getMessageCommandGeneration() > generation + 1 || wrapper.peerMessageCommands !== peers) { finish(ambiguous); return; }
+    if (!clientMessageId && (competingPending || wrapper.getMessageCommandGeneration() > generation + 1 || wrapper.peerMessageCommands !== peers)) { finish(ambiguous); return; }
     if (!ownsWindow() && event.type !== "process_exit") return;
     const text = expectedText();
-    if (echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
-    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message)
-      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))) userMessageSeen = true;
+    if (!clientMessageId && echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
+    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message) && isUserInput(event.message)
+      && (!clientMessageId || event.clientMessageId === clientMessageId)) userMessageSeen = true;
     if (event.type === "message_start" && typeof event.messageId === "string" && isRecord(event.message) && event.message.role === "user") {
       openedUserMessages.add(event.messageId);
     } else if (event.type === "queue_update") {
+      if (clientMessageId) {
+        const ids = readQueueSnapshot(event)?.clientMessageIds;
+        if (ids?.steering.includes(clientMessageId) || ids?.followUp.includes(clientMessageId)) finish({});
+        return;
+      }
       const next = queueTexts(event);
       const counts = new Map<string, number>();
       for (const item of priorQueue) counts.set(item, (counts.get(item) ?? 0) + 1);
@@ -354,10 +367,12 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
       }
       if (text && (added.includes(text) || (command.type === "prompt" && text.trimStart().startsWith("/") && added.length === 1))) finish({});
       priorQueue = next;
-    } else if (event.type === "message_end" && isRecord(event.message)
-      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))) {
-      if (text && (messageText(event.message) === text || matchesNativeSkill(event.message, text))) {
-        if (echoDebt > 0) echoDebt -= 1;
+    } else if (event.type === "message_end" && isRecord(event.message) && isUserInput(event.message)) {
+      if (clientMessageId) {
+        if (event.clientMessageId === clientMessageId) finish({});
+      } else if (text && (messageText(event.message) === text || matchesNativeSkill(event.message, text))) {
+        const debt = echoDebt ?? 0;
+        if (debt > 0) echoDebt = debt - 1;
         else finish({});
       } else if (event.message.role === "user" && (typeof event.messageId !== "string" || openedUserMessages.has(event.messageId))) {
         void checkExpandedUser(event.message);
@@ -411,6 +426,8 @@ export class AgentSessionWrapper {
   private frameGaps = 0;
   private confirmedMessageCommandGeneration = 0;
   private pendingMessageCommands = 0;
+  /** The settle read in flight (clearMessageProofTaintIfSettled): a send during it joins it instead of seeing it as busy. */
+  private taintRead: Promise<boolean> | null = null;
   private nativeQueuedMessages: unknown = { steering: [], followUp: [] };
   private readonly startedEmpty: boolean;
   private messageReplacement: MessageReplacementWatch | null = null;
@@ -470,7 +487,7 @@ export class AgentSessionWrapper {
   private _alive = true;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
-  /** Accepted browser definitions only: server tools follow the current enablement policy when a child is renewed. */
+  /** Accepted browser definitions only: registered again, with server tools under the current enablement policy, when a shared child is restarted or adopted. */
   private registeredHostTools: Array<{ name?: unknown; [key: string]: unknown }> | null = null;
   /** Feeding an adopted child's open requests (see adopt): server agent tools there may already have run. */
   private replaying = false;
@@ -1245,6 +1262,12 @@ export class AgentSessionWrapper {
       case "session_settled":
         this.unsettled = false;
         this.deliveredCallbacks.clear();
+        // Each run's end may lift the taint, so a user who only sends during runs is not stuck with it.
+        if (this.hasPendingMessageCommands()) {
+          void this.clearMessageProofTaintIfSettled().catch((error) => {
+            console.warn(`[omp-web] could not read whether session ${this._sessionId} settled: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
         break;
       case "prompt_result":
         // Local-only prompt (builtin/extension slash command) — no agent run.
@@ -2108,6 +2131,7 @@ export class AgentSessionWrapper {
       messageCount: state.messageCount,
       queuedMessageCount: state.queuedMessageCount,
       queuedMessages: state.queuedMessages ?? { steering: [], followUp: [] },
+      ...(state.supportsClientMessageIds === true ? { supportsClientMessageIds: true } : {}),
       tokensPerSecond: state.tokensPerSecond ?? null,
       contextUsage: state.contextUsage ?? null,
       systemPrompt: state.systemPrompt?.join("\n\n") ?? "",
@@ -2257,27 +2281,18 @@ export class AgentSessionWrapper {
   /** Full restart of the child process against the same session file. This is
    * omp-web's `reload`: extensions, skills, prompts, and tools are rediscovered
    * on boot, matching a fresh CLI launch. */
-  private async restart(requireIdle = false): Promise<void> {
+  private async restart(): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     const sessionFile = this._sessionFile;
     const old = this.proc;
-    const generation = this.messageCommandGeneration;
     // Stays true for the whole restart so send() rejects commands that would
     // otherwise hit the disposed or half-built child.
     this.restarting = true;
     let resumable: boolean;
     try {
-      if (requireIdle && this.hostDown()) throw this.hostOfflineError("refused");
       // Asked before touching the live child: a remote host can be offline,
       // and the child must then keep running with its frames still read.
       resumable = !!sessionFile && await this.host.sessionFileExists(sessionFile);
-      if (requireIdle) {
-        if (this.hostDown()) throw this.hostOfflineError("refused");
-        if (!resumable) throw new WebRpcError("The saved session is not available for an idle restart", "session_busy");
-        if (!this.isAlive() || this.proc !== old || this.messageCommandGeneration !== generation || this.messageBoundaryBusy(1)) {
-          throw new WebRpcError("Wait for the current operation to finish", "session_busy");
-        }
-      }
     } catch (error) {
       this.restarting = false;
       throw error;
@@ -2368,7 +2383,7 @@ export class AgentSessionWrapper {
           await proc.sendCommand({ type: "new_session" });
           this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS));
         }
-        if (requireIdle || this.hostOwnedLifecycle) {
+        if (this.hostOwnedLifecycle) {
           if (this.registeredHostTools !== null) {
             await this.dispatchCommand({ type: "set_host_tools", tools: this.registeredHostTools });
           } else if (loadWebServerSettings().agentToolsEnabled) {
@@ -2415,7 +2430,8 @@ export class AgentSessionWrapper {
   getMessageCommandGeneration(): number { return this.messageCommandGeneration; }
   /** Changes whenever frames may have been lost, so a missing echo then proves nothing. */
   getFrameGaps(): number { return this.frameGaps; }
-  /** ACKs/settlement aren't command-specific echo receipts: earlier writes need an uncontended replacement proof. */
+  /** ACKs and settlement events aren't command-specific echo receipts: earlier writes need an uncontended replacement
+   * proof, or a settled native read after every one of them was answered (clearMessageProofTaintIfSettled). */
   hasPendingMessageCommands(): boolean {
     return this.pendingMessageCommands > 0 || this.confirmedMessageCommandGeneration !== this.messageCommandGeneration;
   }
@@ -2434,22 +2450,30 @@ export class AgentSessionWrapper {
       || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0;
   }
 
-  /** A settled idle child may be replaced to stop OLD uncertain effects; this never confirms or replays them. */
-  async renewMessageProofBoundaryIfIdle(): Promise<boolean> {
-    if (this.hostOwnedLifecycle || !this.hasPendingMessageCommands() || this.restarting || this.hostDown() || this.messageBoundaryBusy()) return false;
-    return this.withPendingCommand(async () => {
-      const proc = this.proc;
+  /** Lifts the taint of OLD uncertain admissions once none can echo any more; never confirms or replays them. Settlement
+   * events and elapsed time alone never clear it: only a get_state read after every admission was answered, reporting
+   * no live, admitted or scheduled run, queued message or background work (omp's isSettled). One read at a time: a
+   * caller arriving while it runs gets the same answer. True only when the taint is gone. */
+  clearMessageProofTaintIfSettled(): Promise<boolean> {
+    if (this.taintRead) return this.taintRead;
+    if (!this.hasPendingMessageCommands() || this.restarting || this.hostDown() || this.messageBoundaryBusy()) return Promise.resolve(false);
+    const read = this.withPendingCommand(async () => {
+      // A restart (the only child swap) advances the generation, so it needs no separate check. An admission
+      // completed during the read advances it too; the taint then remains and the answer must be false.
       const generation = this.messageCommandGeneration;
-      const before = await this.getStateWithTimeout();
-      if (before.isSettled !== true || before.hasPendingAsyncWork === true
-        || before.isStreaming !== false || before.isCompacting !== false
-        || before.queuedMessageCount > 0 || queueTexts(before.queuedMessages).length > 0
-        || before.sessionId !== this._sessionId || before.sessionFile !== this._sessionFile
-        || this.proc !== proc || this.messageCommandGeneration !== generation
+      const peers = this.peerMessageCommands;
+      const state = await this.getStateWithTimeout();
+      if (state.isSettled !== true || state.hasPendingAsyncWork === true
+        || state.isStreaming !== false || state.isCompacting !== false
+        || state.queuedMessageCount > 0 || queueTexts(state.queuedMessages).length > 0
+        || state.sessionId !== this._sessionId || state.sessionFile !== this._sessionFile
+        || this.messageCommandGeneration !== generation || this.peerMessageCommands !== peers
         || this.restarting || this.messageBoundaryBusy(1) || !this.hasPendingMessageCommands()) return false;
-      await this.restart(true);
-      return this.proc !== proc;
-    });
+      this.confirmedMessageCommandGeneration = generation;
+      return true;
+    }).finally(() => { this.taintRead = null; });
+    this.taintRead = read;
+    return read;
   }
 
   /** The outbox supplies its persisted pre-dispatch boundary; direct writes reuse this same proof below. */
@@ -2566,6 +2590,7 @@ export class AgentSessionWrapper {
             message: command.message as string,
             ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
             ...(streamingBehavior ? { streamingBehavior } : {}),
+            ...(isClientMessageId(command.clientMessageId) ? { clientMessageId: command.clientMessageId } : {}),
           }, PROMPT_ACK_TIMEOUT_MS, command);
           // Slash commands fully consumed by a builtin report agentInvoked:false
           // in the ack itself — no prompt_result frame follows.
@@ -2616,6 +2641,7 @@ export class AgentSessionWrapper {
           type,
           message: command.message as string,
           ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
+          ...(isClientMessageId(command.clientMessageId) ? { clientMessageId: command.clientMessageId } : {}),
         }, undefined, command);
         return null;
       }
@@ -2819,11 +2845,14 @@ export class AgentSessionWrapper {
       }
 
       case "bash": {
-        // omp's RPC bash command is `{type:"bash", command}` only (rpc-types.ts)
-        // — there is no excludeFromContext option anywhere in modes/rpc. Running
-        // a `!!` command anyway would put output the user meant to keep private
-        // into the model context, so refuse instead of silently ignoring it.
-        if (command.excludeFromContext === true) {
+        const proc = this.proc;
+        if (command.excludeFromContext !== undefined && typeof command.excludeFromContext !== "boolean") {
+          throw new Error("excludeFromContext must be a boolean");
+        }
+        // OMP >= 18.18.1 advertises this on the actual child; a host's installed
+        // version cannot prove that an older, still-running child supports it.
+        if (command.excludeFromContext === true &&
+            (await proc.waitReady(READY_TIMEOUT_MS)).supportsBashExcludeFromContext !== true) {
           throw new WebRpcError(BASH_EXCLUDE_MESSAGE, "bash_exclude_unsupported");
         }
         // A turn may be running: omp runs the command beside it and, as its
@@ -2839,7 +2868,11 @@ export class AgentSessionWrapper {
           // `isStreaming`. Read it then: an agent_end in the same batch is
           // applied before this await resumes.
           let deferred = this.streaming;
-          const result = await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string }, undefined, () => { deferred = this.streaming; });
+          const result = await proc.sendCommand<BashResultInfo>({
+            type: "bash",
+            command: command.command as string,
+            ...(command.excludeFromContext === true ? { excludeFromContext: true } : {}),
+          }, undefined, () => { deferred = this.streaming; });
           return { ...result, deferred };
         } finally {
           this.bashRunning = false;
@@ -2966,6 +2999,7 @@ export class AgentSessionWrapper {
       type: "follow_up",
       message: command.message as string,
       ...(images ? { images } : {}),
+      ...(isClientMessageId(command.clientMessageId) ? { clientMessageId: command.clientMessageId } : {}),
     }, undefined, command);
     return { queued: true, queue: "followUp", reason: "shellRunning" };
   }

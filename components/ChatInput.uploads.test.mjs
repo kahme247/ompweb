@@ -7,7 +7,7 @@ const { act, cleanup, fireEvent, render, screen, waitFor, within } = await impor
 const { ChatInput } = await import("./ChatInput.tsx");
 const { MAX_TOTAL_ATTACHED_IMAGE_BYTES } = await import("@/lib/image-attachments");
 const { MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE } = await import("@/lib/upload-limits");
-const { getDraft } = await import("@/lib/draft-store");
+const { getDraft, clearDraft } = await import("@/lib/draft-store");
 const { openEventStream } = await import("@/lib/event-stream");
 
 // Composer uploads (docs/specs/2026-11-02-file-uploads-design.md U2). No shared worker in jsdom, so uploads take the
@@ -207,6 +207,32 @@ test("Enter refuses to send while an upload is in flight, and while one failed",
   assert.match(screen.getByRole("alert").textContent, FAILED_BLOCK);
   assert.equal(sent.length, 0, "no send while one failed");
 });
+
+for (const status of ["uploading", "error"]) {
+  test(`a bang draft with a ${status} upload stays a prompt after remount`, async (t) => {
+    const key = `uploads-bang-${status}`;
+    t.after(() => clearDraft(key));
+    const release = holdUploads();
+    try {
+      const ref = renderComposer(key, []);
+      await act(async () => { ref.current.addFiles([binaryFile("pending.zip")]); });
+      await putOf((await opened("pending.zip")).id);
+      await act(async () => { fireEvent.change(screen.getByRole("textbox"), { target: { value: "!!explain this upload" } }); });
+      if (status === "error") {
+        failNextPut = { status: 507, code: "upload_write_failed" };
+        await release();
+        await waitFor(() => assert.match(chipOf("pending.zip").textContent, UPLOAD_FAILED));
+      }
+      cleanup();
+      renderComposer(key, []);
+      assert.equal(screen.getByRole("textbox").value, "!!explain this upload");
+      assert.equal(document.querySelector(".chat-input-shell").hasAttribute("data-shell"), false, "losing an unfinished upload must not enable shell dispatch");
+      assert.equal(screen.queryByText("pending.zip"), null, "unfinished upload payloads are intentionally not restored");
+    } finally {
+      await release();
+    }
+  });
+}
 
 test("a queued steer or follow-up during a run waits for uploads too", async () => {
   const calls = [];

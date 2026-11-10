@@ -175,6 +175,7 @@ const world = {
   wrappers: new Map(),
   nativeHistories: new Map(), // isolated, parent-linked native history fixtures
   btwHistory: new Map(), // sid -> BtwRecord[] served by get_btw_history
+  clientMessageStatuses: new Map(), // sid -> explicit native selective-read result, never reconstructed from submitted text
   outbox: [], // held entries the fake dispatcher has not sent yet
   outboxHold: false,
   outboxCommit: null, // a test may hold the worker's durable-commit acknowledgement
@@ -238,6 +239,17 @@ async function fetchStub(url, init = {}) {
   if ((m = u.match(/\/api\/agent\/([^/?#]+)/))) {
     if (method === "POST" && body?.type === "outbox_scope") return jsonResponse(200, { success: true, data: { scope: "test-scope" } });
     const sid = decodeURIComponent(m[1]);
+    if (method === "POST" && body?.type === "get_client_message_status") {
+      const data = world.clientMessageStatuses.get(sid);
+      if (!data) return jsonResponse(400, { error: "Unknown command: get_client_message_status", code: "rpc_command_failed" });
+      if (data.status) return jsonResponse(data.status, { error: data.error, code: data.code });
+      assert.ok(Array.isArray(body.clientMessageIds) && body.clientMessageIds.length > 0 && body.clientMessageIds.length <= 32);
+      const requested = new Set(body.clientMessageIds);
+      assert.equal(requested.size, body.clientMessageIds.length, "selective reads contain unique IDs");
+      const selected = { ...data, messages: data.messages.filter((envelope) => requested.has(envelope.clientMessageId)) };
+      for (const key of ["resolvedClientMessageIds", "persistedClientMessageIds", "unresolvedClientMessageIds"]) selected[key] = data[key].filter((id) => requested.has(id));
+      return jsonResponse(200, { success: true, data: selected });
+    }
     const wrapper = world.wrappers.get(sid);
     if (wrapper) {
       if (method === "GET") return jsonResponse(200, { running: wrapper.isAlive(), state: await wrapper.send({ type: "get_state" }) });
@@ -398,17 +410,21 @@ function sessionInfo(sid) {
   };
 }
 
-async function mountSession(sid, onAgentEnd, options = {}, strictMode = false) {
+async function mountSession(sid, onAgentEnd, options = {}, strictMode = false, onCommit) {
   const session = sid === null ? null : sessionInfo(sid);
   let changeLeaf;
   const onBranchDataChange = (tree, leaf, handler) => {
     changeLeaf = handler;
     options.onBranchDataChange?.(tree, leaf, handler);
   };
-  const { result, unmount } = ownRoot(renderHook(() => useAgentSession({
-    session, newSessionCwd: null, ...(onAgentEnd ? { onAgentEnd } : {}), ...options,
-    onBranchDataChange,
-  }), { reactStrictMode: strictMode, wrapper: TestRoot }));
+  const { result, unmount } = ownRoot(renderHook(() => {
+    const state = useAgentSession({
+      session, newSessionCwd: null, ...(onAgentEnd ? { onAgentEnd } : {}), ...options,
+      onBranchDataChange,
+    });
+    React.useLayoutEffect(() => { onCommit?.(state); });
+    return state;
+  }, { reactStrictMode: strictMode, wrapper: TestRoot }));
   await settle(); // hydration: loadSession + /state + models + subagents
   return {
     unmount,
@@ -444,6 +460,7 @@ function resetWorld() {
   world.wrappers.clear();
   world.nativeHistories.clear();
   world.btwHistory.clear();
+  world.clientMessageStatuses.clear();
   world.abortRestoreQueue = null;
   world.outbox.length = 0;
   world.outboxHold = false;
@@ -608,6 +625,83 @@ for (const [preference, mode] of [["steer", "steer"], ["followup", "followUp"]])
     assert.equal(getDraft(sid), null, "the real composer clears only after its intent is stored");
   });
 }
+
+test("a `!` message with an inline text attachment is held as a prompt, never run as a shell command", async (t) => {
+  resetWorld();
+  const { setDraft, getDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "bang-text-attachment";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  setDraft(sid, {
+    value: "!touch /tmp/ompweb-never-run",
+    images: [],
+    files: [{ name: "notes.txt", mimeType: "text/plain", content: "rm -rf /", size: 8 }],
+  });
+  const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1, "the composed prompt must reach worker storage");
+  assert.equal(world.outbox[0].mode, "prompt");
+  assert.equal(world.outbox[0].message, "!touch /tmp/ompweb-never-run\n\nAttached file: notes.txt\n```text\nrm -rf /\n```");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash"), [], "neither the typed text nor the attachment reaches the shell");
+  assert.equal(getDraft(sid), null, "the stored prompt consumes the unchanged draft");
+});
+
+test("editing and resending a queued bang-prefixed prompt never runs its inline file text as shell", async (t) => {
+  resetWorld();
+  const { clearDraft } = await import("@/lib/draft-store");
+  const sid = "queued-bang-prompt";
+  const message = "!!explain this\n\nAttached file: notes.txt\n```text\necho attachment-content\n```";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { queuedMessages: { steering: [], followUp: [message] } } });
+  world.outboxHold = true;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "remove_queued_message",
+    produce: async () => ({ value: { success: true, data: { removed: true } } }),
+  });
+  const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.click(view.getByTitle("Edit this queued message")); });
+  await until(() => view.getByRole("textbox").value === message, "the removed queue entry must return to the composer");
+  await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || world.calls.some((call) => call.body?.type === "bash"), "the recovered message must be dispatched");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash"), [], "queue recovery must preserve prompt intent");
+  assert.equal(world.outbox[0]?.mode, "prompt");
+  assert.equal(world.outbox[0]?.message, message);
+  await until(() => view.getByRole("textbox").value === "", "a stored prompt clears its originating draft");
+  await act(async () => {
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "!!printf example" } });
+    fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" });
+  });
+  await until(() => world.calls.some((call) => call.body?.type === "bash"), "fresh input still supports shell commands");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash").map((call) => call.body.command), ["printf example"]);
+});
+
+test("removing the last recovered image clears prompt-only mode for fresh shell input", async (t) => {
+  resetWorld();
+  const { clearDraft } = await import("@/lib/draft-store");
+  const sid = "cleared-image-prompt";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { queuedMessages: { steering: [], followUp: ["[Image]"] } } });
+  world.outboxHold = true;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "remove_queued_message",
+    produce: async () => ({ value: { success: true, data: { removed: true, images: [{ data: "AAAA", mimeType: "image/png" }] } } }),
+  });
+  const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.click(view.getByTitle("Edit this queued message")); });
+  await until(() => view.queryAllByRole("button", { name: /remove image/i }).length === 1, "the image-only prompt must be recovered");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: /remove image/i })); });
+  await act(async () => { fireEvent.change(view.getByRole("textbox"), { target: { value: "!!printf example" } }); });
+  await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || world.calls.some((call) => call.body?.type === "bash"), "fresh input must be dispatched");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash").map((call) => call.body.command), ["printf example"]);
+  assert.deepEqual(world.outbox, [], "clearing the recovered image must not leave fresh shell input in prompt mode");
+});
 
 test("a shell-queued outbox prompt and steer use queue_update without a phantom turn or reply notice", async () => {
   resetWorld();
@@ -3411,7 +3505,7 @@ function attachNativeWrapper(t, sid) {
     isAlive: true,
     onFrame(listener) { frameListener = listener; return () => {}; },
     async sendCommand(command) {
-      if (command.type === "get_state") return { sessionId: sid, isStreaming: streaming, isCompacting: false };
+      if (command.type === "get_state") return { sessionId: sid, isStreaming: streaming, isCompacting: false, supportsClientMessageIds: true };
       if (command.type === "prompt") return { agentInvoked: true };
       return {};
     },
@@ -4217,7 +4311,7 @@ for (const order of ["identity/history before HTTP", "HTTP before history delive
     assert.equal(w.view.getByRole("textbox"), composer, "ownership relocation preserves the live composer instance");
     assert.equal(w.view.getByRole("textbox").value, "U2-original");
     assert.equal(new URL(window.location.href).searchParams.get("session"), target);
-    assert.deepEqual(getDraft(target), { value: "U2-original", images, files });
+    assert.deepEqual(getDraft(target), { value: "U2-original", images, files, promptOnly: true });
     assert.equal(getDraft(sid), null, "the draft moves rather than remaining on the abandoned branch");
     assert.deepEqual(world.sessions.get(sid), original, "the non-owned source file remains historical");
     assert.equal(native.persistedFiles.get(original.filePath), originalJsonl, "copy-on-write must never append the Edit marker to the source file");
@@ -4406,6 +4500,99 @@ test("relocation adopts existing target text without prefilling over it", async 
   assert.equal(getDraft(sid), null);
 });
 
+// The model prompt may have carried images or inline files that Edit cannot restore; its text starting with `!!` must
+// still go out as a prompt. Anything the user typed or kept keeps its own (shell) meaning.
+const bangHistory = [userMsg("u1", "U1"), assistantMsg("a1", "A1"), userMsg("u2", "!!model text"), assistantMsg("a2", "A2")];
+const bashCalls = () => world.calls.filter((call) => call.body?.type === "bash");
+
+test("same-ID Edit of a `!!` model prompt resends it as a held prompt, never a shell command", async (t) => {
+  resetWorld();
+  const { clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-same";
+  clearDraft(sid);
+  t.after(() => clearDraft(sid));
+  const native = primeEditableHistory(sid, bangHistory);
+  world.outboxHold = true;
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => native.edits.length === 1 && w.view.getByRole("textbox").value === "!!model text", "Edit must prefill the model prompt");
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || bashCalls().length > 0, "the prefilled prompt must be dispatched");
+  assert.deepEqual(bashCalls(), []);
+  assert.equal(world.outbox[0]?.mode, "prompt");
+  assert.equal(world.outbox[0]?.message, "!!model text");
+  w.unmount();
+});
+
+test("same-ID Edit leaves a typed `!!` draft alone and still runs it as a shell command", async (t) => {
+  resetWorld();
+  const { setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-same-typed";
+  setDraft(sid, { value: "!!typed shell", images: [], files: [] });
+  t.after(() => clearDraft(sid));
+  const native = primeEditableHistory(sid, bangHistory);
+  world.outboxHold = true;
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => native.edits.length === 1, "Edit must reach native history");
+  await settle();
+  assert.equal(w.view.getByRole("textbox").value, "!!typed shell", "Edit never overwrites a typed draft");
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => bashCalls().length === 1 || world.outbox.length === 1, "the typed draft must be dispatched");
+  assert.deepEqual(bashCalls().map((call) => call.body.command), ["typed shell"]);
+  assert.deepEqual(world.outbox, []);
+  w.unmount();
+});
+
+test("moved-ID Edit of a `!!` model prompt resends it as a held prompt, never a shell command", async (t) => {
+  resetWorld();
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-move", target = `${sid}-owned`;
+  for (const id of [sid, target]) clearDraft(id);
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const native = primeEditableHistory(sid, bangHistory);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  assert.equal(w.view.getByRole("textbox").value, "!!model text");
+  assert.equal(getDraft(target)?.promptOnly, true, "the prefill is marked as model input");
+  world.outboxHold = true;
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || bashCalls().length > 0, "the prefilled prompt must be dispatched");
+  assert.deepEqual(bashCalls(), []);
+  assert.equal(world.outbox[0]?.sessionId, target);
+  assert.equal(world.outbox[0]?.mode, "prompt");
+  assert.equal(world.outbox[0]?.message, "!!model text");
+  w.unmount();
+});
+
+test("moved-ID Edit keeps an existing target `!!` draft as shell input, not prompt-only", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-move-typed", target = `${sid}-owned`;
+  for (const id of [sid, target]) clearDraft(id);
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  setDraft(target, { value: "!!target shell", images: [], files: [] });
+  const native = primeEditableHistory(sid, bangHistory);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  assert.equal(w.view.getByRole("textbox").value, "!!target shell", "Edit must not prefill over existing target text");
+  assert.notEqual(getDraft(target)?.promptOnly, true);
+  world.outboxHold = true;
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => bashCalls().length === 1 || world.outbox.length === 1, "the existing draft must be dispatched");
+  assert.deepEqual(bashCalls().map((call) => call.body.command), ["target shell"]);
+  assert.deepEqual(world.outbox, []);
+  w.unmount();
+});
+
 test("relocation at draft capacity preserves every unrelated draft and its attachments", async (t) => {
   resetWorld();
   const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
@@ -4440,7 +4627,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
   await settle();
   assert.equal(w.view.getByRole("textbox"), composer);
   assert.equal(composer.value, "U2-original");
-  assert.deepEqual(getDraft(target), { ...source, value: "U2-original" });
+  assert.deepEqual(getDraft(target), { ...source, value: "U2-original", promptOnly: true });
   assert.equal(getDraft(sid), null);
   for (const [id, draft] of unrelated) {
     assert.deepEqual(getDraft(id), draft, `relocation must preserve ${id}, including its attachments`);
@@ -6684,6 +6871,7 @@ test("an interrupt-and-reply whose abort_and_prompt reply was lost is reported a
   });
 });
 
+
 test("the hosts channel decides the offline banner; a frame only speaks before its first snapshot", async () => {
   resetWorld();
   primeSession("remote-banner", [userMsg("u0", "q")]);
@@ -6816,11 +7004,11 @@ test("an outbox prompt moves from browser sending to waiting_host and hands off 
   assert.equal(w.latest.heldMessages[0].id, held.id);
   assert.equal(w.latest.heldMessages[0].state, "waiting_host");
   assert.equal(w.latest.heldMessages[0].local, false);
-  const echo = userMsg("echo", "held message");
+  const echo = { ...userMsg("echo", "held message"), clientMessageId: held.id };
   await act(async () => {
     es.emit({ type: "agent_start" });
-    es.emit({ type: "message_end", message: echo }, { persist: false });
-    es.emit({ type: "outbox_update", entries: [] });
+    es.emit({ type: "message_end", message: userMsg("echo", "held message"), clientMessageId: held.id }, { persist: false });
+    es.emit({ type: "outbox_update", entries: [], settledIds: [held.id], nativeSettledIds: [held.id] });
   });
   assert.deepEqual(w.latest.heldMessages, []);
   assert.deepEqual(w.latest.messages.at(-1), echo, "omp's echo bridges the not-yet-saved transcript");
@@ -6829,6 +7017,473 @@ test("an outbox prompt moves from browser sending to waiting_host and hands off 
   await settle();
   assert.equal(w.latest.messages.filter((message) => message.content === "held message").length, 1, "the saved copy replaces rather than duplicates the echo");
 });
+
+test("a delivered native worker receipt preserves the original intent before a local sending row commits", async () => {
+  resetWorld();
+  const sid = "outbox-delivered-receipt-native";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  const entry = {
+    id: "receipt-before-local", sessionId: sid, mode: "prompt", message: "original intent",
+    images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }], uploads: ["original-upload"],
+    state: "delivered", settlement: "native", createdAt: 2,
+  };
+  // The peer's child cannot answer the selective read yet (an answer finding no trace is "unresolved": Not sent).
+  world.clientMessageStatuses.set(sid, { status: 503, error: "host unavailable" });
+  await act(() => {
+    workerPort.onmessage({ data: { outboxStored: entry } });
+    workerPort.onmessage({ data: { outbox: [] } });
+  });
+  assert.equal(w.latest.heldMessages[0]?.id, entry.id, "server delivery is not proof of a local native replacement");
+  assert.equal(w.latest.heldMessages[0].message, "original intent");
+  assert.deepEqual(w.latest.heldMessages[0].images, entry.images);
+  assert.deepEqual(w.latest.heldMessages[0].uploads, ["original-upload"]);
+  await act(() => es.emit({ type: "outbox_update", entries: [], settledIds: [entry.id], nativeSettledIds: [entry.id] }));
+  await settle();
+  assert.equal(w.latest.heldMessages[0]?.id, entry.id, "the matching tombstone cannot silently discard the receipt payload");
+  const message = { role: "user", content: [{ type: "text", text: "Actual expanded native intent" }], timestamp: 3 };
+  await act(() => es.emit({ type: "message_end", message, clientMessageId: entry.id }, { persist: false }));
+  await settle();
+  assert.deepEqual(w.latest.heldMessages, []);
+  assert.deepEqual(w.latest.messages.at(-1), { ...message, clientMessageId: entry.id });
+});
+
+test("an uncorrelated receipt from an older OMP retires its row at once, as before correlation", async () => {
+  resetWorld();
+  const sid = "outbox-delivered-receipt-uncorrelated";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  const entry = { id: "receipt-uncorrelated", sessionId: sid, mode: "prompt", message: "older omp", state: "delivered", settlement: "uncorrelated", createdAt: 2 };
+  await act(() => {
+    workerPort.onmessage({ data: { outboxStored: entry } });
+    workerPort.onmessage({ data: { outbox: [] } });
+  });
+  await settle();
+  assert.deepEqual(w.latest.heldMessages, []);
+  assert.equal(world.calls.some((call) => call.body?.type === "get_client_message_status"), false, "nothing waits on a correlation an older OMP cannot give");
+});
+
+for (const loss of ["unresolved", "child gone"]) {
+  test(`a native-settled bridge omp has no trace of (${loss}) becomes a dismissible Not sent row and stops polling`, async () => {
+    resetWorld();
+    const sid = `outbox-lost-bridge-${loss.replace(" ", "-")}`;
+    primeSession(sid, [userMsg("u0", "before")]);
+    world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+    const w = await mountSession(sid);
+    const es = lastEs();
+    await act(() => es.open());
+    await settle();
+    const entry = { id: "lost-bridge", sessionId: sid, mode: "followUp", message: "lost when the child died", state: "delivering", createdAt: 1 };
+    if (loss === "unresolved") world.clientMessageStatuses.set(sid, clientMessageStatus({ unresolvedClientMessageIds: ["lost-bridge"] }));
+    else world.clientMessageStatuses.set(sid, { error: "No live omp child", code: "handoff_child_unavailable", status: 409 });
+    await act(() => {
+      es.emit({ type: "outbox_update", entries: [entry], settledIds: [] });
+      es.emit({ type: "outbox_update", entries: [], settledIds: [entry.id], nativeSettledIds: [entry.id] });
+    });
+    await settle();
+    await act(async () => { await sleep(50); });
+    assert.equal(w.latest.heldMessages[0]?.state, "failed");
+    assert.equal(w.latest.heldMessages[0]?.mayHaveBeenSent, true);
+    const reads = world.calls.filter((call) => call.body?.type === "get_client_message_status").length;
+    await act(async () => { await sleep(2_200); });
+    assert.equal(world.calls.filter((call) => call.body?.type === "get_client_message_status").length, reads, "a lost bridge is not polled again");
+    await act(async () => { await w.latest.deleteHeldMessage(entry.id); });
+    assert.deepEqual(w.latest.heldMessages, []);
+    assert.equal(world.calls.some((call) => ["prompt", "steer", "follow_up", "outbox_remove"].includes(call.body?.type)), false, "dismissal neither resends nor touches the server row");
+  });
+}
+
+test("a native history rewind drops a correlated echo the delayed catch-up was still bridging", async () => {
+  resetWorld();
+  const sid = "outbox-rewound-echo";
+  primeSession(sid, [userMsg("u0", "first"), assistantMsg("a0", "answer")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  // The saved history cannot be read yet, so only the correlated echo shows this message.
+  world.contextUnavailable = true;
+  const echo = { role: "user", content: [{ type: "text", text: "rewound later" }], timestamp: 5 };
+  await act(() => es.emit({ type: "message_end", message: echo, clientMessageId: "rewound-intent" }, { persist: false }));
+  await settle();
+  assert.ok(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"));
+  // An edit elsewhere rewinds native history to before "first"'s answer; the echo is not in the new tail.
+  world.contextUnavailable = false;
+  saveSession(sid, [userMsg("u0", "first edited")], ["e-edited"]);
+  await act(() => es.emit({ type: "session_history_changed", leafId: "e-edited" }));
+  await settle();
+  assert.deepEqual(w.latest.messages.map((message) => message.id), ["u0"]);
+  assert.equal(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"), false, "the rewound echo is gone");
+});
+
+test("a failed history reload keeps the correlated echo until a readable history replaces it", async () => {
+  resetWorld();
+  const sid = "outbox-rewind-reload-fails";
+  primeSession(sid, [userMsg("u0", "first"), assistantMsg("a0", "answer")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  world.contextUnavailable = true;
+  const echo = { role: "user", content: [{ type: "text", text: "rewound later" }], timestamp: 5 };
+  await act(() => es.emit({ type: "message_end", message: echo, clientMessageId: "rewound-intent" }, { persist: false }));
+  await settle();
+  // The rewind reload cannot read history: nothing yet proves the echo is gone from the new tail.
+  await act(() => es.emit({ type: "session_history_changed", leafId: "e-edited" }));
+  await settle();
+  assert.ok(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"), "the echo survives the failed reload");
+  world.contextUnavailable = false;
+  saveSession(sid, [userMsg("u0", "first edited")], ["e-edited"]);
+  await act(() => es.open());
+  await settle();
+  assert.deepEqual(w.latest.messages.map((message) => message.id), ["u0"]);
+  assert.equal(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"), false, "the rewound echo is gone once the history is readable");
+});
+
+test("a rewind prunes only the echoes received before it began, not a continuation's echo received while its history was unreadable", async () => {
+  resetWorld();
+  const sid = "outbox-rewind-new-echo";
+  primeSession(sid, [userMsg("u0", "first"), assistantMsg("a0", "answer")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  world.contextUnavailable = true;
+  const oldEcho = { role: "user", content: [{ type: "text", text: "old tail" }], timestamp: 5 };
+  await act(() => es.emit({ type: "message_end", message: oldEcho, clientMessageId: "old-intent" }, { persist: false }));
+  await settle();
+  // The rewind begins; its history cannot be read yet.
+  await act(() => es.emit({ type: "session_history_changed", leafId: "e-edited" }));
+  await settle();
+  // The continuation's first message is echoed before the rewound history is readable.
+  const newEcho = { role: "user", content: [{ type: "text", text: "continuation" }], timestamp: 6 };
+  await act(() => es.emit({ type: "message_end", message: newEcho, clientMessageId: "new-intent" }, { persist: false }));
+  await settle();
+  world.contextUnavailable = false;
+  saveSession(sid, [userMsg("u0", "first edited")], ["e-edited"]);
+  await act(() => es.open());
+  await settle();
+  assert.equal(w.latest.messages.some((message) => message.clientMessageId === "old-intent"), false, "the old tail's echo is gone");
+  assert.ok(w.latest.messages.some((message) => message.clientMessageId === "new-intent"), "the continuation's echo is still shown");
+});
+
+for (const [name, savedTimestamp, expected] of [["the same native timestamp replaces the echo", 777, 1], ["another native timestamp keeps both", 778, 2]]) {
+  test(`a saved copy without clientMessageId (older daemon) with ${name}`, async () => {
+    resetWorld();
+    const sid = `outbox-legacy-saved-copy-${savedTimestamp}`;
+    primeSession(sid, [userMsg("u0", "before")]);
+    world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+    const w = await mountSession(sid);
+    const es = lastEs();
+    await act(() => es.open());
+    await settle();
+    world.contextUnavailable = true;
+    const echo = { role: "user", content: [{ type: "text", text: "legacy echo" }], timestamp: 777 };
+    await act(() => es.emit({ type: "message_end", message: echo, clientMessageId: "legacy-intent" }, { persist: false }));
+    await settle();
+    const shown = () => w.latest.messages.filter((message) => message.role === "user" && JSON.stringify(message.content).includes("legacy echo"));
+    assert.equal(shown().length, 1, "only the echo shows this message while history is unreadable");
+    // An older daemon saves the same message without the outer clientMessageId.
+    world.contextUnavailable = false;
+    appendEntry(sid, { role: "user", id: "u1", content: [{ type: "text", text: "legacy echo" }], timestamp: savedTimestamp });
+    await act(() => es.open());
+    await settle();
+    assert.equal(shown().length, expected);
+    assert.ok(w.latest.messages.some((message) => message.id === "u1"), "the saved copy is shown");
+  });
+}
+
+for (const [name, savedData, expected] of [["the same image replaces the echo", "AAAA", 1], ["another image keeps both", "BBBB", 2]]) {
+  test(`a saved copy without clientMessageId (older daemon) with the same timestamp and text but ${name}`, async () => {
+    resetWorld();
+    const sid = `outbox-legacy-saved-image-${savedData}`;
+    primeSession(sid, [userMsg("u0", "before")]);
+    world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+    const w = await mountSession(sid);
+    const es = lastEs();
+    await act(() => es.open());
+    await settle();
+    world.contextUnavailable = true;
+    const content = (data) => [{ type: "text", text: "look at this" }, { type: "image", data, mimeType: "image/png" }];
+    await act(() => es.emit({ type: "message_end", message: { role: "user", content: content("AAAA"), timestamp: 888 }, clientMessageId: "image-intent" }, { persist: false }));
+    await settle();
+    const shown = () => w.latest.messages.filter((message) => message.role === "user" && JSON.stringify(message.content).includes("look at this"));
+    assert.equal(shown().length, 1, "only the echo shows this message while history is unreadable");
+    world.contextUnavailable = false;
+    appendEntry(sid, { role: "user", id: "u1", content: content(savedData), timestamp: 888 });
+    await act(() => es.open());
+    await settle();
+    assert.equal(shown().length, expected);
+    assert.ok(w.latest.messages.some((message) => message.id === "u1"), "the saved copy is shown");
+  });
+}
+
+function clientMessageStatus(overrides = {}) {
+  // `unresolvedClientMessageIds` is native's own verdict, as lib/outbox-handoff.ts passes it: set it where native has no trace.
+  return {
+    messages: [],
+    queuedMessages: { steering: [], followUp: [] },
+    resolvedClientMessageIds: [],
+    persistedClientMessageIds: [],
+    unresolvedClientMessageIds: [],
+    ...overrides,
+  };
+}
+
+for (const catchUp of ["unchanged history", "HTTP failure"]) {
+  for (const replacement of ["native echo", "selective native read"]) {
+    test(`peer native settlement keeps a known prompt across ${catchUp} until its ${replacement}`, async (t) => {
+      resetWorld();
+      const sid = `peer-handoff-${catchUp}-${replacement}`;
+      primeSession(sid, [{ ...userMsg("u0", "held message"), clientMessageId: "older-identical-intent" }]);
+      const native = attachNativeWrapper(t, sid);
+      world.streams.set(sid, native.wrapper.getStreamSnapshot().cursor);
+      const entry = {
+        id: "peer-delivering", sessionId: sid, mode: "prompt", message: "held message",
+        state: "delivering", previousEntryIds: ["e0"], createdAt: 1,
+      };
+      // This is omp's actual expanded representation, not a copy of the submitted text.
+      const echo = replacement === "native echo"
+        ? { role: "user", id: "expanded-native", content: [{ type: "text", text: "Expanded skill instructions" }], timestamp: 2 }
+        : { role: "custom", id: "expanded-native", customType: "skill-expansion", content: "Native skill expansion", display: true, details: {}, timestamp: 2 };
+      const displayed = { ...echo, clientMessageId: entry.id };
+      // The selective read cannot answer yet: the bridge must wait, not guess.
+      world.clientMessageStatuses.set(sid, { status: 503, error: "host unavailable" });
+      const commits = [];
+      const w = await mountSession(sid, undefined, {}, false, (state) => commits.push(state));
+      const es = lastEs();
+      await act(() => es.open());
+      await settle();
+      await act(() => {
+        native.emit({ type: "agent_start" });
+        es.emit({ type: "outbox_update", entries: [entry], settledIds: [], nativeSettledIds: [] });
+      });
+      assert.equal(w.latest.heldMessages[0]?.id, entry.id);
+      const beforeSettlement = commits.length;
+      // The origin accepted the intent, but this peer has neither its echo nor its later disk append.
+      if (catchUp === "HTTP failure") world.contextUnavailable = true;
+      await act(() => es.emit({ type: "outbox_update", entries: [], settledIds: [entry.id], nativeSettledIds: [entry.id] }));
+      await act(() => publishSessionsChanged([sid]));
+      await settle();
+      assert.deepEqual(w.latest.entryIds, ["e0"]);
+      assert.equal(w.latest.heldMessages[0]?.id, entry.id, "older identical text and a tombstone cannot replace this intent");
+      assert.equal(w.latest.messages.some((message) => message.id === echo.id), false, "do not invent a native echo");
+      const reads = world.calls.filter((call) => call.body?.type === "get_client_message_status");
+      assert.ok(reads.length > 0, "outstanding native bridges need a selective read");
+      assert.ok(reads.every((call) => JSON.stringify(call.body.clientMessageIds) === JSON.stringify([entry.id])), "query only the outstanding ID");
+      world.contextUnavailable = false;
+      if (replacement === "native echo") {
+        await act(() => {
+          native.emit({ type: "message_start", message: echo, clientMessageId: entry.id });
+          native.emit({ type: "message_end", message: echo, clientMessageId: entry.id });
+        });
+      } else {
+        world.clientMessageStatuses.set(sid, clientMessageStatus({ messages: [{ clientMessageId: entry.id, message: echo }] }));
+        await act(() => es.open());
+      }
+      await settle();
+      assert.deepEqual(w.latest.heldMessages, []);
+      assert.deepEqual(w.latest.messages.at(-1), displayed, "handoff uses the actual expanded native representation");
+      assert.ok(commits.slice(beforeSettlement).every((state) =>
+        state.heldMessages.some((held) => held.id === entry.id) ||
+        state.messages.some((message) => message.clientMessageId === entry.id)),
+      "every committed render has either the bridge or its exact native replacement");
+      if (replacement === "selective native read") {
+        await act(() => native.emit({ type: "message_end", message: echo, clientMessageId: entry.id }));
+        await settle();
+        assert.equal(w.latest.messages.filter((message) => message.clientMessageId === entry.id).length, 1, "a delayed real echo dedupes the selective native representation");
+        await act(() => native.emit({ type: "agent_end", isTerminal: true }));
+        await settle();
+        assert.equal(w.latest.agentRunning, false, "branch navigation becomes available after the active turn settles");
+        world.views.set(`${sid}:branch:false`, { leafId: "branch", messages: [userMsg("historical", "past branch")], entryIds: ["branch-entry"] });
+        await act(async () => { await w.changeLeaf("branch"); });
+        assert.deepEqual(w.latest.messages.map((message) => message.id), ["historical"]);
+        assert.deepEqual(w.latest.heldMessages, [], "history navigation cannot resurrect the represented bridge");
+        await act(async () => { await w.changeLeaf(null); });
+        assert.deepEqual(w.latest.messages.at(-1), displayed, "returning live retains the actual native representation before disk append");
+      }
+      appendEntry(sid, displayed);
+      await act(() => publishSessionsChanged([sid]));
+      await settle();
+      assert.equal(w.latest.messages.filter((message) => message.clientMessageId === entry.id).length, 1, "disk append dedupes the correlated echo");
+    });
+  }
+}
+
+test("selective persisted-only handoff waits for successful history catch-up; explicit withdrawals retire without an echo", async () => {
+  resetWorld();
+  const sid = "peer-persisted-withdrawn";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  const entries = ["persisted", "compacted", "withdrawn", "consumed", "deleted", "unknown"].map((id) => ({
+    id, sessionId: sid, mode: "prompt", message: `submitted ${id}`, state: "delivering", createdAt: 1,
+  }));
+  world.clientMessageStatuses.set(sid, clientMessageStatus({
+    persistedClientMessageIds: ["persisted", "compacted"],
+    resolvedClientMessageIds: ["withdrawn"],
+    unresolvedClientMessageIds: ["unknown"],
+  }));
+  await act(() => es.emit({ type: "outbox_update", entries, settledIds: [], nativeSettledIds: [] }));
+  world.contextUnavailable = true;
+  await act(() => es.emit({
+    type: "outbox_update", entries: [], settledIds: entries.map((entry) => entry.id),
+    nativeSettledIds: ["persisted", "compacted", "withdrawn", "unknown"],
+  }));
+  await settle();
+  assert.deepEqual(w.latest.heldMessages.map((entry) => entry.id), ["persisted", "compacted", "unknown"],
+    "consumed/deleted settlements and explicit native withdrawals need no message; failed disk catch-up proves nothing");
+  assert.deepEqual(w.latest.messages.map((message) => message.id), ["u0"]);
+  world.contextUnavailable = false;
+  await act(() => es.open());
+  await settle();
+  assert.deepEqual(w.latest.heldMessages.map((entry) => entry.id), ["persisted", "compacted", "unknown"],
+    "a successful but unchanged peer catch-up still has no replacement for the persisted IDs");
+  const saved = { ...userMsg("saved-native", "Native persisted expansion"), clientMessageId: "persisted", timestamp: 2 };
+  appendEntry(sid, saved);
+  world.sessions.get(sid).persistedClientMessageIds = ["persisted", "compacted"];
+  world.contextUnavailable = false;
+  await act(() => es.open());
+  await settle();
+  assert.deepEqual(w.latest.heldMessages.map((entry) => entry.id), ["unknown"]);
+  assert.deepEqual(w.latest.messages.at(-1), saved);
+  assert.equal(w.latest.messages.some((message) => message.clientMessageId === "compacted"), false, "compacted persistence metadata retires the bridge without fabricating a message");
+  const unknown = w.latest.heldMessages.find((entry) => entry.id === "unknown");
+  assert.equal(unknown.state, "failed", "omp reported no trace of it: Not sent, it may have been sent");
+  assert.equal(unknown.mayHaveBeenSent, true);
+  const afterResolution = world.calls.length;
+  world.clientMessageStatuses.set(sid, clientMessageStatus());
+  await act(() => es.open());
+  await settle();
+  assert.equal(world.calls.slice(afterResolution).some((call) => call.body?.type === "get_client_message_status"), false,
+    "every bridge is resolved or given up: nothing is polled again");
+});
+
+for (const failure of ["HTTP failure", "unsupported native query"]) {
+  test(`a ${failure} leaves an unresolved peer handoff visible`, async () => {
+    resetWorld();
+    const sid = `peer-query-${failure}`;
+    primeSession(sid, [userMsg("u0", "before")]);
+    world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+    const w = await mountSession(sid);
+    const es = lastEs();
+    await act(() => es.open());
+    await settle();
+    const entry = { id: "unresolved", sessionId: sid, mode: "prompt", message: "keep this intent", state: "delivering", createdAt: 1 };
+    if (failure === "HTTP failure") {
+      world.holds.push({
+        match: (method, _url, body) => method === "POST" && body?.type === "get_client_message_status",
+        produce: async () => ({ status: 503, value: { error: "host unavailable" } }),
+      });
+    }
+    await act(() => es.emit({ type: "outbox_update", entries: [entry], settledIds: [], nativeSettledIds: [] }));
+    await act(() => es.emit({ type: "outbox_update", entries: [], settledIds: [entry.id], nativeSettledIds: [entry.id] }));
+    await settle();
+    assert.equal(w.latest.heldMessages[0]?.id, entry.id);
+    assert.deepEqual(w.latest.messages.map((message) => message.id), ["u0"]);
+    assert.ok(world.calls.some((call) => call.body?.type === "get_client_message_status"), "exercise the failed selective read");
+  });
+}
+
+test("correlated native queue snapshots replace only their exact handoff IDs and never resurrect after drain", async () => {
+  resetWorld();
+  const sid = "peer-correlated-queue";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  const entries = ["queued", "same-text-unresolved"].map((id) => ({
+    id, sessionId: sid, mode: "followUp", message: "identical text", state: "delivering", createdAt: 1,
+  }));
+  const queuedMessages = {
+    steering: [], followUp: ["identical text"],
+    clientMessageIds: { steering: [], followUp: ["queued"] },
+  };
+  world.clientMessageStatuses.set(sid, clientMessageStatus({ queuedMessages, unresolvedClientMessageIds: ["same-text-unresolved"] }));
+  await act(() => es.emit({ type: "outbox_update", entries, settledIds: [], nativeSettledIds: [] }));
+  await act(() => es.emit({
+    type: "outbox_update", entries: [], settledIds: ["queued", "same-text-unresolved"], nativeSettledIds: ["queued", "same-text-unresolved"],
+  }));
+  await settle();
+  assert.deepEqual(w.latest.queuedMessages, queuedMessages, "selective reconciliation applies the real correlated queue");
+  assert.deepEqual(w.latest.heldMessages.map((entry) => entry.id), ["same-text-unresolved"], "text equality is not native identity");
+  await act(() => es.emit({ type: "queue_update", steering: [], followUp: [], clientMessageIds: { steering: [], followUp: [] } }));
+  world.clientMessageStatuses.set(sid, clientMessageStatus());
+  await act(() => {
+    es.emit({ type: "outbox_update", entries: [], settledIds: ["queued", "same-text-unresolved"], nativeSettledIds: ["queued", "same-text-unresolved"] });
+    workerPort.onmessage({ data: { outboxStored: entries[0] } });
+    workerPort.onmessage({ data: { outbox: [{ ...entries[0], scope: "test-scope", state: "sending" }] } });
+  });
+  await settle();
+  assert.deepEqual(w.latest.queuedMessages.followUp, []);
+  assert.deepEqual(w.latest.heldMessages.map((entry) => entry.id), ["same-text-unresolved"], "ever-represented IDs survive native drain and late receipts");
+});
+
+for (const newer of ["queue snapshot", "history navigation"]) {
+  test(`a stale selective handoff read cannot override newer ${newer}`, async () => {
+    resetWorld();
+    const sid = `peer-selective-stale-${newer}`;
+    primeSession(sid, [userMsg("u0", "before")]);
+    world.agents.set(sid, { running: true, state: { isStreaming: false, supportsClientMessageIds: true } });
+    const w = await mountSession(sid);
+    const es = lastEs();
+    await act(() => es.open());
+    await settle();
+    const entry = { id: "late-read", sessionId: sid, mode: "followUp", message: "held", state: "delivering", createdAt: 1 };
+    let release;
+    world.holds.push({
+      match: (method, _url, body) => method === "POST" && body?.type === "get_client_message_status",
+      produce: () => new Promise((resolve) => { release = resolve; }),
+    });
+    world.clientMessageStatuses.set(sid, clientMessageStatus());
+    await act(() => es.emit({ type: "outbox_update", entries: [entry], settledIds: [], nativeSettledIds: [] }));
+    await act(() => es.emit({ type: "outbox_update", entries: [], settledIds: [entry.id], nativeSettledIds: [entry.id] }));
+    await until(() => typeof release === "function", "selective reconciliation must start");
+    if (newer === "queue snapshot") {
+      // A metadata-only update is newer too: both snapshots have the same text.
+      await act(() => es.emit({
+        type: "queue_update", steering: [], followUp: ["same text"],
+        clientMessageIds: { steering: [], followUp: ["different-intent"] },
+      }));
+    } else {
+      world.views.set(`${sid}:branch:false`, { leafId: "branch", messages: [userMsg("branch-user", "historical branch")], entryIds: ["branch-entry"] });
+      await act(async () => { await w.changeLeaf("branch"); });
+      assert.equal(w.latest.activeLeafId, "branch", "the idle fixture must actually navigate before the selective read completes");
+    }
+    const staleMessage = { ...userMsg("late-native", "native expanded content"), timestamp: 2 };
+    await act(async () => {
+      release({ value: { success: true, data: clientMessageStatus({
+        messages: newer === "history navigation" ? [{ clientMessageId: entry.id, message: staleMessage }] : [],
+        queuedMessages: { steering: [], followUp: ["same text"], clientMessageIds: { steering: [], followUp: [entry.id] } },
+      }) } });
+      await sleep(30);
+    });
+    await settle();
+    if (newer === "queue snapshot") {
+      assert.deepEqual(w.latest.queuedMessages.clientMessageIds, { steering: [], followUp: ["different-intent"] });
+      assert.equal(w.latest.heldMessages[0]?.id, entry.id, "a rejected stale queue cannot count as a represented ID");
+    } else {
+      assert.deepEqual(w.latest.messages.map((message) => message.id), ["branch-user"], "late native content cannot enter the historical view");
+      assert.deepEqual(w.latest.entryIds, ["branch-entry"]);
+    }
+  });
+}
 
 test("a 409 deleting a dispatched outbox message shows a notice and keeps the bubble", async (t) => {
   resetWorld();
@@ -7183,6 +7838,43 @@ for (const outcome of ["failed", "delivered"]) {
   });
 }
 
+test("a peer republishing a delivering entry after its agent_start cannot lend that boundary to a later turn", async () => {
+  resetWorld();
+  const sid = "outbox-republished-boundary";
+  primeSession(sid, [userMsg("u0", "old question")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: false } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  const entry = {
+    id: "peer-republished", sessionId: sid, mode: "prompt", message: "held question",
+    state: "delivering", previousEntryIds: ["e0"], createdAt: 1,
+  };
+  await act(() => {
+    es.emit({ type: "outbox_update", entries: [entry], settledIds: [] });
+    es.emit({ type: "agent_start" });
+    // A peer's 250 ms poll republishes the same delivering row after its run started.
+    es.emit({ type: "outbox_update", entries: [entry], settledIds: [] });
+  });
+  saveSession(sid, [userMsg("u0", "old question"), userMsg("u1", "held question"), assistantMsg("a1", "Answer")]);
+  await act(() => {
+    es.emit({ type: "message_end", message: userMsg("u1", "held question") }, { persist: false });
+    es.emit({ type: "message_end", message: assistantMsg("a1", "Answer") }, { persist: false });
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await settle();
+  assert.equal(w.latest.notices.filter((notice) => notice.type === "error").length, 0, "the delivered turn answered");
+  await act(() => {
+    es.emit({ type: "agent_start" });
+    es.emit({ type: "agent_end", isTerminal: true });
+    // The peer's settlement poll arrives only after that next turn started.
+    es.emit({ type: "outbox_update", entries: [], settledIds: [entry.id] });
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false);
+  assert.equal(w.latest.notices.filter((notice) => notice.type === "error").length, 1, "the earlier answer is not a response to the empty new turn");
+});
+
 test("deleting a failed browser-held message removes it only after the durable IndexedDB delete commits", async (t) => {
   resetWorld();
   const sid = "outbox-local-delete";
@@ -7221,6 +7913,47 @@ test("a failed durable browser deletion keeps the held message and shows a notic
   assert.equal(w.latest.heldMessages[0].id, entry.id);
   assert.equal(w.latest.notices[0].type, "error");
   assert.match(w.latest.notices[0].message, /IndexedDB deletion failed/);
+});
+
+test("dismissing an uncertain bridge deletes the browser copy the worker still holds and hides the row only after that commits", async (t) => {
+  resetWorld();
+  const sid = "outbox-uncertain-local-copy";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  world.outboxHold = true;
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  world.clientMessageStatuses.set(sid, clientMessageStatus({ unresolvedClientMessageIds: ["uncertain-with-copy"] }));
+  const entry = { id: "uncertain-with-copy", sessionId: sid, mode: "followUp", message: "settled before its receipt", state: "delivering", createdAt: 1 };
+  // The server settled the id before the worker saw its outbox_add receipt: the worker still holds, and would retry, its copy.
+  const copy = { ...entry, scope: "test-scope", state: "sending" };
+  world.outbox.push(copy);
+  await act(() => workerPort.onmessage({ data: { outbox: [copy] } }));
+  await act(() => {
+    es.emit({ type: "outbox_update", entries: [entry], settledIds: [] });
+    es.emit({ type: "outbox_update", entries: [], settledIds: [entry.id], nativeSettledIds: [entry.id] });
+  });
+  await settle();
+  await act(async () => { await sleep(50); });
+  assert.equal(w.latest.heldMessages[0]?.state, "failed");
+  assert.equal(w.latest.heldMessages[0]?.mayHaveBeenSent, true);
+  world.outboxDrop = (complete) => complete("IndexedDB deletion failed");
+  await act(async () => { await w.latest.deleteHeldMessage(entry.id); });
+  assert.equal(w.latest.heldMessages[0]?.id, entry.id, "a failed durable delete keeps the row");
+  assert.match(w.latest.notices[0]?.message, /IndexedDB deletion failed/);
+  let commit;
+  t.after(async () => { await act(async () => { commit?.(); }); });
+  world.outboxDrop = (complete) => { commit = complete; };
+  let deleting;
+  await act(async () => { deleting = w.latest.deleteHeldMessage(entry.id); await Promise.resolve(); });
+  assert.ok(commit, "the worker was asked to delete its copy");
+  assert.equal(w.latest.heldMessages[0]?.id, entry.id, "the row stays until IndexedDB commits the delete");
+  await act(async () => { const complete = commit; commit = null; complete(); await deleting; });
+  assert.deepEqual(w.latest.heldMessages, []);
+  assert.equal(world.outbox.some((held) => held.id === entry.id), false, "the browser copy is gone, so a reload cannot bring the row back");
+  assert.equal(world.calls.some((call) => ["prompt", "steer", "follow_up", "outbox_remove"].includes(call.body?.type)), false, "dismissal neither resends nor touches the server row");
 });
 
 test("an offline send follows its held bubble when the worker list arrives before the commit ACK", async () => {

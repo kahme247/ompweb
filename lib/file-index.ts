@@ -76,12 +76,15 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
     // opens them, so subtract what git reports as deleted. That query is
     // auxiliary: a stale-but-complete listing beats throwing away the git
     // listing over it, which would fall back to the depth-capped readdir walk.
-    const [listed, deleted] = await Promise.all([
+    // allSettled, not all: return only once both children have exited, since a
+    // live `git -C cwd` keeps Windows from deleting or renaming cwd.
+    const [listed, deleted] = await Promise.allSettled([
       execFileAsync("git", ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], gitOptions),
-      execFileAsync("git", ["-C", cwd, "ls-files", "--deleted", "-z"], gitOptions).catch(() => null),
+      execFileAsync("git", ["-C", cwd, "ls-files", "--deleted", "-z"], gitOptions),
     ]);
-    const missing = new Set((deleted?.stdout ?? "").split("\0").filter(Boolean));
-    const all = listed.stdout.split("\0").filter((file) => file && !missing.has(file));
+    if (listed.status === "rejected") return null;
+    const missing = new Set((deleted.status === "fulfilled" ? deleted.value.stdout : "").split("\0").filter(Boolean));
+    const all = listed.value.stdout.split("\0").filter((file) => file && !missing.has(file));
     if (all.length > GIT_HARD_CAP) {
       return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
     }

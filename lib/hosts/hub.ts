@@ -153,6 +153,8 @@ interface Link {
   statsWarned: boolean;
   pending: Map<string, PendingOp>;
   channels: Map<string, RemoteRpcTransport>;
+  /** v7: the sessions of every child the host last listed, joined by this server or not. */
+  listedSessions: Set<string>;
   pingTimer: NodeJS.Timeout | undefined;
   offlineTimer: NodeJS.Timeout | undefined;
   statusListeners: Set<(status: HostStatus) => void>;
@@ -257,6 +259,7 @@ function linkFor(id: string): Link {
       statsWarned: false,
       pending: new Map(),
       channels: new Map(),
+      listedSessions: new Set(),
       pingTimer: undefined,
       offlineTimer: undefined,
       statusListeners: new Set(),
@@ -792,6 +795,8 @@ const ORPHAN_KILL_GRACE_MS = 5_000;
  * way they stay registered until their `exit` (see orphanExit).
  */
 function reattach(link: Link, listed: HelloChannel[], refreshExisting = true): void {
+  // Hello and channels_changed both carry the host's full listing.
+  if ((link.hostVersion ?? 0) >= 7) link.listedSessions = new Set(listed.flatMap(({ sessionId }) => sessionId ? [sessionId] : []));
   const live = new Set(listed.map(({ ch }) => ch));
   for (const [ch, transport] of refreshExisting ? link.channels : []) {
     // A spawn still in flight is not listed yet.
@@ -1128,6 +1133,8 @@ export class RemoteRpcTransport implements RpcTransport {
   session: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
+  /** The daemon's ready said this child excludes shell output from context, as of the last open that named it; false until one does. */
+  supportsBashExcludeFromContext = false;
   /** The daemon stopped listing this child: it died while the link was down. Set before the synthesized exit. */
   lost = false;
   /** Killed: a child of a previous run of this server that it could not adopt. Its output has no reader and is dropped. */
@@ -1277,6 +1284,7 @@ export class RemoteRpcTransport implements RpcTransport {
       await request(this.hostId, "open", { ...this.opening, sessionId }, linkTimings.opTimeoutMs, (value) => {
         if (!isOpenResult(value) || value.ch !== this.ch || value.pending === null) throw new Error("Host could not reconcile the shared channel");
         this.refreshing = false;
+        this.supportsBashExcludeFromContext = value.supportsBashExcludeFromContext === true;
         if (this.interested || this.preparing > 0) this.sendInterest();
         notify(this.resyncListeners);
         for (const line of value.pending) this.deliverLine(line);
@@ -1361,13 +1369,14 @@ function isSpawnResult(value: unknown): value is { cwd: string; fellBack: boolea
 
 function isOpenResult(value: unknown): value is OpenChannelResult {
   if (!isRecord(value)) return false;
-  const { ch, joined, pending, streaming, advisorSpawned } = value;
+  const { ch, joined, pending, streaming, advisorSpawned, supportsBashExcludeFromContext } = value;
   return isSpawnResult(value)
     && typeof ch === "string" && ch.length > 0
     && typeof joined === "boolean"
     && typeof advisorSpawned === "boolean"
     && (pending === null || (Array.isArray(pending) && pending.every((line) => typeof line === "string")))
-    && (streaming === null || typeof streaming === "string");
+    && (streaming === null || typeof streaming === "string")
+    && (supportsBashExcludeFromContext === undefined || typeof supportsBashExcludeFromContext === "boolean");
 }
 
 /** Legacy hosts retain their single-server lifecycle and notification behaviour. */
@@ -1428,6 +1437,7 @@ export class RemoteHost implements Host {
         }
         const transport = link.channels.get(value.ch) ?? new RemoteRpcTransport(this.id, value.ch, sessionId, true);
         transport.spawned = true;
+        transport.supportsBashExcludeFromContext = value.supportsBashExcludeFromContext === true;
         transport.noteOpen(opening);
         link.channels.set(value.ch, transport);
         link.autoApprove = value.autoApproveExtension;
@@ -1637,6 +1647,16 @@ export function onHostHello(listener: (hostId: string, channels: HelloChannel[])
 export async function adoptedChild(hostId: string, sessionId: string): Promise<boolean> {
   const listed = [...(hub().links.get(hostId)?.channels.values() ?? [])].filter((child) => child.sessionId === sessionId);
   return (await Promise.all(listed.map((child) => child.adoption))).includes(true);
+}
+
+/** Whether a v7 host still runs a child of `sessionId`, joined by this server or not (a failed join leaves it running). */
+export function hostListsChild(sessionId: string): boolean {
+  for (const link of hub().links.values()) {
+    // A link kept across `bun --hot` from older code lacks the set: a v7 host's listing is unknown, so stay retryable.
+    const listed: Set<string> | undefined = link.listedSessions;
+    if (isLinkUp(link.status) && (listed ? listed.has(sessionId) : (link.hostVersion ?? 0) >= 7)) return true;
+  }
+  return false;
 }
 
 /** Resolves once every child of `sessionId` the host listed in a hello has exited or been adopted.

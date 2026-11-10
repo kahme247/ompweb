@@ -1593,6 +1593,10 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   min-height: 35px;
 }
 
+.file-viewer-shell {
+  container: file-viewer / inline-size;
+}
+
 .file-viewer-path {
   flex: 1 1 auto;
   min-width: 48px;
@@ -1661,6 +1665,45 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   filter: brightness(1.08);
 }
 
+.file-viewer-language-select {
+  height: 24px;
+  max-width: 140px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.file-viewer-language-select:hover {
+  color: var(--text);
+}
+
+/* A narrow panel moves the controls to their own row, wrapping them again
+   rather than clipping the view modes or Download. */
+@container file-viewer (max-width: 440px) {
+  .file-viewer-toolbar {
+    flex-wrap: wrap;
+    row-gap: 5px;
+  }
+
+  .file-viewer-meta {
+    display: none;
+  }
+
+  .file-viewer-controls {
+    flex-shrink: 1;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 5px;
+    min-width: 0;
+    margin-left: auto;
+  }
+}
+
 .file-viewer-icon-button {
   display: inline-flex;
   align-items: center;
@@ -1695,7 +1738,8 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
 }
 
 .file-viewer-mode-button:focus-visible,
-.file-viewer-icon-button:focus-visible {
+.file-viewer-icon-button:focus-visible,
+.file-viewer-language-select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -2438,6 +2482,31 @@ span.token.table {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent) !important;
   box-shadow: var(--shadow-card), 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent) !important;
 }
+
+/* Composer shell mode. "!" shares output with the model → root-style red warning;
+   "!!" stays local → muted terminal. Tokens feed the inline border/background. */
+[data-shell="model"] {
+  --shell-accent: var(--status-error);
+  --shell-border: color-mix(in srgb, var(--status-error) 65%, transparent);
+  --shell-bg: color-mix(in srgb, var(--status-error) 7%, var(--tool-bg));
+}
+[data-shell="local"] {
+  --shell-accent: var(--text-muted);
+  --shell-border: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  --shell-bg: var(--tool-bg);
+}
+.chat-input-shell[data-shell]:focus-within {
+  border-color: var(--shell-border) !important;
+  box-shadow: var(--shadow-card), 0 0 0 3px color-mix(in srgb, var(--shell-accent) 18%, transparent) !important;
+}
+.chat-input-shell[data-shell] textarea { caret-color: var(--shell-accent); }
+.shell-mode-label {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.shell-mode-label[data-shell="model"] { font-weight: 600; }
+.shell-mode-label[data-shell="model"]::before { content: "# "; }
+.shell-mode-label[data-shell="local"]::before { content: "$ "; }
 
 /* Fade + scale/slide entrance utilities for dropdowns, popovers, panels. */
 @keyframes ui-fade-in {
