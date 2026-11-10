@@ -166,6 +166,12 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
     (subagent.source !== "history" && subagent.status === "started" ? running : completed).push(subagent);
   }
   const runningCount = running.length;
+  // Once nothing runs, the header counts finished subagents instead of
+  // showing 0/N (#352): "0/6" reads as if nothing finished.
+  const headerCount = runningCount === 0 ? completed.length : runningCount;
+  const headerSummary = runningCount === 0
+    ? t("chatWindow.subagentCompletedSummary", { completed: completed.length, total: subagents.length })
+    : t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length });
 
   function renderChip(subagent: SubagentInfo) {
     const stateLabel = t(SUBAGENT_STATE_KEYS[subagent.status]);
@@ -252,10 +258,10 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
         ) : null}
         <span
           className={`${liveStatus ? "" : "ml-auto "}inline-flex items-center gap-1.5`}
-          aria-label={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
-          title={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
+          aria-label={headerSummary}
+          title={headerSummary}
         >
-          <span>{runningCount}/{subagents.length}</span>
+          <span>{headerCount}/{subagents.length}</span>
         </span>
         <ChevronDown
           size={14}
