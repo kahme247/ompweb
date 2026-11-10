@@ -13,7 +13,10 @@ import { ProjectPathError } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import { isLoopbackHost, readHostLogin } from "./host-login";
+import { sampleHostCapacity } from "./capacity";
+import type { SpawnRequest } from "./host";
 import {
+  CREATION_ID_RE,
   decodeBlobFrame,
   decodeDown,
   encodeLine,
@@ -64,6 +67,14 @@ interface Channel {
   buffered: number;
   /** Open blocking requests and the child's current session, both in the next hello. */
   pending: PendingRequests;
+  creationId?: string;
+}
+
+/** Terminal records remain for this daemon's lifetime: a late retry must never launch a replacement. */
+interface Creation {
+  ch: string;
+  fingerprint: string;
+  result: Promise<unknown> | null;
 }
 
 /** An uplink line sent and not acked yet. */
@@ -164,6 +175,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   let authorization = `Bearer ${options.token}`;
 
   const channels = new Map<string, Channel>();
+  const startingChannels = new Set<string>();
+  const creations = new Map<string, Creation>();
   // Spawns not yet in `channels`: their omp child may already be running.
   let spawnsInFlight = 0;
   configureHostUpdateSafety(() => channels.size > 0 || spawnsInFlight > 0
@@ -218,6 +231,25 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   /** Link samples of acked messages, waiting for their `stats` message. */
   const samples: LinkStatSample[] = [];
   let statsTimer: NodeJS.Timeout | undefined;
+  let capacityTimer: NodeJS.Timeout | undefined;
+
+  function reportCapacity(): void {
+    const ws = linked;
+    if (stopped || !ws || ws.readyState !== 1) return;
+    let active = 0;
+    for (const channel of channels.values()) if (channel.pending.activeTurn) active += 1;
+    const sample = sampleHostCapacity(active);
+    // Congested reports are discarded, never queued behind older output or retained for replay.
+    if (!sample || ws.bufferedAmount >= SEND_BUFFER_BYTES || inFlightBytes >= LINK_LIMITS.unackedBytes) return;
+    const data = encodeLine({ type: "ack", ack: down.acked }) + encodeLine({ type: "capacity", sample });
+    const bytes = Buffer.byteLength(data);
+    if (inFlightBytes + bytes > LINK_LIMITS.unackedBytes) return;
+    ws.send(data);
+    inFlight.push(bytes);
+    inFlightBytes += bytes;
+    ackOwed = false;
+    appliedSince = 0;
+  }
 
   /** Queue an uplink message under `key` (its channel, the request id of a `res`, or "stats"); its byte size, or null
    * when it exceeds the line limit. `counted`: child output, held against its channel's buffer. `session`, `blob` (the
@@ -434,6 +466,10 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         resendAt = 0;
         sender.dropBlobs();
         flush();
+        clearInterval(capacityTimer);
+        reportCapacity();
+        capacityTimer = setInterval(reportCapacity, 5_000);
+        capacityTimer.unref?.();
         return;
       case "ping":
         pongOwed = true;
@@ -561,13 +597,52 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     }
   }
 
-  async function spawnChannel(args: Record<string, unknown>): Promise<unknown> {
+  function spawnChannel(args: Record<string, unknown>): Promise<unknown> {
+    const { ch, cwd, recordedCwd, sessionFile, toolNames, advisor, spawnModel, creationId } = args;
+    if (typeof ch !== "string" || !ch) throw new HostOpError(400, "invalid_request", "Invalid channel id");
+    if (
+      typeof cwd !== "string"
+      || !(recordedCwd === null || recordedCwd === undefined || typeof recordedCwd === "string")
+      || typeof sessionFile !== "string"
+      || typeof advisor !== "boolean"
+      || !(toolNames === undefined || (Array.isArray(toolNames) && toolNames.every((name) => typeof name === "string")))
+      || !(spawnModel === undefined || typeof spawnModel === "string")
+      || !(creationId === undefined || (typeof creationId === "string" && CREATION_ID_RE.test(creationId)))
+    ) {
+      throw new HostOpError(400, "invalid_request", "Invalid spawn request");
+    }
+    const fingerprint = creationId === undefined ? "" : JSON.stringify([cwd, recordedCwd ?? null, sessionFile, toolNames ?? null, advisor, spawnModel ?? null]);
+    const existing = creationId === undefined ? undefined : creations.get(creationId);
+    if (existing) {
+      if (existing.ch !== ch || existing.fingerprint !== fingerprint || !existing.result) {
+        throw new HostOpError(409, "creation_conflict", "Creation identity belongs to another request or a completed child");
+      }
+      return existing.result;
+    }
+    if (channels.has(ch) || startingChannels.has(ch)) throw new HostOpError(400, "invalid_request", "Invalid channel id");
+    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+    const creation: Creation | undefined = creationId === undefined ? undefined : { ch, fingerprint, result: promise };
+    // Claim before openChannel can await spawnRpc; duplicates join this result rather than launching a child.
+    if (creationId !== undefined && creation) creations.set(creationId, creation);
+    startingChannels.add(ch);
     spawnsInFlight += 1;
-    try { return await openChannel(args); } finally { spawnsInFlight -= 1; }
+    void openChannel({ ch, cwd, recordedCwd: recordedCwd ?? null, sessionFile, toolNames, advisor, spawnModel, creationId }).then(
+      (result) => {
+        startingChannels.delete(ch);
+        spawnsInFlight -= 1;
+        resolve(result);
+      },
+      (error: unknown) => {
+        startingChannels.delete(ch);
+        spawnsInFlight -= 1;
+        if (creation) creation.result = null;
+        reject(error);
+      },
+    );
+    return promise;
   }
 
-  async function openChannel(args: Record<string, unknown>): Promise<unknown> {
-    const { ch, cwd, recordedCwd, sessionFile, toolNames, advisor, spawnModel } = args;
+  async function openChannel({ ch, cwd, recordedCwd, sessionFile, toolNames, advisor, spawnModel, creationId }: SpawnRequest & { ch: string }): Promise<unknown> {
     let operation: HostUpdateOperation | null = null;
     try {
       operation = getHostUpdateOperation();
@@ -579,28 +654,17 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     if (operation?.target === "ompweb" && operation.state === "running") {
       throw new HostOpError(409, "host_updating", "This host is updating its daemon; new sessions must wait");
     }
-    if (typeof ch !== "string" || !ch || channels.has(ch)) throw new HostOpError(400, "invalid_request", "Invalid channel id");
-    if (
-      typeof cwd !== "string"
-      || !(recordedCwd === null || recordedCwd === undefined || typeof recordedCwd === "string")
-      || typeof sessionFile !== "string"
-      || typeof advisor !== "boolean"
-      || !(toolNames === undefined || (Array.isArray(toolNames) && toolNames.every((name) => typeof name === "string")))
-      || !(spawnModel === undefined || typeof spawnModel === "string")
-    ) {
-      throw new HostOpError(400, "invalid_request", "Invalid spawn request");
-    }
     const file = sessionFile ? sessionsPath(sessionFile) : "";
     // Only this machine knows which directories exist here.
     const resolved = resolveSpawnCwdResult(recordedCwd ?? cwd);
-    const spawned = await localHost.spawnRpc({ cwd: resolved.cwd, recordedCwd: recordedCwd ?? null, sessionFile: file, toolNames, advisor, spawnModel });
+    const spawned = await localHost.spawnRpc({ cwd: resolved.cwd, recordedCwd: recordedCwd ?? null, sessionFile: file, toolNames, advisor, spawnModel, creationId });
     const { transport } = spawned;
     if (stopped) {
       transport.killTree(true);
       throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
     }
     const pending = new PendingRequests(LINK_LIMITS.pendingBytes, file ? readSessionHeaderSync(file)?.id ?? null : null);
-    channels.set(ch, { transport, cwd: spawned.cwd, buffered: 0, pending });
+    channels.set(ch, { transport, cwd: spawned.cwd, buffered: 0, pending, creationId });
     transport.onLine((line) => {
       pending.noteStdout(line);
       output(ch, { type: "stdout", ch, line });
@@ -608,6 +672,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     transport.onStderr((chunk) => output(ch, { type: "stderr", ch, chunk }));
     transport.onExit((code, signal) => {
       channels.delete(ch);
+      if (creationId !== undefined) creations.get(creationId)!.result = null;
       queue({ type: "exit", ch, code, signal }, ch);
     });
     // spawnRpc only compares a recorded cwd; a new session's missing cwd falls back too.
@@ -626,6 +691,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     // Once given up, a socket stays inert: a late 4409 on it never stops a daemon that already redialed.
     const end = (closed: SocketEnd | string) => {
       clearTimeout(watchdog);
+      clearInterval(capacityTimer);
+      capacityTimer = undefined;
       socket = null;
       linked = null;
       inFlight = [];
@@ -691,7 +758,10 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           home: homedir(),
           autoApproveExtension: localHost.autoApproveExtension(),
           ack: down.acked,
-          channels: [...channels].map(([ch, channel]) => ({ ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? channel.pending.lines() : null })),
+          channels: [...channels].map(([ch, channel]) => ({
+            ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? channel.pending.lines() : null,
+            ...(channel.creationId === undefined ? {} : { creationId: channel.creationId }),
+          })),
         });
         let hello: string;
         try {
@@ -761,6 +831,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       clearTimeout(flushTimer);
       clearTimeout(statsTimer);
       clearInterval(sweepTimer);
+      clearInterval(capacityTimer);
+      capacityTimer = undefined;
       const live = [...channels.values()].map(({ transport }) => transport);
       const exits = live.map((transport) => {
         const { promise, resolve } = Promise.withResolvers<void>();

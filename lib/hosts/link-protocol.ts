@@ -5,19 +5,23 @@
 import { isValidSessionId } from "../session-file-references-core";
 import { UPLOAD_ID_RE } from "../upload-limits";
 import type { SessionOps } from "./session-ops";
+import type { HostCapacity } from "./capacity";
 
-/** 6: composer uploads (docs/specs/2026-11-02-file-uploads-design.md, U5): binary down frames carry upload bytes, the
+/** 7: volatile capacity reports and stable creation identity. 6: composer uploads
+ * (docs/specs/2026-11-02-file-uploads-design.md, U5): binary down frames carry upload bytes, the
  * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
  * `part` messages and a large result as several binary frames, both sent fair across channels
  * (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry the messages,
  * binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
-export const LINK_PROTOCOL_VERSION = 6;
+export const LINK_PROTOCOL_VERSION = 7;
 /** The first daemon link version that takes uploads: main answers 426 below it (host_upgrade_required, or
  * host_restart_required on this machine, whose daemon an in-place upgrade leaves running). */
 export const UPLOADS_SINCE_VERSION = 6;
 /** The oldest daemon protocol the server still links (older ones get close 4426). Dropping one is an explicit decision. */
 export const MIN_LINK_PROTOCOL_VERSION = 4;
+/** Safe identity shared by spawn requests and reconnect channel metadata. */
+export const CREATION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 export const LINK_LIMITS = {
   pingMs: 15_000,
@@ -108,7 +112,7 @@ export type DownMessage =
 
 /** `sessionId`: the session the child last reported (null before it named one); `cwd`: where the
  * daemon spawned it; `pending`: raw stdout lines of its open blocking requests, or null when over `pendingBytes`. */
-export type HelloChannel = { ch: string; sessionId: string | null; cwd: string; pending: string[] | null };
+export type HelloChannel = { ch: string; sessionId: string | null; cwd: string; pending: string[] | null; creationId?: string };
 
 /** One uplink message the daemon measured: enqueued at `at` (its wall clock) with `bytesAhead` bytes unacked ahead of
  * it (messages and result blobs), `bytes` its own size (with its blob), acked by the hub `ackMs` later (a monotonic
@@ -136,6 +140,8 @@ export type UpMessage =
   /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. Advisory: the
    * receiver keeps the valid ones and counts the rest in `invalid` (decodeUp only; a sender leaves it out). */
   | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
+  /** v7: a fresh resource sample; unsequenced and never retained for replay. */
+  | { type: "capacity"; sample: HostCapacity }
   /** v6: the daemon has written `received` bytes of upload `id` for this start `attempt`, `done` once all of them are
    * written and synced; with `error` the upload failed and its staged file is gone. */
   | { type: "upload_ack"; seq: number; id: string; attempt: string; received: number; done: boolean; error?: { status: number; code: string; message: string } }
@@ -247,7 +253,7 @@ export function isHostOp(name: string): name is HostOpName {
 }
 
 const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "ping", "pong", "ack"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "res", "upload_ack", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "capacity", "res", "upload_ack", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -337,8 +343,27 @@ function channels(o: Obj): HelloChannel[] {
   if (!Array.isArray(list)) fail("channels must be an array");
   return list.map((c: unknown) => {
     if (!isObj(c)) fail("channel must be an object");
-    return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str), cwd: str(c, "cwd"), pending: nullable(c, "pending", strings) };
+    const creationId = c.creationId;
+    if (creationId !== undefined && (typeof creationId !== "string" || !CREATION_ID_RE.test(creationId))) fail("Invalid creation identity");
+    return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str), cwd: str(c, "cwd"), pending: nullable(c, "pending", strings), ...(creationId === undefined ? {} : { creationId }) };
   });
+}
+
+function capacitySample(value: unknown): HostCapacity {
+  if (!isObj(value)) fail("capacity sample must be an object");
+  const nonnegative = (key: string): number => {
+    const n = value[key];
+    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) fail(`${key} must be finite and non-negative`);
+    return n;
+  };
+  const effectiveCpus = nonnegative("effectiveCpus");
+  const load1 = nonnegative("load1");
+  const busyFraction = nonnegative("busyFraction");
+  const stealFraction = nonnegative("stealFraction");
+  const availableMemoryBytes = nonnegative("availableMemoryBytes");
+  const activeSessions = seqNum(value, "activeSessions");
+  if (effectiveCpus === 0 || busyFraction + stealFraction > 1) fail("Invalid capacity CPU values");
+  return { effectiveCpus, load1, busyFraction, stealFraction, availableMemoryBytes, activeSessions };
 }
 
 /** One sample's fixed fields, or null when one is missing or out of range. Extra fields are dropped. */
@@ -417,6 +442,8 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       return { type: "resync", seq: seqNum(o, "seq"), ch: str(o, "ch") };
     case "stats":
       return stats(o);
+    case "capacity":
+      return { type: "capacity", sample: capacitySample(o.sample) };
     case "upload_ack": {
       const attempt = str(o, "attempt");
       if (!UPLOAD_ID_RE.test(attempt)) fail("attempt must be a UUIDv4");

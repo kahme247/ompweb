@@ -10,6 +10,8 @@ export function isLinkUp(status: HostStatus): boolean {
 }
 
 export interface SpawnRequest {
+  /** Stable identity of one independent start; retries must preserve its spawn arguments. */
+  creationId?: string;
   cwd: string;
   recordedCwd: string | null;
   sessionFile: string;
