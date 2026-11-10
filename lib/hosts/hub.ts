@@ -2,7 +2,7 @@
 // host` daemons on /api/hosts/link and exposes each linked machine as a
 // `RemoteHost`. Everything a daemon sends is untrusted input.
 // No `next/*` or `@/` imports.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readBodyWithinLimit } from "../bounded-form-data";
 import type { RpcTransport } from "../omp/rpc-transport";
 import type { ProjectRegistryEntry } from "../project-registry";
@@ -10,8 +10,10 @@ import { isValidSessionId } from "../session-file-references-core";
 import { appendTransportSamples, transportMetricsPath } from "../transport-metrics";
 import { isRecord } from "../type-guards";
 import type { SessionInfo } from "../types";
+import type { HostCapacity } from "./capacity";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
 import {
+  CREATION_ID_RE,
   decodeBlobFrame,
   decodeUp,
   encodeLine,
@@ -68,6 +70,12 @@ type Res = Extract<UpMessage, { type: "res" }>;
 /** An `upload_ack` as lib/uploads.ts sees it. */
 export type UploadAck = Omit<Extract<UpMessage, { type: "upload_ack" }>, "type" | "seq">;
 
+/** The current socket's latest resource report, timed by the server's monotonic clock. */
+export interface CapacitySnapshot {
+  sample: HostCapacity;
+  receivedAt: number;
+}
+
 interface PendingOp {
   op: HostOpName;
   resolve: (value: unknown) => void;
@@ -111,6 +119,7 @@ interface Link {
   status: HostStatus;
   /** Link protocol version the daemon last presented (Settings shows it on a 426). */
   hostVersion: number | null;
+  capacity: CapacitySnapshot | null;
   ompVersion: string | null;
   ompwebVersion: string | null;
   platform: string | null;
@@ -197,6 +206,7 @@ function linkFor(id: string): Link {
       host: new RemoteHost(id),
       status: "offline",
       hostVersion: null,
+      capacity: null,
       ompVersion: null,
       ompwebVersion: null,
       platform: null,
@@ -430,6 +440,7 @@ function failAllOps(link: Link, error: () => Error): void {
 /** The socket is gone: ops in flight fail now rather than at their timeout. */
 function endSocket(link: Link): void {
   link.socket = null;
+  link.capacity = null;
   recordDropped(link);
   // Upload bytes not sent yet go nowhere now: each upload resumes from the host's offset (uploadStart).
   link.sender.dropBlobs();
@@ -498,6 +509,7 @@ const stopping = () => json({ error: "omp-web is shutting down" }, 503);
 export function freezeHostLinks(): void {
   hub().frozen = true;
   for (const link of hub().links.values()) {
+    link.capacity = null;
     recordDropped(link);
     link.socket?.close(LINK_CLOSE.goingAway, "omp-web is restarting");
   }
@@ -632,6 +644,7 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   // One link per host: the newest wins and the previous daemon exits.
   const previous = link.socket;
   link.socket = ws;
+  link.capacity = null;
   previous?.close(LINK_CLOSE.replaced, "replaced by a newer link");
   if (previous) {
     // Upload bytes the old socket may have lost must not be followed by later ones on this socket: they resume instead.
@@ -800,6 +813,10 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
 function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMessage | UnknownMessage, joined = false): void {
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
   if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
+  if (message.type === "capacity") {
+    if (link.hostVersion === 7) link.capacity = { sample: message.sample, receivedAt: performance.now() };
+    return;
+  }
   if (message.type === "unknown") {
     // A newer daemon's message, or one only the server sends: skipped, but its seq is applied so it is acked and never resent.
     if (message.seq !== null) link.up.applied(message.seq);
@@ -1153,8 +1170,19 @@ export class RemoteHost implements Host {
   async spawnRpc(spawnRequest: SpawnRequest): Promise<SpawnResult> {
     const link = linkFor(this.id);
     if (link.status === "omp-missing") throw new HostOpError(503, "host_omp_missing", `omp is not installed on ${this.label}`);
-    const ch = randomUUID();
-    const transport = new RemoteRpcTransport(this.id, ch);
+    const { creationId } = spawnRequest;
+    if (creationId !== undefined) {
+      if (typeof creationId !== "string" || !CREATION_ID_RE.test(creationId)) {
+        throw new HostOpError(400, "invalid_request", "Invalid creation identity");
+      }
+      if ((link.hostVersion ?? 0) < 7) {
+        throw new HostOpError(426, "host_upgrade_required", `${this.label} needs a newer ompweb to use creation identity`);
+      }
+    }
+    const ch = creationId === undefined ? randomUUID()
+      : `creation-${createHash("sha256").update("ompweb:creation:").update(creationId).digest("hex")}`;
+    const existing = link.channels.get(ch);
+    const transport = existing ?? new RemoteRpcTransport(this.id, ch);
     // Registered first: the child's output can overtake the spawn result.
     link.channels.set(ch, transport);
     try {
@@ -1164,9 +1192,15 @@ export class RemoteHost implements Host {
       link.autoApprove = result.autoApproveExtension;
       return { transport, cwd: result.cwd, fellBack: result.fellBack, launchAdvisor: result.launchAdvisor };
     } catch (error) {
-      link.channels.delete(ch);
-      // The daemon may have started it after we gave up: never leave it unread.
-      transport.killTree(true);
+      if (creationId === undefined) {
+        link.channels.delete(ch);
+        // The daemon may have started it after we gave up: never leave it unread.
+        transport.killTree(true);
+      } else if (!existing && error instanceof HostOpError && error.status >= 400 && error.status < 500 && error.status !== 408
+        && link.channels.get(ch) === transport) {
+        link.channels.delete(ch);
+      }
+      // Stable creations may already own a child: uncertain delivery stays attached for reconciliation.
       throw error;
     }
   }
@@ -1327,6 +1361,15 @@ export function notifyHostsChange(): void {
 export function lastUplinkAt(hostId: string): number | null {
   const lastSeenAt = hub().links.get(hostId)?.lastSeenAt;
   return lastSeenAt ? Date.parse(lastSeenAt) : null;
+}
+
+/** Link telemetry is internal scheduling state; reading it never creates a link or broadcasts a change. */
+export function getHostCapacity(hostId: string): CapacitySnapshot | null {
+  return hub().links.get(hostId)?.capacity ?? null;
+}
+
+export function getHostLinkProtocol(hostId: string): number | null {
+  return hub().links.get(hostId)?.hostVersion ?? null;
 }
 
 export function onHostsChange(listener: () => void): () => void {
