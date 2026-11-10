@@ -24,19 +24,19 @@ Not goals:
 
 ompweb adds no credential handling of its own. It still never reads `agent.db` and never imports OMP packages: it runs the installed CLI and forwards HTTP.
 
-Checked against OMP's source and `omp auth-broker --help` of omp 18.18.6. Not yet run end to end; the plan starts with that probe.
+Checked against OMP's source, and run on 2026-11-11 with omp 18.18.6 in throwaway home directories: `serve --bind=127.0.0.1:0` picks a free port and prints it; a second OMP with the two variables pointing at a path-prefixed forwarder that swaps the bearer loaded the snapshot, opened the snapshot stream and read usage through it. A stored API key appears in the snapshot in full.
 
 ### C2. Sharing is a per-host setting, off by default
 
-- `HostRecord` gains `shareCredentials: boolean` (absent means `false`). `PATCH /api/hosts` accepts it; Settings → Hosts shows one toggle per remote host. The `local` record never has it: this machine already uses the store directly.
+- `HostRecord` gains `shareCredentials: boolean` (absent means `false`). `PATCH /api/hosts` accepts it; Settings → Hosts shows one toggle per remote host, and turning it on asks for confirmation with the security note. The `local` record never has it: this machine already uses the store directly.
 - Off by default for two reasons. Broker mode replaces the host's own stored logins, so turning it on for an existing host changes which accounts its sessions use. And it extends what a host is trusted with (see "Security").
-- The setting applies to OMP processes started after the change. A running process keeps the credentials it started with.
+- Turning it on applies to OMP processes started after the change. Turning it off also cuts running processes off: their next request to the server is refused (C4, C7).
 
 ### C3. The broker runs as a child of the web server
 
-- `lib/omp/auth-broker.ts`, modelled on `lib/omp/auth-gateway.ts`: started on the first forwarded request with `omp auth-broker serve --bind=127.0.0.1:<free port>`, ready once `GET /v1/healthz` answers, stopped after 5 minutes with no forwarded request in flight (an open snapshot stream counts as in flight) and when the server shuts down. Its bearer token comes from `omp auth-broker token` and stays in the server process.
+- `lib/omp/auth-broker.ts`, modelled on `lib/omp/auth-gateway.ts`: started on the first forwarded request with `omp auth-broker serve --bind=127.0.0.1:0`, ready once it prints its listening address, stopped after 5 minutes with no forwarded request in flight (an open snapshot stream counts as in flight) and when the server shuts down. Its bearer token comes from `omp auth-broker token` and stays in the server process; if the broker refuses that token (it was regenerated), the child is stopped and the next request starts a new one.
 - Sessions on this machine and the Settings screens keep using the store directly. The broker reloads the store before every snapshot and every refresh pass, so a login or logout in Settings reaches the hosts.
-- The broker and this machine's own OMP processes refresh the same OAuth rows. That is the situation several local OMP processes are already in; the plan includes a test that a refresh by one is picked up by the other.
+- The broker and this machine's own OMP processes refresh the same OAuth rows. That is the situation several local OMP processes are already in, handled by OMP's own store; it is checked in the live test, not by ompweb's tests.
 
 ### C4. One forwarding route on the web server
 
@@ -44,9 +44,9 @@ Checked against OMP's source and `omp auth-broker --help` of omp 18.18.6. Not ye
 
 - Outside the password gate, like `/api/hosts/link`: the daemon has no session cookie. `UNGATED` names the prefix `api/hosts/broker/` and nothing beside it.
 - Authenticates `Authorization: Bearer <host token>` with `hostForToken` before reading any body: 401 for an unknown token, 403 for a host without `shareCredentials` and for `local`, 503 when `hosts.json` is unreadable or the broker cannot start.
-- Forwards only paths under `/v1/`, with the method, query and body, and the request headers `content-type`, `accept`, `if-none-match` and `omp-auth-broker-capabilities`, replacing the bearer with the broker's. Returns the status, the body as a stream and the response headers `content-type`, `etag`, `cache-control` and `vary`.
-- Refuses `POST /v1/credential` with 403: a host cannot add or replace a credential.
-- Turns Bun's 10 s idle timeout off once the token is accepted: the snapshot stream and the 30 s long poll stay open without traffic. The upstream request is aborted when the host disconnects.
+- Forwards only an allow-list of broker endpoints, with the method, query and body (at most 1 MiB), and the request headers `content-type`, `accept`, `if-none-match` and `omp-auth-broker-capabilities`, replacing the bearer with the broker's. Returns the status, the body as a stream and the response headers `content-type`, `etag`, `cache-control` and `vary`.
+- The allow-list is the snapshot, its stream, health, the per-credential `refresh`, `disable`, `block` and `blocks` calls, and the usage calls. Everything else answers 404, including `POST /v1/credential` (a host cannot add or replace a credential) and any endpoint a later OMP adds, until it is reviewed and listed.
+- Turns Bun's 10 s idle timeout off once the token is accepted: the snapshot stream and the 30 s long poll stay open without traffic. The upstream request is aborted when the host disconnects, and every open request of a host is aborted when its sharing is turned off or it is revoked.
 - Logs the host id, method, path and status. Never a token or a body.
 
 ### C5. The daemon forwards for its OMP processes
