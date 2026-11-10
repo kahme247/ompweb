@@ -217,6 +217,11 @@ worker and receive an isolated local worktree. Adding a pool project registers i
 origin, not a central clone. The selected worker prepares its checkout when the session
 starts and reports authentication, preparation, or repository conflicts explicitly.
 Standalone hosts, including the Mac, retain typed paths and local clone progress/cancellation.
+Existing non-pooled workspaces on member hosts remain accessible in the sidebar; those
+hosts are not offered as ordinary pool-creation targets. Resolving the owner for a new
+chat's attachment does not replace its live composer or discard its draft and uploads.
+Placement and preparation failures are also shown when command discovery or system-prompt
+inspection starts a session lazily; retrying remains an explicit user action.
 
 Creation retries reuse the same intent and creation identity. Once a real session is known,
 its owner remains authoritative for resume, files, terminal, uploads, artifacts, rename, and
@@ -225,6 +230,25 @@ on another worker or on the Mac. Dirty files and unpublished work remain on that
 there is no live migration or unpublished-work failover. After an uncertain response,
 inspect the retained session before explicitly retrying a command that may have run.
 
+
+### Local worker maintenance (Unix)
+
+`ompweb host status` prints daemon PID, native version/protocol, welcomed-link readiness,
+executable/entrypoint identity and maintenance state without credentials.
+`ompweb host drain` synchronously checks children (idle included), preparations,
+uploads/controls, pending operations and reliable results, and closes new-work admission
+only when idle. A busy refusal never kills work or changes admission.
+`ompweb host resume` reopens the live daemon. Controls use a private Unix socket inside
+the existing daemon, not TCP or a separate service. A disconnected deployer cannot release
+a live drain. Ordinary standalone Windows hosts remain unchanged; local controls are Unix-only.
+Disable central member admission before worker rollout; native drain is the final race-free guard.
+
+Worker service cutovers can additionally start drained through `OMP_WEB_HOST_DRAINED=1`
+in their protected temporary unit environment. Live resume does not remove that startup
+setting. After a deployer crash or lost final resume reply, verify the selected release,
+PID and welcomed-link health, and remove the known worker maintenance flag before explicit
+resume. Never infer from a missing acknowledgement that admission stayed closed, and never
+stop or roll back a candidate after its deployment commit point.
 
 ### Single binary
 

@@ -49,7 +49,8 @@ interface FileNode {
 
 interface Props {
   cwd: string;
-  onOpenFile: (filePath: string, fileName: string) => void;
+  sourceSessionId?: string | null;
+  onOpenFile: (filePath: string, fileName: string, sourceSessionId?: string | null) => void;
   refreshKey?: number;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
@@ -102,9 +103,9 @@ interface PendingConflict {
   nonReplaceable: string[];
 }
 
-async function fetchEntries(dirPath: string, showHidden: boolean): Promise<FileNode[]> {
+async function fetchEntries(dirPath: string, showHidden: boolean, sourceSessionId?: string | null): Promise<FileNode[]> {
   const encoded = encodeFilePathForApi(dirPath);
-  const res = await fetch(`/api/files/${encoded}?type=list${showHidden ? "&hidden=1" : ""}`);
+  const res = await fetch(`/api/files/${encoded}?type=list${showHidden ? "&hidden=1" : ""}${sourceSessionId ? `&sessionId=${encodeURIComponent(sourceSessionId)}` : ""}`);
   if (!res.ok) {
     let message = translate("fileExplorer.loadFailed", { status: res.status });
     try {
@@ -126,8 +127,9 @@ async function fetchEntries(dirPath: string, showHidden: boolean): Promise<FileN
   }));
 }
 
-async function fetchGitStatus(cwd: string): Promise<GitStatusResponse> {
+async function fetchGitStatus(cwd: string, sourceSessionId?: string | null): Promise<GitStatusResponse> {
   const params = new URLSearchParams({ cwd });
+  if (sourceSessionId) params.set("sessionId", sourceSessionId);
   const res = await fetch(`/api/git/status?${params.toString()}`);
   if (!res.ok) throw new Error(translate("fileExplorer.gitStatusFailed", { status: res.status }));
   return res.json() as Promise<GitStatusResponse>;
@@ -156,6 +158,7 @@ function uploadFiles(
   files: File[],
   strategy: UploadConflictStrategy,
   onProgress: (progress: number) => void,
+  sourceSessionId?: string | null,
 ): Promise<{ status: number; data: UploadResponse }> {
   return new Promise((resolve, reject) => {
     const formData = new FormData();
@@ -164,7 +167,7 @@ function uploadFiles(
     const xhr = new XMLHttpRequest();
     xhr.open(
       "POST",
-      `/api/files/${encodeFilePathForApi(targetDirectory)}?type=upload&conflict=${strategy}`,
+      `/api/files/${encodeFilePathForApi(targetDirectory)}?type=upload&conflict=${strategy}${sourceSessionId ? `&sessionId=${encodeURIComponent(sourceSessionId)}` : ""}`,
     );
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && event.total > 0) {
@@ -248,6 +251,7 @@ interface ExplorerRowProps {
   rowHeight: number;
   rowCount: number;
   cwd: string;
+  sourceSessionId?: string | null;
   open: boolean;
   loading: boolean;
   highlighted: boolean;
@@ -270,6 +274,7 @@ const ExplorerRow = memo(function ExplorerRow({
   rowCount,
   rowHeight,
   cwd,
+  sourceSessionId,
   open,
   loading,
   highlighted,
@@ -472,7 +477,7 @@ const ExplorerRow = memo(function ExplorerRow({
       {!node.isDir && (
         <Tooltip content={downloadLabel}>
           <a
-            href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
+            href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download${sourceSessionId ? `&sessionId=${encodeURIComponent(sourceSessionId)}` : ""}`}
             download
             onClick={(e) => e.stopPropagation()}
             aria-label={downloadLabel}
@@ -506,6 +511,7 @@ const ExplorerRow = memo(function ExplorerRow({
 
 export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileExplorer({
   cwd,
+  sourceSessionId,
   onOpenFile,
   refreshKey,
   onAtMention,
@@ -549,6 +555,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [searchFailed, setSearchFailed] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
+  const prevSourceSessionIdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingPathsRef = useRef<Set<string>>(new Set());
@@ -621,6 +628,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         kind: "file",
       });
       if (forceRefresh) params.set("refresh", "1");
+      if (sourceSessionId) params.set("sessionId", sourceSessionId);
       fetch(`/api/file-index?${params.toString()}`, { signal: controller.signal })
         .then((res) => res.ok
           ? res.json() as Promise<{ matches?: FileIndexEntry[]; truncated?: boolean }>
@@ -645,7 +653,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     return () => { clearTimeout(timer); controller.abort(); };
     // refreshToken participates so the toolbar refresh button and a finished
     // upload re-run the visible query against a freshly built listing.
-  }, [cwd, fileSearchOpen, searchQuery, refreshToken]);
+  }, [cwd, sourceSessionId, fileSearchOpen, searchQuery, refreshToken]);
 
   // Rows stay in the order the index ranked them, so the closest name matches
   // sit at the top. Folding them into a directory tree would re-sort them
@@ -726,7 +734,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     const isCurrent = () => listingGenerationRef.current === generation;
     loadingPathsRef.current.add(dirPath);
     setLoadingPaths((prev) => new Set(prev).add(dirPath));
-    return fetchEntries(dirPath, showHidden)
+    return fetchEntries(dirPath, showHidden, sourceSessionId)
       .then((entries) => {
         if (!isCurrent()) return;
         setChildrenByPath((prev) => {
@@ -748,7 +756,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           return next;
         });
       });
-  }, [cwd, showHidden]);
+  }, [cwd, showHidden, sourceSessionId]);
 
   // Scroll the virtual window so a row is visible, then focus it. The focus
   // retries across frames: the scroll triggers an async window re-render and
@@ -794,9 +802,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         return new Set(prev).add(node.fullPath);
       });
     } else {
-      onOpenFile(node.fullPath, node.name);
+      onOpenFile(node.fullPath, node.name, sourceSessionId);
     }
-  }, [onOpenFile]);
+  }, [onOpenFile, sourceSessionId]);
 
   const handleRowKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>, node: FileNode, index: number) => {
     if (event.target !== event.currentTarget) return;
@@ -899,7 +907,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setUploadPhase("uploading");
 
     try {
-      const { status, data } = await uploadFiles(cwd, files, strategy, setUploadProgress);
+      const { status, data } = await uploadFiles(cwd, files, strategy, setUploadProgress, sourceSessionId);
       if (status === 409 && data.conflicts?.length) {
         setPendingConflict({
           files,
@@ -918,7 +926,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     } finally {
       setUploadPhase("idle");
     }
-  }, [applyUploadResult, cwd]);
+  }, [applyUploadResult, cwd, sourceSessionId]);
 
   const prepareUpload = useCallback(async (files: File[]) => {
     if (files.length === 0 || uploadBusy) return;
@@ -931,7 +939,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
     try {
       const res = await fetch(
-        `/api/files/${encodeFilePathForApi(cwd)}?type=upload-check`,
+        `/api/files/${encodeFilePathForApi(cwd)}?type=upload-check${sourceSessionId ? `&sessionId=${encodeURIComponent(sourceSessionId)}` : ""}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -956,7 +964,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     } finally {
       setUploadPhase("idle");
     }
-  }, [cwd, performUpload, uploadBusy]);
+  }, [cwd, sourceSessionId, performUpload, uploadBusy]);
 
   const handleUploadInput = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -985,11 +993,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onRefreshDoneRef.current = onRefreshDone;
 
   useEffect(() => {
-    const cwdChanged = prevCwdRef.current !== cwd;
+    const workspaceChanged = prevCwdRef.current !== cwd || prevSourceSessionIdRef.current !== (sourceSessionId ?? null);
     prevCwdRef.current = cwd;
+    prevSourceSessionIdRef.current = sourceSessionId ?? null;
 
-    // Reset expanded state only when cwd changes, not on refreshKey bumps
-    if (cwdChanged) {
+    // Refreshes retain expansion; a different owner or cwd must drop its namespace.
+    if (workspaceChanged) {
       // Supersede in-flight listings of the previous directory too.
       listingGenerationRef.current += 1;
       setExpandedPaths(new Set());
@@ -1002,9 +1011,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       setLoadingPaths(new Set());
       setFocusedIndex(0);
       setScrollTop(0);
+      setSearchPaths([]);
+      setSearchTruncated(false);
+      setGitFiles([]);
     }
 
-    setLoading(cwdChanged);
+    setLoading(workspaceChanged);
     setError(null);
     // Refresh re-reads the root plus every expanded directory so renames and
     // deletions surface; the expand effect below covers newly opened ones.
@@ -1018,11 +1030,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       setLoading(false);
       onRefreshDoneRef.current?.();
     });
-    if (!cwdChanged) {
+    if (!workspaceChanged) {
       for (const path of expandedPathsRef.current) fetchDir(path);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd, refreshKey, treeRefreshKey]);
+  }, [cwd, sourceSessionId, refreshKey, treeRefreshKey]);
 
   // Flipping "Show hidden items" changes what every listing returns, so no
   // cached directory listing may survive it: drop the map (the root and every
@@ -1050,12 +1062,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       if (!childrenByPath.has(path)) fetchDir(path);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expandedPaths, childrenByPath, cwd]);
+  }, [expandedPaths, childrenByPath, cwd, sourceSessionId]);
 
   const [isGitRepo, setIsGitRepo] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    fetchGitStatus(cwd)
+    fetchGitStatus(cwd, sourceSessionId)
       .then((status) => {
         if (cancelled) return;
         setGitFiles(status.isGitRepository ? status.files : []);
@@ -1067,7 +1079,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         setIsGitRepo(false);
       });
     return () => { cancelled = true; };
-  }, [cwd, refreshKey, treeRefreshKey]);
+  }, [cwd, sourceSessionId, refreshKey, treeRefreshKey]);
 
   useEffect(() => {
     onGitStatusChange?.(gitFiles.length, isGitRepo);
@@ -1153,6 +1165,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                   rowHeight={rowHeight}
                   rowCount={rows.length}
                   cwd={cwd}
+                  sourceSessionId={sourceSessionId}
                   open={false}
                   loading={false}
                   highlighted={false}
@@ -1180,6 +1193,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 rowHeight={rowHeight}
                 rowCount={rows.length}
                 cwd={cwd}
+                sourceSessionId={sourceSessionId}
                 open={node.isDir && expandedPaths.has(node.fullPath)}
                 loading={loadingPaths.has(node.fullPath)}
                 highlighted={highlightedPaths.has(node.fullPath)}

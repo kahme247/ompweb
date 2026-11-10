@@ -46,7 +46,7 @@ function HostGroup({ name, color, statusText, unavailableReason, collapsed, onTo
   unavailableReason: string | null;
   collapsed: boolean;
   onToggle: () => void;
-  onAdd: () => void;
+  onAdd?: () => void;
   /** Shown instead of the list when the host has no workspaces. */
   empty: string | null;
   children: ReactNode;
@@ -72,9 +72,9 @@ function HostGroup({ name, color, statusText, unavailableReason, collapsed, onTo
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" }}>{name}</span>
           {statusText && <span style={{ flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)", textTransform: "none", letterSpacing: 0 }}>{statusText}</span>}
         </button>
-        <SidebarIconButton label={t("hosts.addWorkspaceOn", { host: name })} onClick={onAdd} disabled={unavailableReason !== null}>
+        {onAdd && <SidebarIconButton label={t("hosts.addWorkspaceOn", { host: name })} onClick={onAdd} disabled={unavailableReason !== null}>
           <Plus size={14} strokeWidth={1.9} aria-hidden="true" />
-        </SidebarIconButton>
+        </SidebarIconButton>}
       </div>
       {!collapsed && (
         <div

@@ -16,12 +16,13 @@ interface MarkdownBodyProps {
   className?: string;
   isStreaming?: boolean;
   cwd?: string;
+  sourceSessionId?: string | null;
   onOpenFile?: (filePath: string) => void;
   suppressImages?: boolean;
   autoCharts?: boolean;
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, suppressImages = false, autoCharts = false }: MarkdownBodyProps) {
+export function MarkdownBody({ children, className, isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages = false, autoCharts = false }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   const { remarkPlugins: baseRemarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
   const githubRepo = useContext(GithubRepoContext);
@@ -44,7 +45,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       if (suppressImages) return alt ?? null;
       const filePath = typeof src === "string" ? resolveLocalFileHref(src, cwd) : null;
       const imageSrc = filePath
-        ? `/api/files/${encodeFilePathForApi(filePath)}?type=read`
+        ? `/api/files/${encodeFilePathForApi(filePath)}?type=read${sourceSessionId ? `&sessionId=${encodeURIComponent(sourceSessionId)}` : ""}`
         : src;
       // Dynamic local paths are served directly by the file API.
       return <ClickableImage src={imageSrc} alt={alt ?? ""} loading="lazy" {...imgProps} />;
@@ -154,7 +155,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       );
     },
     };
-  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink, autoCharts]);
+  }, [isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages, openAgentLink, autoCharts]);
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>

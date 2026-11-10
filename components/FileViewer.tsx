@@ -880,6 +880,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
 
     try {
       const params = new URLSearchParams({ cwd, path: targetPath });
+      if (sourceSessionId) params.set("sessionId", sourceSessionId);
       const response = await fetch(`/api/git/diff?${params.toString()}`);
       const next = await response.json() as GitFileDiffResponse & { error?: string };
       if (requestId !== gitDiffRequestRef.current) return;
@@ -887,7 +888,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     } catch {
       if (requestId === gitDiffRequestRef.current) setGitDiff(null);
     }
-  }, [cwd]);
+  }, [cwd, sourceSessionId]);
 
   // Initial load + SSE watch setup
   useEffect(() => {

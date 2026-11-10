@@ -5,6 +5,7 @@ import React from "react";
 const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react/pure.js");
 
 const { FileViewer } = await import("./FileViewer.tsx");
+const { translate } = await import("@/lib/i18n");
 
 const originalFetch = globalThis.fetch;
 const originalWorker = globalThis.Worker;
@@ -74,4 +75,34 @@ test("relative links and images in a workspace Markdown file still open and load
   assert.match(container.querySelector('img[alt="diagram"]')?.getAttribute("src") ?? "", /^\/api\/files\/.*img\/rel\.png\?.*sessionId=s1/);
   assert.equal(fireEvent.click(getByText("other"), { button: 0 }), false);
   assert.deepEqual(opened, ["/ws/docs/other.md"]);
+});
+
+test("a viewer reads Git changes from its immutable source owner when another owner has the same file path", async () => {
+  globalThis.Worker = class { onmessage = null; onerror = null; postMessage() {} };
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  globalThis.fetch = async (raw) => {
+    const url = new URL(String(raw), "https://omp.test");
+    const owner = url.searchParams.get("sessionId");
+    if (url.pathname === "/api/git/diff") {
+      const marker = owner === "worker-one" ? "FIRST OWNER PATCH" : owner === "worker-two" ? "SECOND OWNER PATCH" : null;
+      return { ok: true, json: async () => marker
+        ? { supported: true, status: "modified", patch: `diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-old\n+${marker}\n` }
+        : { supported: false } };
+    }
+    const content = owner === "worker-one" ? "FIRST OWNER SOURCE" : owner === "worker-two" ? "SECOND OWNER SOURCE" : "CENTRAL DECOY SOURCE";
+    return { ok: true, json: async () => ({ content, language: "text", size: content.length }) };
+  };
+  const props = { filePath: "/shared/shared.txt", cwd: "/shared", sourceSessionId: "worker-one" };
+  const view = render(React.createElement(FileViewer, props));
+  await waitFor(() => assert.ok(view.queryByText("FIRST OWNER SOURCE")));
+  const firstDiff = await waitFor(() => view.getByRole("button", { name: translate("fileViewer.compareWithHead") }));
+  fireEvent.click(firstDiff);
+  await waitFor(() => assert.equal(firstDiff.getAttribute("aria-pressed"), "true"));
+  await waitFor(() => assert.ok(view.queryByText("FIRST OWNER PATCH", { exact: false })));
+  view.rerender(React.createElement(FileViewer, { ...props, sourceSessionId: "worker-two" }));
+  await waitFor(() => assert.ok(view.queryByText("SECOND OWNER SOURCE")));
+  const secondDiff = await waitFor(() => view.getByRole("button", { name: translate("fileViewer.compareWithHead") }));
+  fireEvent.click(secondDiff);
+  await waitFor(() => assert.equal(secondDiff.getAttribute("aria-pressed"), "true"));
+  await waitFor(() => assert.ok(view.queryByText("SECOND OWNER PATCH", { exact: false })));
 });

@@ -38,10 +38,9 @@ import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText }
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
-import { isLinkUp } from "@/lib/hosts/host";
 import { useHostRows } from "@/hooks/useHostRows";
 import { LocalDaemonBanner } from "./LocalDaemonBanner";
-import { hostName, hostStatusText } from "./host-status";
+import { hostName } from "./host-status";
 import { clearDraft } from "@/lib/draft-store";
 import { useNotifications } from "@/hooks/useNotifications";
 import {
@@ -1577,20 +1576,21 @@ export function AppShell({ appName }: { appName: string }) {
     });
   }, [fileTabs]);
 
-  const handleOpenFile = useCallback((filePath: string, fileName: string, sourceSessionId?: string | null) => {
-    const tabId = `file:${filePath}`;
-    setFileTabs((prev) => {
-      const existing = prev.find((t) => t.id === tabId);
-      if (!existing) return [...prev, { id: tabId, label: fileName, filePath, sourceSessionId }];
-      if (!sourceSessionId || existing.sourceSessionId === sourceSessionId) return prev;
-      return prev.map((t) => t.id === tabId ? { ...t, sourceSessionId } : t);
-    });
+  const handleOpenFile = useCallback((filePath: string, fileName: string, sourceSessionId?: string | null, sourceCwd?: string | null) => {
+    const originId = sourceSessionId === undefined ? selectedSession?.id ?? null : sourceSessionId;
+    const originCwd = sourceCwd === undefined
+      ? selectedSession && originId === selectedSession.id ? selectedSession.cwd : originId ? null : activeCwd ?? newSessionCwd
+      : sourceCwd;
+    const tabId = originId ? `file:${originId}:${filePath}` : `file:${filePath}`;
+    setFileTabs((prev) => prev.some((tab) => tab.id === tabId)
+      ? prev
+      : [...prev, { id: tabId, label: fileName, filePath, sourceSessionId: originId, sourceCwd: originCwd }]);
     setActiveFileTabId(tabId);
     setRightView("file");
     setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
+  }, [isMobile, selectedSession, activeCwd, newSessionCwd]);
 
   // Agent open requests that wait for the user. URLs always ask unless the
   // user opted into opening links from the viewed session automatically; URLs
@@ -1674,8 +1674,11 @@ export function AppShell({ appName }: { appName: string }) {
   // chat's, else the sidebar's selection. Undefined is this machine.
   const currentHostId = selectedSession ? remoteHostId(selectedSession.hostId) : newSessionCwd !== null ? newSessionHostId : activeHostId;
   const remoteHost = currentHostId !== undefined;
-  // Files, Git and worktrees only read this machine's disk for now.
-  const explorerCwd = remoteHost || (!selectedSession && newSessionPoolProject) ? null : (sessionWorktreeRemoved ? null : sessionCwd) ?? activeCwd ?? newSessionCwd ?? null;
+  // A prepared real session supplies its owner-bound cwd. An unprepared pool
+  // composer, or a standalone remote target without a session, is not browsable.
+  const explorerCwd = selectedSession
+    ? (sessionWorktreeRemoved && !remoteHost ? activeCwd : sessionCwd)
+    : newSessionPoolProject || activePoolProject || remoteHost ? null : activeCwd ?? newSessionCwd ?? null;
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
   }, [handleOpenFile, selectedSession?.id]);
@@ -1684,22 +1687,22 @@ export function AppShell({ appName }: { appName: string }) {
   // panel behaves like an editor toolbar, not just a tab strip.
   const handleMentionActiveFile = useCallback(() => {
     if (!activeFileTab) return;
-    handleAtMention(getRelativeFilePath(activeFileTab.filePath, explorerCwd ?? undefined), false);
-  }, [activeFileTab, explorerCwd, handleAtMention]);
+    handleAtMention(getRelativeFilePath(activeFileTab.filePath, activeFileTab.sourceCwd ?? undefined), false);
+  }, [activeFileTab, handleAtMention]);
 
   const handleCopyActiveFilePath = useCallback(() => {
     if (!activeFileTab) return;
-    const relative = getRelativeFilePath(activeFileTab.filePath, explorerCwd ?? undefined);
+    const relative = getRelativeFilePath(activeFileTab.filePath, activeFileTab.sourceCwd ?? undefined);
     copyText(relative).then(
       () => toast.success(t("appShell.copied")),
       () => toast.error(t("appShell.commandCopyFailed")),
     );
-  }, [activeFileTab, explorerCwd, t]);
+  }, [activeFileTab, t]);
 
   const handleDownloadActiveFile = useCallback(() => {
     if (!activeFileTab) return;
     const link = document.createElement("a");
-    link.href = `/api/files/${encodeFilePathForApi(activeFileTab.filePath)}?type=download`;
+    link.href = `/api/files/${encodeFilePathForApi(activeFileTab.filePath)}?type=download${activeFileTab.sourceSessionId ? `&sessionId=${encodeURIComponent(activeFileTab.sourceSessionId)}` : ""}`;
     link.download = activeFileTab.label;
     document.body.appendChild(link);
     link.click();
@@ -1707,10 +1710,14 @@ export function AppShell({ appName }: { appName: string }) {
   }, [activeFileTab]);
   const handleRevealActiveFile = useCallback(() => {
     if (!activeFileTab) return;
+    if ((activeFileTab.sourceSessionId && activeFileTab.sourceSessionId !== selectedSession?.id) || (!activeFileTab.sourceSessionId && remoteHost)) {
+      toast.info(t("appShell.revealSourceSession"));
+      return;
+    }
     setRevealPath(activeFileTab.filePath);
     setRightView("explorer");
     setRightPanelOpen(true);
-  }, [activeFileTab]);
+  }, [activeFileTab, selectedSession?.id, remoteHost, t]);
 
   const handleSelectFileTab = useCallback((tabId: string) => {
     setActiveFileTabId(tabId);
@@ -2611,8 +2618,8 @@ export function AppShell({ appName }: { appName: string }) {
               onSessionMoved={handleSessionMoved}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
-              // File links open this machine's files: not for a remote workspace yet.
-              onOpenFile={remoteHost ? undefined : handleOpenLinkedFile}
+              // Real sessions route file links by their immutable owner; fresh pools have no guessed root.
+              onOpenFile={selectedSession || (!effectivePoolProject && !remoteHost) ? handleOpenLinkedFile : undefined}
               onOpenUrl={handleSessionOpenUrl}
               onBranchDataChange={handleBranchDataChange}
               onSystemPromptChange={handleSystemPromptChange}
@@ -2717,6 +2724,7 @@ export function AppShell({ appName }: { appName: string }) {
         revealPath={revealPath}
         onRevealDone={handleRevealDone}
         explorerCwd={explorerCwd}
+        sourceSessionId={selectedSession?.id ?? null}
         remoteHost={remoteHost}
         worktrees={worktreeCtx}
         connectionDiagnosticsOn={connectionDiagnosticsOn}

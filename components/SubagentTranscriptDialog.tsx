@@ -140,21 +140,21 @@ function JsonValue({ value }: { value: unknown }) {
 }
 
 /** The subagent's assignment, rendered as markdown. Exported for SSR tests. */
-export function TaskBlock({ task }: { task: string }) {
+export function TaskBlock({ task, sourceSessionId }: { task: string; sourceSessionId?: string | null }) {
   const { t } = useI18n();
   if (!task) return null;
   return (
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", padding: "10px 12px" }}>
       <span style={BLOCK_LABEL_STYLE}>{t("subagentTranscript.taskLabel")}</span>
       <div style={{ marginTop: 6 }}>
-        <MarkdownBody className="markdown-subagent-text">{task}</MarkdownBody>
+        <MarkdownBody className="markdown-subagent-text" sourceSessionId={sourceSessionId}>{task}</MarkdownBody>
       </div>
     </section>
   );
 }
 
 /** The subagent's final output (`<id>.md`). Exported for SSR tests. */
-export function CompletionBlock({ completion, truncated }: { completion: string | null; truncated: boolean }) {
+export function CompletionBlock({ completion, truncated, sourceSessionId }: { completion: string | null; truncated: boolean; sourceSessionId?: string | null }) {
   const { t } = useI18n();
   let parsed: Record<string, unknown> | null = null;
   if (completion) {
@@ -185,7 +185,7 @@ export function CompletionBlock({ completion, truncated }: { completion: string 
         </div>
       ) : completion ? (
         <div style={{ marginTop: 6 }}>
-          <MarkdownBody className="markdown-subagent-text">{completion}</MarkdownBody>
+          <MarkdownBody className="markdown-subagent-text" sourceSessionId={sourceSessionId}>{completion}</MarkdownBody>
         </div>
       ) : (
         <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-dim)", fontStyle: "italic" }}>
@@ -471,8 +471,8 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
               <div style={{ fontSize: 12, color: "var(--status-error)", padding: "8px 2px" }}>{error}</div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <TaskBlock task={task} />
-                <CompletionBlock completion={completion} truncated={completionTruncated} />
+                <TaskBlock task={task} sourceSessionId={sessionId} />
+                <CompletionBlock completion={completion} truncated={completionTruncated} sourceSessionId={sessionId} />
                 {loading && <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("subagentTranscript.loading")}</div>}
                 <button
                   type="button"

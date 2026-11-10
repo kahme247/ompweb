@@ -23,14 +23,16 @@ const COLLAPSE_REASON_LABEL_KEYS: Record<GitCollapseReason, string> = {
 
 interface Props {
   cwd: string;
+  sourceSessionId?: string | null;
   refreshKey?: number;
-  onOpenFile: (filePath: string, fileName: string) => void;
+  onOpenFile: (filePath: string, fileName: string, sourceSessionId?: string | null) => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onRefreshDone?: () => void;
 }
 
-async function fetchStatus(cwd: string): Promise<GitStatusResponse> {
+async function fetchStatus(cwd: string, sourceSessionId?: string | null): Promise<GitStatusResponse> {
   const params = new URLSearchParams({ cwd });
+  if (sourceSessionId) params.set("sessionId", sourceSessionId);
   const res = await fetch(`/api/git/status?${params.toString()}`);
   if (!res.ok) {
     throw new Error(translate("gitChanges.loadFailed", { status: res.status }));
@@ -38,8 +40,9 @@ async function fetchStatus(cwd: string): Promise<GitStatusResponse> {
   return res.json() as Promise<GitStatusResponse>;
 }
 
-async function fetchPatch(cwd: string, filePath: string): Promise<GitFileDiffResponse> {
+async function fetchPatch(cwd: string, filePath: string, sourceSessionId?: string | null): Promise<GitFileDiffResponse> {
   const params = new URLSearchParams({ cwd, path: filePath });
+  if (sourceSessionId) params.set("sessionId", sourceSessionId);
   const res = await fetch(`/api/git/diff?${params.toString()}`);
   if (!res.ok) {
     throw new Error(translate("gitChanges.diffLoadFailed", { status: res.status }));
@@ -47,7 +50,7 @@ async function fetchPatch(cwd: string, filePath: string): Promise<GitFileDiffRes
   return res.json() as Promise<GitFileDiffResponse>;
 }
 
-export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRefreshDone }: Props) {
+export function GitChangesPanel({ cwd, sourceSessionId, refreshKey, onOpenFile, onAtMention, onRefreshDone }: Props) {
   const { t, tn } = useI18n();
   const [files, setFiles] = useState<GitStatusResponse["files"]>([]);
   const [isRepo, setIsRepo] = useState(false);
@@ -76,7 +79,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchStatus(cwd)
+    fetchStatus(cwd, sourceSessionId)
       .then((status) => {
         if (cancelled) return;
         const nextFiles = status.isGitRepository ? status.files : [];
@@ -105,7 +108,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
         onRefreshDoneRef.current?.();
       });
     return () => { cancelled = true; };
-  }, [cwd, refreshToken]);
+  }, [cwd, sourceSessionId, refreshToken]);
 
   useEffect(() => {
     if (!selectedPath) {
@@ -117,7 +120,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
     const requestId = ++patchRequestRef.current;
     setPatchLoading(true);
     setPatchError(null);
-    fetchPatch(cwd, selectedPath)
+    fetchPatch(cwd, selectedPath, sourceSessionId)
       .then((diff) => {
         if (requestId !== patchRequestRef.current) return;
         setPatchSupported(diff.supported);
@@ -132,7 +135,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
       .finally(() => {
         if (requestId === patchRequestRef.current) setPatchLoading(false);
       });
-  }, [cwd, selectedPath, refreshToken]);
+  }, [cwd, sourceSessionId, selectedPath, refreshToken]);
 
   const [primaryFiles, attributeFiles] = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -146,8 +149,8 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
   const selectedRelative = selectedPath ? getRelativeFilePath(selectedPath, cwd) : "";
 
   const openSelected = useCallback(() => {
-    if (selectedPath) onOpenFile(selectedPath, getFileName(selectedPath));
-  }, [selectedPath, onOpenFile]);
+    if (selectedPath) onOpenFile(selectedPath, getFileName(selectedPath), sourceSessionId);
+  }, [selectedPath, onOpenFile, sourceSessionId]);
 
   const mentionSelected = useCallback(() => {
     if (selectedPath) onAtMention?.(getRelativeFilePath(selectedPath, cwd), false);
@@ -169,11 +172,11 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
         aria-selected={isSelected}
         aria-label={`${name} (${t(GIT_STATUS_LABEL_KEYS[file.status])}${reasonLabel ? `, ${reasonLabel}` : ""})`}
         onClick={() => setSelectedPath(file.filePath)}
-        onDoubleClick={() => onOpenFile(file.filePath, getFileName(file.filePath))}
+        onDoubleClick={() => onOpenFile(file.filePath, getFileName(file.filePath), sourceSessionId)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();
-            onOpenFile(file.filePath, getFileName(file.filePath));
+            onOpenFile(file.filePath, getFileName(file.filePath), sourceSessionId);
           } else if (e.key === " ") {
             e.preventDefault();
             setSelectedPath(file.filePath);
@@ -256,7 +259,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
           type="button"
           onClick={(e) => {
             e.stopPropagation();
-            onOpenFile(file.filePath, getFileName(file.filePath));
+            onOpenFile(file.filePath, getFileName(file.filePath), sourceSessionId);
           }}
           title={t("gitChanges.openFile")}
           aria-label={t("gitChanges.openFile")}

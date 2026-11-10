@@ -996,6 +996,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     onFollowUp: (question) => askBtw(question, activeBtwRecord.id),
     onClose: () => btw.setActiveId(null),
     cwd: messageCwd,
+    sourceSessionId: session?.id ?? sessionIdRef.current,
     onOpenFile,
   } : null;
 
@@ -1277,6 +1278,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
         records={btw.records}
         onFollowUp={(recordId) => { btw.setActiveId(recordId); btw.setHistoryOpen(false); }}
         cwd={messageCwd}
+        sourceSessionId={session?.id ?? sessionIdRef.current}
         onOpenFile={onOpenFile}
       />
 

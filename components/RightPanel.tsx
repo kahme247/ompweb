@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useState, type Ref, type RefObject } from "react";
+import { memo, useCallback, useEffect, useState, type Ref, type RefObject } from "react";
 import {
   AtSign,
   ChevronsDownUp,
@@ -45,7 +45,8 @@ interface Props {
   revealPath: string | null;
   onRevealDone: () => void;
   explorerCwd: string | null;
-  /** The workspace lives on a remote host: Files, Git and Worktrees are not available there yet. */
+  sourceSessionId?: string | null;
+  /** Worktree administration still requires local-host support. */
   remoteHost: boolean;
   /** Active Git workspace's worktrees (null when it is not a Git top-level repo). */
   worktrees: WorktreeContext | null;
@@ -65,7 +66,7 @@ interface Props {
   explorerRefreshing: boolean;
   isMobile: boolean;
   isCompactOverlay: boolean;
-  onOpenFile: (filePath: string, fileName: string, sourceSessionId?: string | null) => void;
+  onOpenFile: (filePath: string, fileName: string, sourceSessionId?: string | null, sourceCwd?: string | null) => void;
   onSelectFileTab: (id: string) => void;
   onCloseFileTab: (id: string) => void;
   onCloseOtherFileTabs: () => void;
@@ -104,6 +105,7 @@ export const RightPanel = memo(function RightPanel({
   revealPath,
   onRevealDone,
   explorerCwd,
+  sourceSessionId,
   remoteHost,
   worktrees,
   connectionDiagnosticsOn,
@@ -140,6 +142,9 @@ export const RightPanel = memo(function RightPanel({
   onRightPanelResizeKey,
 }: Props) {
   const { t } = useI18n();
+  const openWorkspaceFile = useCallback((filePath: string, fileName: string) => {
+    onOpenFile(filePath, fileName, sourceSessionId ?? null, explorerCwd);
+  }, [onOpenFile, sourceSessionId, explorerCwd]);
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const gitBadge = explorerIsRepo ? explorerGitCount : 0;
   const unreadNotifications = useUnreadNotificationCount();
@@ -423,9 +428,11 @@ export const RightPanel = memo(function RightPanel({
               </div>
               <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
                 <FileExplorer
+                  key={`${sourceSessionId ?? "local"}:${explorerCwd}`}
                   ref={fileExplorerRef}
                   cwd={explorerCwd}
-                  onOpenFile={onOpenFile}
+                  sourceSessionId={sourceSessionId}
+                  onOpenFile={openWorkspaceFile}
                   refreshKey={explorerRefreshKey}
                   onAtMention={onAtMention}
                   onAtMentions={onAtMentions}
@@ -434,7 +441,7 @@ export const RightPanel = memo(function RightPanel({
                   fileSearchOpen={fileSearchOpen}
                   onFileSearchOpenChange={onFileSearchOpenChange}
                   showHidden={showHiddenFiles}
-                  activeFilePath={activeFileTab?.filePath ?? null}
+                  activeFilePath={activeFileTab && activeFileTab.sourceSessionId === (sourceSessionId ?? null) ? activeFileTab.filePath : null}
                   revealPath={revealPath}
                   onRevealDone={onRevealDone}
                   onGitStatusChange={onExplorerGitStatus}
@@ -453,9 +460,11 @@ export const RightPanel = memo(function RightPanel({
         <div id="workspace-file-panel-git" role="tabpanel" aria-label={t("tabBar.git")} style={{ display: rightView === "git" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {visitedViews.has("git") && (explorerCwd ? (
             <GitChangesPanel
+              key={`${sourceSessionId ?? "local"}:${explorerCwd}`}
               cwd={explorerCwd}
+              sourceSessionId={sourceSessionId}
               refreshKey={explorerRefreshKey}
-              onOpenFile={onOpenFile}
+              onOpenFile={openWorkspaceFile}
               onAtMention={onAtMention}
               onRefreshDone={onExplorerRefreshDone}
             />
@@ -485,15 +494,16 @@ export const RightPanel = memo(function RightPanel({
             <div key={tab.id} style={{ display: tab.id === activeFileTabId ? "block" : "none", height: "100%" }}>
               <FileViewer
                 filePath={tab.filePath}
-                cwd={explorerCwd ?? undefined}
+                cwd={tab.sourceCwd ?? undefined}
                 sourceSessionId={tab.sourceSessionId}
                 gitRefreshKey={explorerRefreshKey}
                 active={tab.id === activeFileTabId && rightPanelOpen && rightView === "file"}
-                onMentionLines={tab.id === activeFileTabId && rightPanelOpen && rightView === "file" ? onMentionLines : undefined}
+                onMentionLines={tab.id === activeFileTabId && rightPanelOpen && rightView === "file" && tab.sourceSessionId === (sourceSessionId ?? null) ? onMentionLines : undefined}
                 onOpenFile={(filePath) => onOpenFile(
                   filePath,
                   getFileName(filePath),
                   tab.sourceSessionId,
+                  tab.sourceCwd,
                 )}
               />
             </div>

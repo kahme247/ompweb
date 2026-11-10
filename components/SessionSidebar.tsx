@@ -154,9 +154,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [selectedPoolKey, setSelectedPoolKey] = useState<string | null>(null);
   const { hosts, pools, poolsLoaded, poolsFailed } = useHostRows();
   const hostList = useMemo(() => {
-    const members = new Set(pools.flatMap((pool) => pool.members.map((member) => member.hostId)));
-    return [...(hosts ?? [THIS_MACHINE]).filter((host) => !members.has(host.id) && (poolsLoaded || host.id === LOCAL_HOST_ID)), ...pools.map((pool) => ({ id: `pool:${pool.id}`, label: pool.label }))];
-  }, [hosts, pools, poolsLoaded]);
+    // Physical groups keep existing owner-bound work visible; only creation controls filter members.
+    return [...(hosts ?? [THIS_MACHINE]), ...pools.map((pool) => ({ id: `pool:${pool.id}`, label: pool.label }))];
+  }, [hosts, pools]);
   // Host group headers only exist once a remote host is linked.
   const showHostGroups = hostList.some((host) => host.id !== LOCAL_HOST_ID);
   // The server renders no groups; collapse state is read after mount.
@@ -1814,6 +1814,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             });
             if (!showHostGroups) return rows;
             const row = hosts?.find((candidate) => candidate.id === host.id);
+            const member = pools.some((pool) => pool.members.some((member) => member.hostId === host.id));
+            if (member && entries.length === 0) return null;
+            const canAdd = host.id === LOCAL_HOST_ID || host.id.startsWith("pool:") || (poolsLoaded && !member);
             return (
               <HostGroup
                 key={host.id}
@@ -1823,10 +1826,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 unavailableReason={hostUnavailableReason(host.id)}
                 collapsed={collapsedHosts.has(host.id)}
                 onToggle={() => toggleHostCollapsed(host.id)}
-                onAdd={() => {
+                onAdd={canAdd ? () => {
                   setAddProjectOpen(true, host.id);
                   setAddProjectError(null);
-                }}
+                } : undefined}
                 empty={entries.length === 0 ? t("projects.noProjects") : null}
               >
                 {rows}

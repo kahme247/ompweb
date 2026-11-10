@@ -363,6 +363,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const knownSlashCommandNamesRef = useRef<string[]>([]);
   const warnedSlashCommandsRef = useRef(new Set<string>());
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
+  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
+    const message = notice.message.trim();
+    if (!message) return;
+    dispatchNotice({
+      type: "add",
+      notice: {
+        id: notice.id ?? createNoticeId(),
+        message,
+        type: notice.type ?? "info",
+      },
+    });
+  }, []);
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const extensionDialogClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -458,6 +470,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // must therefore be settled by the same owner that replaces/unmounts it.
   const cancelEventConnectionRef = useRef<(() => void) | null>(null);
   const reconnectTimerRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const reportedCreationErrorsRef = useRef(new WeakSet<Error>());
   const eventStreamRetryMsRef = useRef<number>(EVENT_STREAM_RETRY_MIN_MS);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const creationBodyRef = useRef<{ json: string; advisor: boolean } | null>(null);
@@ -1120,8 +1133,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       };
       // A journal ID describes one immutable initialization, even after a lost answer.
       if (pooled && creationBodyRef.current === null) {
-        const initialization = newSessionInitialization ? JSON.parse(newSessionInitialization) as typeof request : request;
-        if (initialization.type !== "ensure_session" || initialization.creationId !== newSessionCreationId || initialization.poolId !== newSessionPoolId || initialization.projectId !== newSessionProjectId || "cwd" in initialization || "hostId" in initialization || "message" in initialization) {
+        const initialization: unknown = newSessionInitialization ? JSON.parse(newSessionInitialization) : request;
+        if (!isRecord(initialization) || initialization.type !== "ensure_session" || initialization.creationId !== newSessionCreationId || initialization.poolId !== newSessionPoolId || initialization.projectId !== newSessionProjectId || "cwd" in initialization || "hostId" in initialization || "message" in initialization) {
           throw new Error(translate("agentSession.invalidPoolTarget"));
         }
         creationBodyRef.current = { json: newSessionInitialization ?? JSON.stringify(request), advisor: initialization.advisor === true };
@@ -1161,12 +1174,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         observeCreatedSessionRef.current?.(realId);
       }
       if (offline) {
-        if (hookAliveRef.current) promoteNewSession();
+        if (hookAliveRef.current && !pooled) promoteNewSession();
         if (pooled && body.delivery === "unknown" && body.hostOffline !== true) throw new Error(formatApiError(body));
         throw new HostOfflineError(formatApiError(body), body.delivery === "unknown");
       }
       return realId;
-    })();
+    })().catch((error: unknown) => {
+      if (!pooled) throw error;
+      const failure = error instanceof Error ? error : new Error(String(error));
+      reportedCreationErrorsRef.current.add(failure);
+      if (hookAliveRef.current) addNotice({ type: "error", message: failure.message });
+      throw failure;
+    });
 
     ensuringNewSessionRef.current = promise;
     try {
@@ -1174,16 +1193,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [advisorEnabled, isNew, pooled, newSessionCwd, newSessionHostId, newSessionCreationId, newSessionPoolId, newSessionProjectId, newSessionInitialization, onNewSessionInitialization, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, promoteNewSession]);
+  }, [advisorEnabled, isNew, pooled, newSessionCwd, newSessionHostId, newSessionCreationId, newSessionPoolId, newSessionProjectId, newSessionInitialization, onNewSessionInitialization, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, promoteNewSession, addNotice]);
 
   const resolveUploadHost = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
     if (!sid) throw new Error(translate("agentSession.uploadOwnerUnavailable"));
     const hostId = createdOwnerRef.current?.hostId ?? session?.hostId;
     if (pooled && !hostId) throw new Error(translate("agentSession.uploadOwnerUnavailable"));
-    if (hookAliveRef.current) promoteNewSession();
     return hostId ?? "local";
-  }, [ensureNewSession, pooled, promoteNewSession, session?.hostId]);
+  }, [ensureNewSession, pooled, session?.hostId]);
 
   // The system panel may initialize a dormant session, but must not create a
   // prompt or model run just to inspect the resolved system prompt.
@@ -1551,18 +1569,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
-    const message = notice.message.trim();
-    if (!message) return;
-    dispatchNotice({
-      type: "add",
-      notice: {
-        id: notice.id ?? createNoticeId(),
-        message,
-        type: notice.type ?? "info",
-      },
-    });
-  }, []);
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
@@ -2991,8 +2997,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Every failure here (stream connect, startup, set_model, or the prompt
       // POST itself) leaves no run to show, so roll back the optimistic bubble.
       setOptimisticUserMessage(null);
-      const mayHaveRun = toastStoppedSend(e, promptIssued);
-      if (mayHaveRun === null) {
+      const alreadyReported = e instanceof Error && reportedCreationErrorsRef.current.has(e);
+      const mayHaveRun = alreadyReported ? false : toastStoppedSend(e, promptIssued);
+      if (!alreadyReported && mayHaveRun === null) {
         addNotice({
           type: "error",
           message: e instanceof EventStreamConnectionError
@@ -3124,8 +3131,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to execute shell command:", e);
       // A stopped connection may have delivered the command: it toasts and the composer does not offer it again.
-      const mayHaveRun = toastStoppedSend(e);
-      if (mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      const alreadyReported = e instanceof Error && reportedCreationErrorsRef.current.has(e);
+      const mayHaveRun = alreadyReported ? false : toastStoppedSend(e);
+      if (!alreadyReported && mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       if (!mayHaveRun) opts.chatInputRef?.current?.insertIfEmpty(inputText);
     } finally {
       bashRunningRef.current = false;
@@ -3713,7 +3721,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (accepted && ownerCurrent) promoteNewSession();
       return ownerCurrent;
     } catch (error) {
-      toastBtwError(error);
+      if (!(error instanceof Error && reportedCreationErrorsRef.current.has(error))) toastBtwError(error);
       return false;
     } finally {
       btwAskPendingRef.current = false;
@@ -3858,6 +3866,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }
     } catch (e) {
+      if (e instanceof Error && reportedCreationErrorsRef.current.has(e)) return { handled: true, error: e.message };
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
     } finally {
       if (commandName === "compact") {
