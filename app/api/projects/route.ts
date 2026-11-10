@@ -176,6 +176,7 @@ export async function PATCH(req: Request) {
     for (const item of rawUpdates) {
       if (!isRecord(item)) throw new ProjectPathError("invalid_target", "Project update must be an object");
       const entry = item;
+      if (entry.poolId !== undefined || entry.projectId !== undefined) throw new ProjectPathError("invalid_target", "Pool and host/path targets cannot be mixed");
       const cwd = typeof entry.cwd === "string" ? entry.cwd.trim() : "";
       if (!cwd) return Response.json({ error: "Path is required", code: "path_required" }, { status: 400 });
       parsed.push({ cwd, ...parsePresentation(entry) });
