@@ -44,8 +44,19 @@ async function findRepositoryRoot(cwd: string): Promise<string | null> {
   }
 }
 
+function canonicalizePath(p: string): string {
+  // Resolve symlinks so a project opened through a symlinked path compares
+  // equal to the canonical repository root git reports (#322). Missing paths
+  // (e.g. deleted files in a status listing) keep the lexical resolution.
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
 function isWithinPath(parent: string, target: string): boolean {
-  const relative = path.relative(path.resolve(parent), path.resolve(target));
+  const relative = path.relative(canonicalizePath(parent), canonicalizePath(target));
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
