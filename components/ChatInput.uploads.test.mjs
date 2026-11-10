@@ -2,6 +2,9 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { after, afterEach } from "node:test";
 import React from "react";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 
 const { ChatInput } = await import("./ChatInput.tsx");
@@ -17,10 +20,12 @@ const previousFetch = globalThis.fetch;
 const requests = [];
 let gate = Promise.resolve();
 let failNextPut = null;
+let realUploadRoutes = null;
 globalThis.fetch = async (url, init = {}) => {
   const method = init.method ?? "GET";
   requests.push({ url: String(url), method, body: init.body, signal: init.signal });
   const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  if (realUploadRoutes && String(url).startsWith("/api/uploads")) return realUploadRoutes(url, init);
   if (url === "/api/uploads" && method === "POST") return json({ received: 0 });
   if (String(url).startsWith("/api/uploads/") && method === "PUT") {
     await gate;
@@ -140,6 +145,48 @@ const deleted = (id) => requests.some((each) => each.method === "DELETE" && each
 const chipOf = (name) => screen.getByText(name).parentElement;
 const pressEnter = () => act(async () => { fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" }); });
 
+/** Reuse the uploads server suite's loopback daemon fixture so ID-bound PUTs reach real staged files. */
+async function uploadOwner(t) {
+  const scratch = mkdtempSync(join(tmpdir(), "omp-composer-owner-"));
+  const previous = { agentDir: process.env.PI_CODING_AGENT_DIR, ompBin: process.env.OMP_WEB_OMP_BIN };
+  process.env.PI_CODING_AGENT_DIR = join(scratch, "agent");
+  process.env.OMP_WEB_OMP_BIN = join(scratch, "no-omp");
+  const linkRoute = await import("../app/api/hosts/link/route.ts");
+  const uploadsRoute = await import("../app/api/uploads/route.ts");
+  const uploadRoute = await import("../app/api/uploads/[id]/route.ts");
+  const hub = await import("../lib/hosts/hub.ts");
+  const { createHost } = await import("../lib/hosts/registry.ts");
+  const { runHostDaemon } = await import("../lib/hosts/daemon.ts");
+  const server = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    routes: { "/api/hosts/link": { GET: (req) => linkRoute.GET(req, { upgrade: (data) => server.upgrade(req, { data }) }) } },
+    websocket: hub.hostLinkSocket,
+    fetch: () => new Response("not found", { status: 404 }),
+  });
+  const { host, token } = createHost("Composer upload owner");
+  const daemon = runHostDaemon({ url: `http://127.0.0.1:${server.port}`, token, allowHttp: false });
+  t.after(async () => {
+    cleanup();
+    realUploadRoutes = null;
+    await daemon.stop();
+    await server.stop(true);
+    hub.flushLinkSamples();
+    for (const [key, value] of [["PI_CODING_AGENT_DIR", previous.agentDir], ["OMP_WEB_OMP_BIN", previous.ompBin]]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(scratch, { recursive: true, force: true });
+  });
+  await waitFor(() => assert.ok(["online", "omp-missing"].includes(hub.getHost(host.id).status())), { timeout: 5000 });
+  realUploadRoutes = (url, init) => {
+    const req = new Request(new URL(String(url), "http://composer.test"), init);
+    if (String(url) === "/api/uploads") return uploadsRoute.POST(req);
+    const context = { params: Promise.resolve({ id: new URL(req.url).pathname.split("/").at(-1) }) };
+    return init.method === "DELETE" ? uploadRoute.DELETE(req, context) : uploadRoute.PUT(req, context);
+  };
+  return { hostId: host.id, staged: (id) => readFileSync(join(scratch, "agent", "omp-web", "uploads", `${id}.part`)) };
+}
+
 test("a .zip becomes a file chip, uploads on attach, and its id goes with the prompt", async () => {
   const sent = [];
   const ref = renderComposer("uploads-zip", sent);
@@ -159,6 +206,57 @@ test("a .zip becomes a file chip, uploads on attach, and its id goes with the pr
   assert.deepEqual([name, size, host], ["data.zip", zip.size, "local"]);
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0], ["", undefined, [id]], "no images, the upload's id");
+});
+
+test("a pooled file waits for its owner before any upload begins, then persists bytes only on that owner", async (t) => {
+  const worker = await uploadOwner(t);
+  const file = binaryFile("pool-owned.zip");
+  let resolveOwner;
+  const owner = new Promise((resolve) => { resolveOwner = resolve; });
+  const ref = renderComposer("new:pool:workers:app", [], { resolveUploadHost: () => owner });
+  await act(async () => { ref.current.addFiles([file]); });
+  assert.ok(screen.getByText("pool-owned.zip"), "the pending file remains visible");
+  assert.equal(requests.filter((request) => request.url.startsWith("/api/uploads")).length, 0, "not even upload begin may default to the Mac");
+  await act(async () => { resolveOwner(worker.hostId); });
+  const upload = await opened("pool-owned.zip");
+  await putOf(upload.id);
+  await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+  assert.equal(upload.host, worker.hostId);
+  assert.deepEqual(worker.staged(upload.id), Buffer.from(await file.arrayBuffer()));
+});
+
+test("failed pool owner resolution leaves a retryable file and never uploads locally", async () => {
+  let resolveOwner;
+  const owner = new Promise((_resolve, reject) => { resolveOwner = reject; });
+  const ref = renderComposer("new:pool:workers:unavailable", [], { resolveUploadHost: () => owner });
+  await act(async () => { ref.current.addFiles([binaryFile("unplaced.zip")]); });
+  await act(async () => { resolveOwner(new Error("No eligible pool worker")); });
+  await waitFor(() => assert.ok(within(chipOf("unplaced.zip")).getByRole("button", { name: RETRY })));
+  assert.equal(requests.filter((request) => request.url.startsWith("/api/uploads")).length, 0);
+  assert.equal(screen.getByRole("button", { name: SEND }).disabled, true);
+});
+
+test("removing a file while its pool owner resolves cannot start a late upload", async () => {
+  let resolveOwner;
+  const owner = new Promise((resolve) => { resolveOwner = resolve; });
+  const ref = renderComposer("new:pool:workers:cancelled", [], { resolveUploadHost: () => owner });
+  await act(async () => { ref.current.addFiles([binaryFile("cancelled-owner.zip")]); });
+  await act(async () => { within(chipOf("cancelled-owner.zip")).getByRole("button", { name: REMOVE_FILE }).click(); });
+  await act(async () => { resolveOwner("h2"); });
+  assert.equal(screen.queryByText("cancelled-owner.zip"), null);
+  assert.equal(requests.filter((request) => request.url.startsWith("/api/uploads")).length, 0);
+});
+
+test("a session with a known owner persists file uploads on that host", async (t) => {
+  const worker = await uploadOwner(t);
+  const file = binaryFile("known-owner.zip");
+  const ref = renderComposer("known-pool-session", [], { uploadHostId: worker.hostId });
+  await act(async () => { ref.current.addFiles([file]); });
+  const upload = await opened("known-owner.zip");
+  await putOf(upload.id);
+  await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+  assert.equal(upload.host, worker.hostId);
+  assert.deepEqual(worker.staged(upload.id), Buffer.from(await file.arrayBuffer()));
 });
 
 test("an image over the inline budget goes As file with a notice, and Send waits for its upload", async () => {

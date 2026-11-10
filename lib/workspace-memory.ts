@@ -1,4 +1,3 @@
-import type { SessionInfo } from "./types";
 
 const STORAGE_KEY = "omp-web:last-open-by-project";
 
@@ -29,8 +28,9 @@ function readEntries(storage: StorageLike): Record<string, string> {
   }
 }
 
-export function workspaceKeyOf(session: Pick<SessionInfo, "cwd" | "projectRoot" | "projectKey">): string {
-  return session.projectKey ?? session.projectRoot ?? session.cwd;
+export function workspaceKeyOf(workspace: { cwd?: string; path?: string; projectRoot?: string; projectKey?: string; poolId?: string; projectId?: string }): string {
+  if (workspace.poolId && workspace.projectId) return workspace.projectKey ?? `pool:${workspace.poolId}:${workspace.projectId}`;
+  return workspace.projectKey ?? workspace.projectRoot ?? workspace.cwd ?? workspace.path ?? "";
 }
 
 export function getLastOpenSession(workspace: string, storage: StorageLike | null = browserStorage()): string | null {

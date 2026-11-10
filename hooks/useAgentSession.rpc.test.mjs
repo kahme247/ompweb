@@ -5094,6 +5094,170 @@ test("a fresh chat whose host drops after the spawn adopts the kept session, so 
   assert.equal(callsTo("POST", "/api/agent/kept-remote").some((call) => call.body?.type === "prompt"), true);
 });
 
+test("a lost pooled creation response retries the original identity and frozen initialization, then adopts its owner", async () => {
+  resetWorld();
+  const creationId = "e740daaa-78c7-46ae-9985-409064653f01";
+  const journal = new Map();
+  let loseResponse = true;
+  const create = async () => {
+    const request = callsTo("POST", "/api/agent/new").at(-1).body;
+    if (!journal.has(request.creationId)) {
+      journal.set(request.creationId, { sessionId: "pooled-original", hostId: "h2", cwd: "/worker-2/worktrees/original" });
+      primeSession("pooled-original", []);
+    }
+    if (loseResponse) {
+      loseResponse = false;
+      throw new TypeError("Response lost after creation");
+    }
+    return { value: { success: true, ...journal.get(request.creationId), data: {} } };
+  };
+  world.holds.push(
+    { match: (method, url) => method === "POST" && url === "/api/agent/new", produce: create },
+    { match: (method, url) => method === "POST" && url === "/api/agent/new", produce: create },
+  );
+  const promoted = [];
+  const w = await mountSession(null, undefined, {
+    newSessionCwd: "/diagnostic/representative", newSessionHostId: "h1",
+    newSessionCreationId: creationId, newSessionPoolId: "workers", newSessionProjectId: "app",
+    onSessionCreated: (session) => promoted.push(session),
+  });
+  await act(async () => { await w.latest.loadSlashCommands().catch(() => []); });
+  await act(async () => {
+    await w.latest.handleModelChange("anthropic", "changed-after-loss");
+    await w.latest.handleThinkingLevelChange("high");
+    await w.latest.handleToolPresetChange("none");
+    w.latest.handleAdvisorChange(true);
+  });
+  await act(async () => { await w.latest.loadSlashCommands(); });
+  let sending;
+  await act(async () => { sending = w.latest.handleSend("first prompt"); await sleep(30); });
+  let receipt;
+  await act(async () => { lastEs()?.open(); receipt = await sending; });
+  w.unmount();
+  const requests = callsTo("POST", "/api/agent/new").map((call) => call.body);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].creationId, creationId);
+  assert.equal(requests[0].poolId, "workers");
+  assert.equal(requests[0].projectId, "app");
+  assert.equal("cwd" in requests[0], false, "a representative checkout is not a creation target");
+  assert.equal("hostId" in requests[0], false);
+  assert.deepEqual(requests[1], requests[0], "a retry must not change an already-journaled initialization");
+  assert.equal(requests[1].type, "ensure_session", "the first prompt uses the owner route, not a changed creation intent");
+  assert.equal(journal.size, 1);
+  assert.equal(receipt.status, "accepted");
+  assert.deepEqual(promoted.map(({ id, hostId, cwd, poolId, projectId }) => ({ id, hostId, cwd, poolId, projectId })), [
+    { id: "pooled-original", hostId: "h2", cwd: "/worker-2/worktrees/original", poolId: "workers", projectId: "app" },
+  ]);
+  assert.equal(callsTo("POST", "/api/agent/pooled-original").filter((call) => call.body?.type === "prompt").length, 1);
+});
+
+test("pooled creation uncertainty with a known id adopts the owner without resending the initial command", async () => {
+  resetWorld();
+  const owner = { sessionId: "uncertain-owner", hostId: "h2", cwd: "/worker-2/worktrees/uncertain" };
+  primeSession(owner.sessionId, []);
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({
+      status: 503,
+      value: { ...owner, error: "The initialization answer was lost", code: "pool_delivery_unknown", delivery: "unknown" },
+    }),
+  });
+  const promoted = [];
+  const w = await mountSession(null, undefined, {
+    newSessionCwd: "/diagnostic/representative", newSessionHostId: "h1",
+    newSessionCreationId: "9eaaed5b-773b-419a-b03e-9b07866623a1", newSessionPoolId: "workers", newSessionProjectId: "app",
+    onSessionCreated: (session) => promoted.push(session),
+  });
+  let first;
+  await act(async () => { first = await w.latest.handleSend("do not resend automatically"); await sleep(30); });
+  assert.equal(first.status, "rejected");
+  assert.equal(w.latest.sessionIdRef.current, owner.sessionId);
+  assert.equal(callsTo("POST", `/api/agent/${owner.sessionId}`).filter((call) => call.body?.type === "prompt").length, 0);
+  let retry;
+  await act(async () => { retry = w.latest.handleSend("explicit retry"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); retry = await retry; });
+  w.unmount();
+  assert.equal(retry.status, "accepted");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1, "a known owner is never placed again");
+  assert.deepEqual(promoted.map(({ hostId, cwd }) => ({ hostId, cwd })), [{ hostId: "h2", cwd: owner.cwd }]);
+  assert.deepEqual(callsTo("POST", `/api/agent/${owner.sessionId}`).filter((call) => call.body?.type === "prompt").map((call) => call.body.message), ["explicit retry"]);
+});
+
+test("a pooled session whose owner is offline never creates on another target", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 503, value: {
+      sessionId: "offline-pool-owner", hostId: "h2", cwd: "/worker-2/worktrees/offline",
+      error: "Owner is offline", code: "host_offline", delivery: "refused",
+    } }),
+  });
+  const w = await mountSession(null, undefined, {
+    newSessionCwd: "/diagnostic/representative", newSessionHostId: "h1",
+    newSessionCreationId: "3af9fe09-0719-4942-b105-755ed9b0c5ec", newSessionPoolId: "workers", newSessionProjectId: "app",
+  });
+  await act(async () => { await w.latest.handleSend("first"); });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.includes("/api/agent/offline-pool-owner") && body?.type === "prompt",
+    produce: async () => ({ status: 503, value: { error: "Owner is offline", code: "host_offline", hostOffline: true, delivery: "refused" } }),
+  });
+  let retry;
+  await act(async () => { retry = w.latest.handleSend("retry"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); retry = await retry; });
+  w.unmount();
+  assert.equal(retry.status, "rejected");
+  assert.equal(w.latest.sessionIdRef.current, "offline-pool-owner");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1);
+});
+
+test("choosing a different logical project starts a distinct creation intent without a representative path", async () => {
+  resetWorld();
+  const ids = ["a0f374af-d4cd-4ce0-8d24-e417fa5ad60c", "b2317aee-c4a0-411e-bd6e-49837012ae96"];
+  for (const [index, projectId] of ["app", "other-app"].entries()) {
+    world.holds.push({
+      match: (method, url) => method === "POST" && url === "/api/agent/new",
+      produce: async () => ({ status: 503, value: { error: "No capacity", code: "pool_unavailable" } }),
+    });
+    const w = await mountSession(null, undefined, {
+      newSessionCwd: null, newSessionCreationId: ids[index], newSessionPoolId: "workers", newSessionProjectId: projectId,
+    });
+    await act(async () => { await w.latest.loadSlashCommands().catch(() => []); });
+    w.unmount();
+  }
+  assert.deepEqual(callsTo("POST", "/api/agent/new").map(({ body }) => ({
+    creationId: body.creationId, poolId: body.poolId, projectId: body.projectId,
+  })), [
+    { creationId: ids[0], poolId: "workers", projectId: "app" },
+    { creationId: ids[1], poolId: "workers", projectId: "other-app" },
+  ]);
+});
+
+test("reopening a pending pooled composer reuses its frozen creation body instead of new defaults", async () => {
+  resetWorld();
+  const creationId = "183df38f-688a-4b72-b8e7-0d6dc95407e9";
+  const target = { newSessionCwd: null, newSessionCreationId: creationId, newSessionPoolId: "workers", newSessionProjectId: "app" };
+  let initialization;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => { throw new TypeError("Response lost after creation"); },
+  });
+  const first = await mountSession(null, undefined, { ...target, onNewSessionInitialization: (body) => { initialization = body; } });
+  await act(async () => { await first.latest.handleModelChange("anthropic", "original-model"); });
+  await act(async () => { await first.latest.loadSlashCommands().catch(() => []); });
+  first.unmount();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { success: true, sessionId: "reopened-original", hostId: "h2", cwd: "/worker-2/original", data: {} } }),
+  });
+  const reopened = await mountSession(null, undefined, { ...target, newSessionInitialization: initialization });
+  await act(async () => { await reopened.latest.loadSlashCommands(); });
+  const requests = callsTo("POST", "/api/agent/new").map(({ body }) => body);
+  assert.deepEqual(requests[1], requests[0], "navigation must not change the already-used creation intent");
+  assert.equal(reopened.latest.sessionIdRef.current, "reopened-original");
+  assert.equal(callsTo("POST", "/api/agent/reopened-original").some(({ body }) => body?.type === "prompt"), false);
+  reopened.unmount();
+});
+
 test("a fresh local chat sends no host id and keeps the pre-hosts draft key", async () => {
   resetWorld();
   world.holds.push({

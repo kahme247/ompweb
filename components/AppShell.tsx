@@ -37,7 +37,7 @@ import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/fi
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { LOCAL_HOST_ID, remoteHostId } from "@/lib/project-ordering";
+import { LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
 import { isLinkUp } from "@/lib/hosts/host";
 import { useHostRows } from "@/hooks/useHostRows";
 import { LocalDaemonBanner } from "./LocalDaemonBanner";
@@ -130,11 +130,17 @@ export function AppShell({ appName }: { appName: string }) {
   const isMobile = useIsMobile();
   const isCompactOverlay = useIsCompactOverlay();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
-  // When user clicks +, we only store the cwd — no fake session id
+  // The transient identity belongs to one intentional new chat, not one request attempt.
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   // Host of newSessionCwd; undefined is this machine. Every host-aware state
   // here uses that form (see remoteHostId).
   const [newSessionHostId, setNewSessionHostId] = useState<string | undefined>(undefined);
+  const [newSessionCreation, setNewSessionCreation] = useState<{ id?: string; initialization?: string }>({});
+  const newSessionCreationId = newSessionCreation.id;
+  const handleNewSessionInitialization = useCallback((initialization: string) => {
+    setNewSessionCreation((current) => current.id === newSessionCreationId && current.initialization === undefined ? { ...current, initialization } : current);
+  }, [newSessionCreationId]);
+  const [newSessionPoolProject, setNewSessionPoolProject] = useState<ManagedProject | null>(null);
   const [workspaceOptions, setWorkspaceOptions] = useState<{ projects: ManagedProject[]; selectedProject: string | null; cwd: string | null; hostId: string }>({ projects: [], selectedProject: null, cwd: null, hostId: LOCAL_HOST_ID });
   const [addProjectOpen, setAddProjectOpen] = useState(false);
   const [addProjectHostId, setAddProjectHostId] = useState<string>(LOCAL_HOST_ID);
@@ -142,7 +148,7 @@ export function AppShell({ appName }: { appName: string }) {
     setAddProjectHostId(hostId);
     setAddProjectOpen(open);
   }, []);
-  const { hosts } = useHostRows();
+  const { hosts, pools, poolsLoaded } = useHostRows();
   const handleWorkspaceOptionsChange = useCallback((projects: ManagedProject[], selectedProject: string | null, cwd: string | null, hostId: string) => {
     setWorkspaceOptions({ projects, selectedProject, cwd, hostId });
   }, []);
@@ -1102,6 +1108,7 @@ export function AppShell({ appName }: { appName: string }) {
   const initialSessionId = initialNavigation.sessionId;
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const [activeHostId, setActiveHostId] = useState<string | undefined>(undefined);
+  const [activePoolProject, setActivePoolProject] = useState<ManagedProject | null>(null);
   // Owned by the sidebar; rendered by the file panel's Worktrees tab.
   const [worktreeCtx, setWorktreeCtx] = useState<WorktreeContext | null>(null);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
@@ -1146,11 +1153,30 @@ export function AppShell({ appName }: { appName: string }) {
     return () => controller.abort();
   }, [initialNavigation]);
 
-  const handleCwdChange = useCallback((cwd: string | null, projectRoot: string | null, hostId: string) => {
-    setActiveCwd(cwd);
-    setActiveHostId(remoteHostId(hostId));
-    // Skip if cwd is null (initial mount) or during the initial URL restore.
+  const handleCwdChange = useCallback((cwd: string | null, projectRoot: string | null, hostId: string, project?: ManagedProject) => {
+    setActivePoolProject(project?.poolId ? project : null);
+    setActiveCwd(project?.poolId ? null : cwd);
+    setActiveHostId(project?.poolId ? undefined : remoteHostId(hostId));
+    if (project?.poolId) {
+      if (selectedSession?.poolId === project.poolId && selectedSession.projectId === project.projectId) return;
+      if (newSessionPoolProject?.poolId === project.poolId && newSessionPoolProject.projectId === project.projectId) return;
+      setNewSessionPoolProject(project);
+      setNewSessionCreation({ id: crypto.randomUUID() });
+      setNewSessionCwd(null);
+      setNewSessionHostId(undefined);
+      setSelectedSession(null);
+      setSessionKey((key) => key + 1);
+      setBranchTree([]);
+      setBranchActiveLeafId(null);
+      setSystemPrompt(null);
+      setSystemPromptLoading(false);
+      setActiveTopPanel(null);
+      router.replace("/");
+      return;
+    }
+    // A standalone path is never a fallback for a pending pool placement.
     if (!cwd) return;
+    setNewSessionPoolProject(null);
     // Skip only when the notification matches the cwd we're suppressing for.
     if (suppressCwdRef.current !== null && suppressCwdRef.current === cwd) {
       suppressCwdRef.current = null;
@@ -1175,6 +1201,7 @@ export function AppShell({ appName }: { appName: string }) {
       return prev;
     });
     setNewSessionHostId(remoteHostId(hostId));
+    setNewSessionCreation({ id: crypto.randomUUID() });
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
@@ -1182,7 +1209,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
     router.replace("/");
-  }, [router, selectedSession]);
+  }, [router, selectedSession, newSessionPoolProject]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     // Re-picking the already-open session (sidebar double-click, palette
@@ -1197,6 +1224,7 @@ export function AppShell({ appName }: { appName: string }) {
     }
     if (!isRestore && session.id === selectedSession?.id) return;
     setNewSessionCwd(null);
+    setNewSessionPoolProject(null);
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
@@ -1216,11 +1244,14 @@ export function AppShell({ appName }: { appName: string }) {
     }
   }, [router, isMobile, selectedSession?.id]);
 
-  const handleNewSession = useCallback((_sessionId: string, cwd: string | null, hostId?: string) => {
+  const handleNewSession = useCallback((creationId: string, cwd: string | null, hostId?: string, project?: ManagedProject, initialization?: string) => {
     setSettingsTab(null);
     setSelectedSession(null);
-    setNewSessionCwd(cwd);
-    setNewSessionHostId(remoteHostId(hostId));
+    const target = project ?? (cwd === activeCwd ? activePoolProject : null);
+    setNewSessionCreation({ id: creationId || crypto.randomUUID(), initialization });
+    setNewSessionPoolProject(target?.poolId ? target : null);
+    setNewSessionCwd(target?.poolId ? null : cwd);
+    setNewSessionHostId(target?.poolId ? undefined : remoteHostId(hostId));
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
@@ -1232,7 +1263,7 @@ export function AppShell({ appName }: { appName: string }) {
       requestAnimationFrame(() => chatInputRef.current?.focus());
     }
     router.replace("/");
-  }, [router, isMobile]);
+  }, [router, isMobile, activeCwd, activePoolProject]);
 
   // ---- In-app Navigate back / forward over visited chat views ----
   // Own stack, not the browser History API (that one belongs to the mobile
@@ -1256,8 +1287,11 @@ export function AppShell({ appName }: { appName: string }) {
       sessionId: navSessionId,
       cwd: navSessionId ? navSessionCwd : newSessionCwd,
       ...(!navSessionId && newSessionHostId ? { hostId: newSessionHostId } : {}),
+      ...(!navSessionId && newSessionPoolProject ? { poolId: newSessionPoolProject.poolId, projectId: newSessionPoolProject.projectId } : {}),
+      ...(!navSessionId ? { creationId: newSessionCreationId } : {}),
+      ...(!navSessionId && newSessionPoolProject && newSessionCreation.initialization ? { initialization: newSessionCreation.initialization } : {}),
     });
-  }, [navSessionId, navSessionCwd, newSessionCwd, newSessionHostId, recordNavigationView]);
+  }, [navSessionId, navSessionCwd, newSessionCwd, newSessionHostId, newSessionPoolProject, newSessionCreation, newSessionCreationId, recordNavigationView]);
 
   // Resolves a history entry's session id against the live list. `null`
   // means the id is gone (entry should be dropped); "unavailable" means the
@@ -1285,7 +1319,9 @@ export function AppShell({ appName }: { appName: string }) {
       if (entry.sessionId === null) {
         if (direction === -1) navigationHistory.commitBack();
         else navigationHistory.commitForward();
-        handleNewSession("navigate-history", entry.cwd, entry.hostId);
+        const project = entry.poolId ? workspaceOptions.projects.find((candidate) => candidate.poolId === entry.poolId && candidate.projectId === entry.projectId) : undefined;
+        if (entry.poolId && !project) { toast.error(translate("errors.generic")); return; }
+        handleNewSession(entry.creationId ?? crypto.randomUUID(), entry.cwd, entry.hostId, project, entry.initialization);
         return;
       }
       const versionAtPress = navViewVersionRef.current;
@@ -1301,7 +1337,7 @@ export function AppShell({ appName }: { appName: string }) {
       if (direction === -1) navigationHistory.dropPeekedBack();
       else navigationHistory.dropPeekedForward();
     }
-  }, [navigationHistory, peekNavigationBack, peekNavigationForward, fetchSessionForNavigation, handleNewSession, handleSelectSession]);
+  }, [navigationHistory, peekNavigationBack, peekNavigationForward, fetchSessionForNavigation, handleNewSession, handleSelectSession, workspaceOptions.projects]);
 
   // Shared by the sidebar buttons and the global shortcuts. The keyboard
   // layer always swallows the keystroke, so both directions stop dead at the
@@ -1328,10 +1364,10 @@ export function AppShell({ appName }: { appName: string }) {
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
-    onNewSession: (cwd: string) => handleNewSession(`kb-${Date.now()}`, cwd, activeHostId),
+    onNewSession: (cwd: string) => handleNewSession(crypto.randomUUID(), activePoolProject ? null : cwd, activeHostId, activePoolProject ?? undefined),
     onNavigateBack: handleNavigateBack,
     onNavigateForward: handleNavigateForward,
-    activeCwd,
+    activeCwd: activePoolProject ? projectIdentity(activePoolProject) : activeCwd,
     scopeNativeSelectAll,
   });
 
@@ -1353,6 +1389,7 @@ export function AppShell({ appName }: { appName: string }) {
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo) => {
     setNewSessionCwd(null);
+    setNewSessionPoolProject(null);
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
@@ -1451,6 +1488,7 @@ export function AppShell({ appName }: { appName: string }) {
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
     setNewSessionCwd(null);
+    setNewSessionPoolProject(null);
     setSelectedSession((prev) => ({
       ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
       id: newSessionId,
@@ -1470,7 +1508,10 @@ export function AppShell({ appName }: { appName: string }) {
     if (selectedSession?.id === sessionId) {
       const cwd = selectedSession.cwd;
       setSelectedSession(null);
-      setNewSessionCwd(cwd ?? null);
+      setNewSessionCwd(selectedSession.poolId ? null : cwd ?? null);
+      setNewSessionCreation({ id: crypto.randomUUID() });
+      setNewSessionPoolProject(selectedSession.poolId ? workspaceOptions.projects.find((project) => project.poolId === selectedSession.poolId && project.projectId === selectedSession.projectId) ?? null : null);
+      setNewSessionHostId(remoteHostId(selectedSession.hostId));
       setSessionKey((k) => k + 1);
       setBranchTree([]);
       setBranchActiveLeafId(null);
@@ -1478,7 +1519,7 @@ export function AppShell({ appName }: { appName: string }) {
       setActiveTopPanel(null);
       router.replace("/");
     }
-  }, [selectedSession, router]);
+  }, [selectedSession, router, workspaceOptions.projects]);
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
   }, []);
@@ -1634,7 +1675,7 @@ export function AppShell({ appName }: { appName: string }) {
   const currentHostId = selectedSession ? remoteHostId(selectedSession.hostId) : newSessionCwd !== null ? newSessionHostId : activeHostId;
   const remoteHost = currentHostId !== undefined;
   // Files, Git and worktrees only read this machine's disk for now.
-  const explorerCwd = remoteHost ? null : (sessionWorktreeRemoved ? null : sessionCwd) ?? activeCwd ?? newSessionCwd ?? null;
+  const explorerCwd = remoteHost || (!selectedSession && newSessionPoolProject) ? null : (sessionWorktreeRemoved ? null : sessionCwd) ?? activeCwd ?? newSessionCwd ?? null;
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
   }, [handleOpenFile, selectedSession?.id]);
@@ -1710,14 +1751,17 @@ export function AppShell({ appName }: { appName: string }) {
   }, [selectedSession]);
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
-  const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
-  const newSessionHost = newSessionCwd !== null ? newSessionHostId : activeHostId;
-  const newSessionHostKey = newSessionHost ?? LOCAL_HOST_ID;
-  const newSessionProject = (workspaceOptions.cwd === effectiveNewSessionCwd && workspaceOptions.hostId === newSessionHostKey ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
-  const hostProjects = workspaceOptions.projects.filter((project) => (project.hostId ?? LOCAL_HOST_ID) === newSessionHostKey);
+  const effectivePoolProject = selectedSession ? null : newSessionPoolProject ?? activePoolProject;
+  const effectiveNewSessionCwd = effectivePoolProject ? null : newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
+  const newSessionHost = effectivePoolProject ? undefined : newSessionCwd !== null ? newSessionHostId : activeHostId;
+  const newSessionHostKey = effectivePoolProject ? projectTargetId(effectivePoolProject) : newSessionHost ?? LOCAL_HOST_ID;
+  const newSessionProject = effectivePoolProject ? projectIdentity(effectivePoolProject) : (workspaceOptions.cwd === effectiveNewSessionCwd && workspaceOptions.hostId === newSessionHostKey ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
+  const hostProjects = workspaceOptions.projects.filter((project) => projectTargetId(project) === newSessionHostKey);
+  const memberIds = new Set(pools.flatMap((pool) => pool.members.map((member) => member.hostId)));
+  const creationTargets = [...(hosts ?? []).filter((host) => !memberIds.has(host.id) && (poolsLoaded || host.id === LOCAL_HOST_ID)).map((host) => ({ id: host.id, label: hostName(t, host) })), ...pools.map((pool) => ({ id: `pool:${pool.id}`, label: pool.label }))];
   const chatHost = remoteHost ? hosts?.find((host) => host.id === currentHostId) : undefined;
   const settingsHostId = activeCwd ? activeHostId : currentHostId;
-  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
+  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null || effectivePoolProject !== null;
   const currentRate = generationSpeed?.current;
   const rate = currentRate ?? generationSpeed?.average;
   const speed = showChat ? formatGenerationSpeed(rate) : null;
@@ -1842,6 +1886,7 @@ export function AppShell({ appName }: { appName: string }) {
       onSessionDeleted={handleSessionDeleted}
       selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
       selectedHostId={selectedSession ? selectedSession.hostId ?? LOCAL_HOST_ID : newSessionHostId ?? LOCAL_HOST_ID}
+      selectedLogicalProjectKey={selectedSession?.poolId ? selectedSession.projectKey : effectivePoolProject ? projectIdentity(effectivePoolProject) : null}
       onCwdChange={handleCwdChange}
       onWorkspaceOptionsChange={handleWorkspaceOptionsChange}
       onWorktreeContextChange={setWorktreeCtx}
@@ -1896,8 +1941,8 @@ export function AppShell({ appName }: { appName: string }) {
           // An empty cwd is truthy, so showChat would render the shell while
           // useAgentSession refuses to start — every send a silent no-op.
           // Fall back to the server's default cwd (~/omp-cwd-<date>) instead.
-          if (activeCwd) {
-            handleNewSession(`palette-${Date.now()}`, activeCwd, activeHostId);
+          if (activeCwd || activePoolProject) {
+            handleNewSession(crypto.randomUUID(), activeCwd, activeHostId, activePoolProject ?? undefined);
             return;
           }
           void fetch("/api/default-cwd", { method: "POST" })
@@ -1909,7 +1954,7 @@ export function AppShell({ appName }: { appName: string }) {
             })
             .then((data) => {
               if (!data.cwd) throw new Error("Empty cwd returned");
-              handleNewSession(`palette-${Date.now()}`, data.cwd);
+              handleNewSession(crypto.randomUUID(), data.cwd);
             })
             .catch(() => toast.error(translate("errors.generic")));
         }}
@@ -2459,11 +2504,16 @@ export function AppShell({ appName }: { appName: string }) {
               session={selectedSession}
               newSessionCwd={effectiveNewSessionCwd}
               newSessionHostId={newSessionHost}
+              newSessionCreationId={effectivePoolProject ? newSessionCreationId : undefined}
+              newSessionPoolId={effectivePoolProject?.poolId}
+              newSessionProjectId={effectivePoolProject?.projectId}
+              newSessionInitialization={effectivePoolProject ? newSessionCreation.initialization : undefined}
+              onNewSessionInitialization={handleNewSessionInitialization}
               hostStatus={chatHost?.status}
               hostLabel={chatHost ? hostName(t, chatHost) : undefined}
-              newSessionWorkspace={effectiveNewSessionCwd && (
+              newSessionWorkspace={(effectiveNewSessionCwd || effectivePoolProject) && (
                 <div className="new-session-workspace">
-                  {hosts && hosts.length > 1 && (
+                  {creationTargets.length > 1 && (
                     <>
                       <label htmlFor="new-session-host" className="new-session-workspace-label">
                         {t("hosts.pickerLabel")}
@@ -2476,23 +2526,20 @@ export function AppShell({ appName }: { appName: string }) {
                           id="new-session-host"
                           value={newSessionHostKey}
                           onChange={(event) => {
-                            // Workspaces belong to one host: land on its first one.
-                            const first = workspaceOptions.projects.find((project) => (project.hostId ?? LOCAL_HOST_ID) === event.target.value);
+                            const first = workspaceOptions.projects.find((project) => projectTargetId(project) === event.target.value);
                             if (!first || event.target.value === newSessionHostKey) return;
                             suppressCwdRef.current = first.path;
-                            setActiveCwd(first.path);
-                            setActiveHostId(remoteHostId(event.target.value));
-                            handleNewSession("", first.path, event.target.value);
+                            setActivePoolProject(first.poolId ? first : null);
+                            setActiveCwd(first.poolId ? null : first.path);
+                            setActiveHostId(first.poolId ? undefined : remoteHostId(first.hostId));
+                            handleNewSession(crypto.randomUUID(), first.poolId ? null : first.path, first.hostId, first);
                           }}
                         >
-                          {hosts.map((host) => {
-                            const hasProjects = workspaceOptions.projects.some((project) => (project.hostId ?? LOCAL_HOST_ID) === host.id);
-                            return (
-                              <option key={host.id} value={host.id} disabled={host.id !== newSessionHostKey && (!isLinkUp(host.status) || !hasProjects)}>
-                                {isLinkUp(host.status) ? hostName(t, host) : `${hostName(t, host)} — ${hostStatusText(t, host)}`}
-                              </option>
-                            );
-                          })}
+                          {creationTargets.map((target) => (
+                            <option key={target.id} value={target.id} disabled={!workspaceOptions.projects.some((project) => projectTargetId(project) === target.id)}>
+                              {target.label}
+                            </option>
+                          ))}
                         </select>
                         <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
                       </div>
@@ -2508,32 +2555,26 @@ export function AppShell({ appName }: { appName: string }) {
                     <select
                       id="new-session-workspace"
                       aria-describedby="new-session-workspace-path"
-                      value={effectiveNewSessionCwd}
+                      value={effectivePoolProject ? projectIdentity(effectivePoolProject) : effectiveNewSessionCwd ?? ""}
                       onChange={(event) => {
-                        const cwd = event.target.value;
-                        if (!cwd) {
-                          openAddProject(true, newSessionHostKey);
-                          return;
-                        }
-                        if (cwd === effectiveNewSessionCwd) return;
-                        suppressCwdRef.current = cwd;
-                        setActiveCwd(cwd);
-                        handleNewSession("", cwd, newSessionHostKey);
+                        const key = event.target.value;
+                        if (!key) { openAddProject(true, newSessionHostKey); return; }
+                        const project = hostProjects.find((candidate) => projectIdentity(candidate) === key || (!candidate.poolId && candidate.path === key));
+                        if (!project) return;
+                        suppressCwdRef.current = project.path;
+                        setActivePoolProject(project.poolId ? project : null);
+                        setActiveCwd(project.poolId ? null : project.path);
+                        handleNewSession(crypto.randomUUID(), project.poolId ? null : project.path, project.hostId, project);
                       }}
                     >
-                      {!hostProjects.some((project) => comparableProjectPath(project.path) === comparableProjectPath(newSessionProject)) && (
+                      {!effectivePoolProject && effectiveNewSessionCwd && !hostProjects.some((project) => comparableProjectPath(project.path) === comparableProjectPath(newSessionProject)) && (
                         <option value={effectiveNewSessionCwd}>{projectLabel(effectiveNewSessionCwd)}</option>
                       )}
-                      {hostProjects.map((project) => {
-                        const current = comparableProjectPath(project.path) === comparableProjectPath(newSessionProject);
-                        const label = project.alias ?? projectLabel(project.path);
-                        const duplicate = hostProjects.some((other) => other.path !== project.path && (other.alias ?? projectLabel(other.path)) === label);
-                        return (
-                          <option key={project.path} value={current ? effectiveNewSessionCwd : project.path}>
-                            {duplicate ? `${label} — ${project.path}` : label}
-                          </option>
-                        );
-                      })}
+                      {hostProjects.map((project) => (
+                        <option key={projectIdentity(project)} value={project.poolId ? projectIdentity(project) : comparableProjectPath(project.path) === comparableProjectPath(newSessionProject) ? effectiveNewSessionCwd ?? project.path : project.path}>
+                          {project.alias ?? project.name ?? projectLabel(project.path)}
+                        </option>
+                      ))}
                       <option value="">+ {t("projects.add")}</option>
                     </select>
                     <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -2559,8 +2600,8 @@ export function AppShell({ appName }: { appName: string }) {
                       <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
                     </div>
                   )}
-                  <div id="new-session-workspace-path" className="new-session-workspace-path" title={effectiveNewSessionCwd}>
-                    {effectiveNewSessionCwd}
+                  <div id="new-session-workspace-path" className="new-session-workspace-path" title={effectivePoolProject?.origin ?? effectiveNewSessionCwd ?? undefined}>
+                    {effectivePoolProject?.origin ?? effectiveNewSessionCwd}
                   </div>
                 </div>
               )}

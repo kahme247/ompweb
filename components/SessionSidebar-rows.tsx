@@ -188,7 +188,7 @@ function ProjectRow({
     if (alias === (project.alias ?? "")) return;
     void onUpdatePresentation(project, { alias });
   }, [aliasValue, project, onUpdatePresentation]);
-  const label = project.alias ?? projectLabel(project.path);
+  const label = project.alias ?? project.name ?? projectLabel(project.path);
   const pinned = pinnable && project.pinOrder !== undefined;
   const canReorder = !pinnable || pinned;
   const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0 || activity.exited > 0));
@@ -290,7 +290,7 @@ function ProjectRow({
               content={(
                 <span style={{ display: "grid", gap: 3, maxWidth: 360, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 11 }}>
                   <strong style={{ fontFamily: "inherit", fontSize: 11 }}>{t("sessionSidebar.launchConfigDirectory")}</strong>
-                  <span>{project.path}</span>
+                  <span>{project.poolId ? project.origin : project.path}</span>
                   {project.launchConfig?.profile && <span>profile: {project.launchConfig.profile}</span>}
                   {project.launchConfig?.advisor && <span>--advisor</span>}
                   {project.launchConfig?.extraArgs?.map((arg, index) => <span key={`${arg}-${index}`}>{arg}</span>)}
@@ -302,7 +302,7 @@ function ProjectRow({
               className="sidebar-project-identity"
               onClick={() => onActivate(project)}
               aria-current={isActive ? "true" : undefined}
-              title={project.path}
+              title={project.poolId ? project.origin : project.path}
               style={{
                 flex: "0 1 auto",
                 minWidth: 0,
@@ -429,7 +429,7 @@ function ProjectRow({
           onClick={() => onToggleExpand(project)}
           aria-label={isExpanded ? t("projects.collapseProject", { name: label }) : t("projects.expandProject", { name: label })}
           aria-expanded={isExpanded}
-          title={isExpanded ? t("projects.collapseProjectTitle", { path: project.path }) : t("projects.expandProjectTitle", { path: project.path })}
+          title={isExpanded ? t("projects.collapseProjectTitle", { path: project.poolId ? label : project.path }) : t("projects.expandProjectTitle", { path: project.poolId ? label : project.path })}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center",
             width: 22, height: 26, padding: 0, flexShrink: 0,

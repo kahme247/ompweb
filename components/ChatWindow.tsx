@@ -49,6 +49,11 @@ interface Props {
   newSessionCwd: string | null;
   /** Host a fresh chat starts on (this machine when absent). */
   newSessionHostId?: string;
+  newSessionCreationId?: string;
+  newSessionPoolId?: string;
+  newSessionProjectId?: string;
+  newSessionInitialization?: string;
+  onNewSessionInitialization?: (body: string) => void;
   /** The chat's host from the `hosts` channel: the source of truth until a
    *  `host_status` frame reports a change, and for a chat opened mid-outage. */
   hostStatus?: HostStatus;
@@ -504,7 +509,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessionCreationId, newSessionPoolId, newSessionProjectId, newSessionInitialization, onNewSessionInitialization, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -568,8 +573,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     handleThinkingLevelChange, handleFastModeChange, handleSlowModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
     handleToolPresetChange,
     btw, askBtw,
+    resolveUploadHost,
   } = useAgentSession({
-    session, newSessionCwd, newSessionHostId, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
+    session, newSessionCwd, newSessionHostId, newSessionCreationId, newSessionPoolId, newSessionProjectId, newSessionInitialization, onNewSessionInitialization, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
     modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenUrl,
   });
@@ -702,7 +708,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   // top, load another page while keeping the scroll position stable.
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
   const prevSessionKeyForPagingRef = useRef<string | null>(null);
-  const draftKey = session?.id ?? (newSessionCwd ? newChatDraftKey(newSessionCwd, newSessionHostId) : undefined);
+  const draftKey = session?.id ?? (newSessionPoolId && newSessionProjectId ? `new:pool:${newSessionPoolId}:${newSessionProjectId}` : newSessionCwd ? newChatDraftKey(newSessionCwd, newSessionHostId) : undefined);
   const sessionKeyForPaging = draftKey ?? "empty";
   useEffect(() => {
     if (prevSessionKeyForPagingRef.current !== sessionKeyForPaging) {
@@ -745,7 +751,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     holdScrollPosition,
     onTargetHandled: onSearchTargetHandled,
   });
-  const remoteWorkspace = session ? remoteHostId(session.hostId) !== undefined : newSessionHostId !== undefined;
+  const remoteWorkspace = session ? remoteHostId(session.hostId) !== undefined : Boolean(newSessionPoolId) || newSessionHostId !== undefined;
   // The hosts channel is the source of truth; a frame only speaks before its first snapshot.
   const currentHostStatus = channelHostStatus ?? frameHostStatus;
   const hostBanner = currentHostStatus && !isLinkUp(currentHostStatus) ? <HostOfflineBanner host={hostLabel ?? ""} /> : null;
@@ -1177,6 +1183,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       onAudioUnlock={unlockAudio}
       draftKey={draftKey}
       uploadHostId={session ? session.hostId : newSessionHostId}
+      resolveUploadHost={!session && newSessionPoolId ? resolveUploadHost : undefined}
       // @-mentions and skill lookups read this machine's disk: not for a remote workspace yet.
       cwd={remoteWorkspace ? null : session?.cwd ?? newSessionCwd}
       /* The pill bar and chevron only render in the non-empty layout; don't

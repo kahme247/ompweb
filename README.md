@@ -209,6 +209,23 @@ the daemon's link when it starts, so start the web server first.
 - **Development:** `npm run dev` does not take the daemon (see
   [Development](#development)).
 
+### Transparent host pools
+
+A configured host pool appears as one target with one entry per registered repository.
+Choose the pool rather than a worker; new independent sessions are placed on an eligible
+worker and receive an isolated local worktree. Adding a pool project registers its Git
+origin, not a central clone. The selected worker prepares its checkout when the session
+starts and reports authentication, preparation, or repository conflicts explicitly.
+Standalone hosts, including the Mac, retain typed paths and local clone progress/cancellation.
+
+Creation retries reuse the same intent and creation identity. Once a real session is known,
+its owner remains authoritative for resume, files, terminal, uploads, artifacts, rename, and
+delete, even if pool membership changes. An unavailable owner does not trigger replacement
+on another worker or on the Mac. Dirty files and unpublished work remain on that owner;
+there is no live migration or unpublished-work failover. After an uncertain response,
+inspect the retained session before explicitly retrying a command that may have run.
+
+
 ### Single binary
 
 Each [release](https://github.com/kahme247/ompweb/releases/latest) also ships
