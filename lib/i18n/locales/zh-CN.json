@@ -589,6 +589,7 @@
   "chatWindow.subagentState.failed": "失败",
   "chatWindow.subagentState.started": "运行中",
   "chatWindow.subagentSummary": "{running} 运行中 · 共 {total} 个",
+  "chatWindow.subagentCompletedSummary": "已完成 {completed}/{total}",
   "chatWindow.completedSubagents": "已完成 ({count})",
   "chatWindow.subagentsPanel": "子代理",
   "chatWindow.subagentRetrying": "重试 {attempt}/{max}",
