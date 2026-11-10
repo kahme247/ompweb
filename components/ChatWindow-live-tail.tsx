@@ -8,6 +8,8 @@ import { MessageView } from "./MessageView";
 export interface ChatLiveTailProps {
   /** The reply omp is streaming, also while held until its committed row replaces it. */
   streamingMessage: Partial<AgentMessage> | null;
+  /** True while omp is still generating `streamingMessage`; false for a finished reply held until its saved row appears. */
+  isStreaming: boolean;
   liveTokensPerSecond?: number | null;
   /** Running tools no message renders yet, shown as status rows while tool calls are collapsed. */
   pendingToolHeaders: { id: string; name: string }[];
@@ -27,7 +29,7 @@ export interface ChatLiveTailProps {
 
 /** The running turn's live end after the committed transcript: streaming reply, pending tool rows, `!command` output. */
 export function ChatLiveTail({
-  streamingMessage, liveTokensPerSecond, pendingToolHeaders, deferredBash, pendingBash, toolResults, modelNames, cwd, onOpenFile, sessionId,
+  streamingMessage, isStreaming, liveTokensPerSecond, pendingToolHeaders, deferredBash, pendingBash, toolResults, modelNames, cwd, onOpenFile, sessionId,
   toolCallsDefaultCollapsed, expandThinkingByDefault, hideThinking,
 }: ChatLiveTailProps) {
   const { t } = useI18n();
@@ -39,6 +41,7 @@ export function ChatLiveTail({
         <MessageView
           key={streamingMessage.timestamp ?? "stream"}
           message={streamingMessage as AgentMessage}
+          isStreaming={isStreaming}
           modelNames={modelNames}
           cwd={cwd}
           onOpenFile={onOpenFile}
