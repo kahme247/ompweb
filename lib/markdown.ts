@@ -378,6 +378,9 @@ function updateInlineCodeMarker(line: string, initialMarkerSize: number): number
   return markerSize;
 }
 
+const HTML_TAG = /<[A-Za-z/!][^>]*>/y;
+const BARE_URL = /(?:https?:\/\/|www\.)\S+/iy;
+
 /**
  * remark-math pairs any two `$`, so prices ("$5 and $10", "R$5 or US$10")
  * render as glued italics. Escapes every single `$` that Pandoc's rule does
@@ -387,8 +390,8 @@ function updateInlineCodeMarker(line: string, initialMarkerSize: number): number
  */
 // shortcut: pairs within one line, so inline math spanning lines renders as text; upgrade to a micromark extension if that shows up.
 function escapeLiteralDollars(line: string): string {
-  // Raw HTML keeps backslashes literally (attributes, <pre> on one line).
-  if (!line.includes("$") || /<\/?[A-Za-z][^>]*>/.test(line)) return line;
+  // An HTML block keeps backslashes literally; inline tags are skipped below.
+  if (!line.includes("$") || /^ {0,3}<\/?[A-Za-z]/.test(line)) return line;
   const escaped: number[] = [];
   let opener = -1;
   for (let index = 0; index < line.length; index++) {
@@ -396,6 +399,15 @@ function escapeLiteralDollars(line: string): string {
     if (char === "\\") {
       index++;
       continue;
+    }
+    // Tags, autolinks and bare URLs keep a `\` literally, so their `$` stay as typed.
+    const opaque = char === "<" ? HTML_TAG : /[hHwW]/.test(char) && !/[A-Za-z0-9]/.test(line[index - 1] ?? "") ? BARE_URL : null;
+    if (opaque) {
+      opaque.lastIndex = index;
+      if (opaque.test(line)) {
+        index = opaque.lastIndex - 1;
+        continue;
+      }
     }
     if (char === "`") {
       const close = codeSpanEnd(line, index);

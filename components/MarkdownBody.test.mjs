@@ -58,6 +58,8 @@ test("keeps dollar amounts literal while $x$ stays math", async () => {
     ["Total: **$5** or **$10**", /<strong>\$5<\/strong> or <strong>\$10<\/strong>/],
     ["> costs $5 and\n> then $10 ok", /costs \$5 and\nthen \$10 ok/],
     ["`$a$` and $x$5", /<code[^>]*>\$a\$<\/code> and \$x\$5/],
+    ["open https://x.com/?q=$HOME and $5", /href="https:\/\/x\.com\/\?q=\$HOME"[^>]*>https:\/\/x\.com\/\?q=\$HOME<\/a> and \$5/],
+    ["Price $5<br>and $6", /Price \$5<br\/?>and \$6/],
   ];
   for (const [markdown, expected] of literal) {
     const html = renderMarkdown(markdown);
