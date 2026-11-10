@@ -626,6 +626,83 @@ for (const [preference, mode] of [["steer", "steer"], ["followup", "followUp"]])
   });
 }
 
+test("a `!` message with an inline text attachment is held as a prompt, never run as a shell command", async (t) => {
+  resetWorld();
+  const { setDraft, getDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "bang-text-attachment";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  setDraft(sid, {
+    value: "!touch /tmp/ompweb-never-run",
+    images: [],
+    files: [{ name: "notes.txt", mimeType: "text/plain", content: "rm -rf /", size: 8 }],
+  });
+  const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1, "the composed prompt must reach worker storage");
+  assert.equal(world.outbox[0].mode, "prompt");
+  assert.equal(world.outbox[0].message, "!touch /tmp/ompweb-never-run\n\nAttached file: notes.txt\n```text\nrm -rf /\n```");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash"), [], "neither the typed text nor the attachment reaches the shell");
+  assert.equal(getDraft(sid), null, "the stored prompt consumes the unchanged draft");
+});
+
+test("editing and resending a queued bang-prefixed prompt never runs its inline file text as shell", async (t) => {
+  resetWorld();
+  const { clearDraft } = await import("@/lib/draft-store");
+  const sid = "queued-bang-prompt";
+  const message = "!!explain this\n\nAttached file: notes.txt\n```text\necho attachment-content\n```";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { queuedMessages: { steering: [], followUp: [message] } } });
+  world.outboxHold = true;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "remove_queued_message",
+    produce: async () => ({ value: { success: true, data: { removed: true } } }),
+  });
+  const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.click(view.getByTitle("Edit this queued message")); });
+  await until(() => view.getByRole("textbox").value === message, "the removed queue entry must return to the composer");
+  await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || world.calls.some((call) => call.body?.type === "bash"), "the recovered message must be dispatched");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash"), [], "queue recovery must preserve prompt intent");
+  assert.equal(world.outbox[0]?.mode, "prompt");
+  assert.equal(world.outbox[0]?.message, message);
+  await until(() => view.getByRole("textbox").value === "", "a stored prompt clears its originating draft");
+  await act(async () => {
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "!!printf example" } });
+    fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" });
+  });
+  await until(() => world.calls.some((call) => call.body?.type === "bash"), "fresh input still supports shell commands");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash").map((call) => call.body.command), ["printf example"]);
+});
+
+test("removing the last recovered image clears prompt-only mode for fresh shell input", async (t) => {
+  resetWorld();
+  const { clearDraft } = await import("@/lib/draft-store");
+  const sid = "cleared-image-prompt";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { queuedMessages: { steering: [], followUp: ["[Image]"] } } });
+  world.outboxHold = true;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "remove_queued_message",
+    produce: async () => ({ value: { success: true, data: { removed: true, images: [{ data: "AAAA", mimeType: "image/png" }] } } }),
+  });
+  const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.click(view.getByTitle("Edit this queued message")); });
+  await until(() => view.queryAllByRole("button", { name: /remove image/i }).length === 1, "the image-only prompt must be recovered");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: /remove image/i })); });
+  await act(async () => { fireEvent.change(view.getByRole("textbox"), { target: { value: "!!printf example" } }); });
+  await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || world.calls.some((call) => call.body?.type === "bash"), "fresh input must be dispatched");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash").map((call) => call.body.command), ["printf example"]);
+  assert.deepEqual(world.outbox, [], "clearing the recovered image must not leave fresh shell input in prompt mode");
+});
+
 test("a shell-queued outbox prompt and steer use queue_update without a phantom turn or reply notice", async () => {
   resetWorld();
   primeSession("bash-queue", [userMsg("u0", "q")]);
@@ -1375,6 +1452,310 @@ test("provider error on the assistant message is shown instead of ending silentl
   assert.ok(w.latest.notices.some((notice) => notice.message === providerError), "the provider error must be visible");
 });
 
+for (const terminal of ["rpc_frame_error", "turn_end", "agent_end"]) {
+  test(`${terminal} after assistant text remains visible without a duplicate toast`, async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Malformed RPC frame after assistant text";
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: { ...assistantMsg("a1", "Partial answer"), timestamp: 42 } });
+      if (terminal !== "agent_end") es.emit({ type: terminal, errorMessage: failure });
+      es.emit({ type: "agent_end", isTerminal: true, ...(terminal === "agent_end" ? { errorMessage: failure } : {}) });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.ok(w.latest.messages.some((m) => m.role === "assistant" && m.content[0]?.text === "Partial answer"));
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+    assert.equal(toastCalls.some((call) => call[0] === "error" && call[1] === "Request failed"), false);
+  });
+}
+
+for (const saved of ["same message", "different message", "no saved error"]) {
+  test(`a message-carried provider error with ${saved} after terminal reload`, async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", "Partial answer"), timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      const savedReply = saved === "same message" ? reply
+        : saved === "different message" ? { ...reply, timestamp: 43 }
+          : { ...assistantMsg("a1", "Partial answer"), timestamp: 42 };
+      saveSession("s1", [userMsg("u0", "old question"), userMsg("u1", "new question"), savedReply]);
+      es.emit({ type: "agent_end", isTerminal: true });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message),
+      saved === "same message" ? [] : [failure]);
+    if (saved === "same message") {
+      assert.equal(w.latest.messages.at(-1).errorMessage, failure);
+      const bubble = ownRoot(render(React.createElement(MessageView, { message: w.latest.messages.at(-1) }), { wrapper: TestRoot }));
+      assert.ok(bubble.getByText(failure), "the assistant actually renders the provider error");
+    }
+    assert.equal(toastCalls.some((call) => call[0] === "error" && call[1] === "Request failed"), false);
+  });
+}
+
+for (const location of ["saved", "not saved"]) {
+  test(`an error-only assistant message is deduplicated only when visible: ${location}`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      if (location !== "not saved") {
+        saveSession("s1", [userMsg("u0", "old question"), userMsg("u1", "new question"), reply]);
+      }
+      es.emit({ type: "agent_end", isTerminal: true });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message),
+      location === "saved" ? [] : [failure]);
+    if (location === "saved") {
+      const bubble = ownRoot(render(React.createElement(MessageView, { message: w.latest.messages.at(-1) }), { wrapper: TestRoot }));
+      assert.ok(bubble.getByText(failure), "the saved error-only message renders a banner");
+    }
+  });
+}
+
+test("a run started elsewhere keeps its error visible while an older branch is selected", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question")]);
+  const w = await mountSession("s1");
+  world.views.set("s1:branch:false", { leafId: "branch", messages: [userMsg("old", "selected branch")], entryIds: ["branch-entry"] });
+  await act(async () => { await w.changeLeaf("branch"); });
+  assert.deepEqual(w.latest.entryIds, ["branch-entry"], "the user is viewing the historical branch");
+  world.agents.set("s1", { running: true, state: { isStreaming: true, isPromptRunning: true } });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["s1"] }) });
+    await settle();
+    lastEs().open();
+    await settle();
+  });
+  const es = lastEs();
+  const failure = "Provider disconnected during generation";
+  const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+  await act(async () => {
+    es.emit({ type: "agent_start" });
+    es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+    es.emit({ type: "message_end", message: reply }, { persist: false });
+    saveSession("s1", [userMsg("u0", "old question"), userMsg("u1", "new question"), reply]);
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(w.latest.entryIds, ["branch-entry"], "the failed current-run message is not in the selected branch");
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+});
+
+for (const ending of ["message_end", "turn_end", "agent_end", "recovery"]) {
+  test(`${ending} error stays visible until its late saved assistant message replaces the notice`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      if (ending === "turn_end") es.emit({ type: "turn_end", message: reply });
+      if (ending === "recovery") es.emit({ type: "prompt_result", agentInvoked: false });
+      else es.emit({ type: "agent_end", isTerminal: true, ...(ending === "agent_end" ? { messages: [reply] } : {}) });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure],
+      "an unsaved error-only message cannot carry the error visibly");
+    await act(async () => {
+      appendEntry("s1", reply);
+      publishSessionsChanged(["s1"]);
+    });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), []);
+    const bubble = ownRoot(render(React.createElement(MessageView, { message: w.latest.messages.at(-1) }), { wrapper: TestRoot }));
+    assert.ok(bubble.getByText(failure), "the saved error banner replaces the notice");
+  });
+}
+
+for (const ending of ["agent_end", "recovery"]) {
+  test(`${ending} exposes an error-only failure while transcript loading is blocked`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    let release;
+    world.holds.push({
+      match: (method, url) => method === "GET" && url.startsWith("/api/sessions/s1?"),
+      produce: () => new Promise((resolve) => {
+        release = () => {
+          const fixture = world.sessions.get("s1");
+          resolve({ value: { sessionId: "s1", filePath: "/fixture/session.jsonl", tree: [],
+            leafId: fixture.leafId, context: { todoPhases: [], thinkingLevel: "off", model: null, ...fixture } } });
+        };
+      }),
+    });
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      if (ending === "recovery") es.emit({ type: "prompt_result", agentInvoked: false });
+      else es.emit({ type: "agent_end", isTerminal: true });
+      await sleep(20);
+    });
+    assert.ok(release, "the transcript request is held");
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+    await act(async () => { release(); });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+  });
+}
+
+test("a queued error notice is removed when its message appears without removing other notices", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question")]);
+  const { w, es } = await startRun("s1", "new question");
+  const failure = "Provider disconnected during generation";
+  const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+  await act(async () => {
+    for (let i = 0; i < 5; i++) es.emit({ type: "notice", level: "info", message: `Unrelated notice ${i}` });
+    es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+    es.emit({ type: "message_end", message: reply }, { persist: false });
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await act(async () => { appendEntry("s1", reply); publishSessionsChanged(["s1"]); });
+  await settle(30);
+  assert.ok(w.latest.notices.some((n) => n.message.startsWith("Unrelated notice")));
+  await act(async () => { for (const notice of w.latest.notices) w.latest.dismissNotice(notice.id); });
+  await settle();
+  assert.equal(w.latest.notices.some((n) => n.message === failure), false, "the pending duplicate cannot appear later");
+});
+
+for (const order of ["frame before message", "frame after message"]) {
+  test(`a late equal-looking saved assistant error cannot retract an independent error: ${order}`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      if (order === "frame before message") es.emit({ type: "rpc_frame_error", errorMessage: failure });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      if (order === "frame after message") es.emit({ type: "rpc_frame_error", errorMessage: failure });
+      es.emit({ type: "agent_end", isTerminal: true, messages: [reply] });
+    });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+    await act(async () => { appendEntry("s1", reply); publishSessionsChanged(["s1"]); });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+  });
+}
+
+for (const change of ["new run", "historical branch"]) {
+  test(`a late saved error cannot retract a notice in a ${change}`, async () => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question")]);
+    const { w, es } = await startRun("s1", "new question");
+    const failure = "Provider disconnected during generation";
+    const reply = { ...assistantMsg("a1", ""), content: [], timestamp: 42, stopReason: "error", errorMessage: failure };
+    await act(async () => {
+      es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+      es.emit({ type: "message_end", message: reply }, { persist: false });
+      es.emit({ type: "agent_end", isTerminal: true });
+    });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+    if (change === "new run") {
+      await act(async () => { es.emit({ type: "agent_start" }); });
+    } else {
+      world.views.set("s1:branch:false", { leafId: "branch", messages: [userMsg("old", "selected branch")], entryIds: ["branch-entry"] });
+      await act(async () => { await w.changeLeaf("branch"); });
+    }
+    await act(async () => { appendEntry("s1", reply); publishSessionsChanged(["s1"]); });
+    await settle();
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+  });
+}
+
+test("an independent error is not hidden by an equal-looking assistant error", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question")]);
+  const { w, es } = await startRun("s1", "new question");
+  const failure = "Provider disconnected during generation";
+  const reply = { ...assistantMsg("a1", "Partial answer"), timestamp: 42, stopReason: "error", errorMessage: failure };
+  await act(async () => {
+    es.emit({ type: "message_end", message: userMsg("u1", "new question") });
+    es.emit({ type: "message_end", message: reply });
+    es.emit({ type: "rpc_frame_error", errorMessage: failure });
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await settle();
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+});
+
+for (const previous of ["same turn", "previous turn"]) {
+  test(`recovery keeps an independent error despite an equal-looking ${previous} error`, async () => {
+    resetWorld();
+    const failure = "Provider disconnected during generation";
+    const oldReply = { ...assistantMsg("a0", "Old answer"), timestamp: 41, stopReason: "error", errorMessage: failure };
+    const history = [userMsg("u0", "old question"), ...(previous === "previous turn" ? [oldReply] : [])];
+    primeSession("s1", history);
+    const { w, es } = await startRun("s1", "new question");
+    const reply = previous === "same turn" ? { ...oldReply, timestamp: 42 } : assistantMsg("a1", "Partial answer");
+    saveSession("s1", [...history, userMsg("u1", "new question"), reply]);
+    await act(async () => {
+      es.emit({ type: "rpc_frame_error", errorMessage: failure });
+      es.emit({ type: "prompt_result", agentInvoked: false });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+  });
+}
+
+test("recovery does not use a previous turn's saved error as the current failure", async () => {
+  resetWorld();
+  const failure = "Provider disconnected during generation";
+  const oldReply = { ...assistantMsg("a0", "Old answer"), timestamp: 42, stopReason: "error", errorMessage: failure };
+  primeSession("s1", [userMsg("u0", "old question"), oldReply]);
+  const { w, es } = await startRun("s1", "new question");
+  await act(async () => {
+    es.emit({ type: "message_end", message: { ...oldReply, content: [{ type: "text", text: "New partial answer" }] } }, { persist: false });
+    es.emit({ type: "prompt_result", agentInvoked: false });
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [failure]);
+});
+
+test("recovery retains a frame error that differs from the saved assistant error", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question")]);
+  const { w, es } = await startRun("s1", "new question");
+  const reply = { ...assistantMsg("a1", "Partial answer"), timestamp: 42, stopReason: "error", errorMessage: "Earlier provider failure" };
+  saveSession("s1", [userMsg("u0", "old question"), userMsg("u1", "new question"), reply]);
+  await act(async () => {
+    es.emit({ type: "rpc_frame_error", errorMessage: "Malformed RPC frame" });
+    es.emit({ type: "prompt_result", agentInvoked: false });
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), ["Malformed RPC frame"]);
+  assert.equal(w.latest.messages.at(-1).errorMessage, "Earlier provider failure");
+});
+
 test("a silent idle transition shows a fallback error instead of disappearing", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
@@ -1469,7 +1850,8 @@ test("recovery preserves a saved provider failure even after partial response co
   });
   await settle();
   assert.equal(w.latest.agentRunning, false);
-  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [providerError]);
+  assert.equal(w.latest.messages.at(-1).errorMessage, providerError);
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), []);
 });
 
 test("a failed transcript reload is retried instead of being classified as an empty response", async () => {
@@ -1545,8 +1927,8 @@ for (const result of ["visible answer", "provider failure"]) {
     await settle();
     assert.equal(w.latest.agentRunning, false);
     assert.equal(w.latest.messages.at(-1).content[0].text, "Visible response");
-    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message),
-      result === "provider failure" ? ["Provider rejected the request"] : []);
+    if (result === "provider failure") assert.equal(w.latest.messages.at(-1).errorMessage, "Provider rejected the request");
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), []);
   });
 }
 
@@ -3929,7 +4311,7 @@ for (const order of ["identity/history before HTTP", "HTTP before history delive
     assert.equal(w.view.getByRole("textbox"), composer, "ownership relocation preserves the live composer instance");
     assert.equal(w.view.getByRole("textbox").value, "U2-original");
     assert.equal(new URL(window.location.href).searchParams.get("session"), target);
-    assert.deepEqual(getDraft(target), { value: "U2-original", images, files });
+    assert.deepEqual(getDraft(target), { value: "U2-original", images, files, promptOnly: true });
     assert.equal(getDraft(sid), null, "the draft moves rather than remaining on the abandoned branch");
     assert.deepEqual(world.sessions.get(sid), original, "the non-owned source file remains historical");
     assert.equal(native.persistedFiles.get(original.filePath), originalJsonl, "copy-on-write must never append the Edit marker to the source file");
@@ -4118,6 +4500,99 @@ test("relocation adopts existing target text without prefilling over it", async 
   assert.equal(getDraft(sid), null);
 });
 
+// The model prompt may have carried images or inline files that Edit cannot restore; its text starting with `!!` must
+// still go out as a prompt. Anything the user typed or kept keeps its own (shell) meaning.
+const bangHistory = [userMsg("u1", "U1"), assistantMsg("a1", "A1"), userMsg("u2", "!!model text"), assistantMsg("a2", "A2")];
+const bashCalls = () => world.calls.filter((call) => call.body?.type === "bash");
+
+test("same-ID Edit of a `!!` model prompt resends it as a held prompt, never a shell command", async (t) => {
+  resetWorld();
+  const { clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-same";
+  clearDraft(sid);
+  t.after(() => clearDraft(sid));
+  const native = primeEditableHistory(sid, bangHistory);
+  world.outboxHold = true;
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => native.edits.length === 1 && w.view.getByRole("textbox").value === "!!model text", "Edit must prefill the model prompt");
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || bashCalls().length > 0, "the prefilled prompt must be dispatched");
+  assert.deepEqual(bashCalls(), []);
+  assert.equal(world.outbox[0]?.mode, "prompt");
+  assert.equal(world.outbox[0]?.message, "!!model text");
+  w.unmount();
+});
+
+test("same-ID Edit leaves a typed `!!` draft alone and still runs it as a shell command", async (t) => {
+  resetWorld();
+  const { setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-same-typed";
+  setDraft(sid, { value: "!!typed shell", images: [], files: [] });
+  t.after(() => clearDraft(sid));
+  const native = primeEditableHistory(sid, bangHistory);
+  world.outboxHold = true;
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => native.edits.length === 1, "Edit must reach native history");
+  await settle();
+  assert.equal(w.view.getByRole("textbox").value, "!!typed shell", "Edit never overwrites a typed draft");
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => bashCalls().length === 1 || world.outbox.length === 1, "the typed draft must be dispatched");
+  assert.deepEqual(bashCalls().map((call) => call.body.command), ["typed shell"]);
+  assert.deepEqual(world.outbox, []);
+  w.unmount();
+});
+
+test("moved-ID Edit of a `!!` model prompt resends it as a held prompt, never a shell command", async (t) => {
+  resetWorld();
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-move", target = `${sid}-owned`;
+  for (const id of [sid, target]) clearDraft(id);
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const native = primeEditableHistory(sid, bangHistory);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  assert.equal(w.view.getByRole("textbox").value, "!!model text");
+  assert.equal(getDraft(target)?.promptOnly, true, "the prefill is marked as model input");
+  world.outboxHold = true;
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || bashCalls().length > 0, "the prefilled prompt must be dispatched");
+  assert.deepEqual(bashCalls(), []);
+  assert.equal(world.outbox[0]?.sessionId, target);
+  assert.equal(world.outbox[0]?.mode, "prompt");
+  assert.equal(world.outbox[0]?.message, "!!model text");
+  w.unmount();
+});
+
+test("moved-ID Edit keeps an existing target `!!` draft as shell input, not prompt-only", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-move-typed", target = `${sid}-owned`;
+  for (const id of [sid, target]) clearDraft(id);
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  setDraft(target, { value: "!!target shell", images: [], files: [] });
+  const native = primeEditableHistory(sid, bangHistory);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  assert.equal(w.view.getByRole("textbox").value, "!!target shell", "Edit must not prefill over existing target text");
+  assert.notEqual(getDraft(target)?.promptOnly, true);
+  world.outboxHold = true;
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => bashCalls().length === 1 || world.outbox.length === 1, "the existing draft must be dispatched");
+  assert.deepEqual(bashCalls().map((call) => call.body.command), ["target shell"]);
+  assert.deepEqual(world.outbox, []);
+  w.unmount();
+});
+
 test("relocation at draft capacity preserves every unrelated draft and its attachments", async (t) => {
   resetWorld();
   const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
@@ -4152,7 +4627,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
   await settle();
   assert.equal(w.view.getByRole("textbox"), composer);
   assert.equal(composer.value, "U2-original");
-  assert.deepEqual(getDraft(target), { ...source, value: "U2-original" });
+  assert.deepEqual(getDraft(target), { ...source, value: "U2-original", promptOnly: true });
   assert.equal(getDraft(sid), null);
   for (const [id, draft] of unrelated) {
     assert.deepEqual(getDraft(id), draft, `relocation must preserve ${id}, including its attachments`);
@@ -4943,9 +5418,11 @@ test("a saved provider failure still surfaces when its SSE completion arrives be
   });
   await settle();
   assert.equal(w.latest.agentRunning, false);
-  assert.ok(w.latest.notices.some((notice) => notice.type === "error" && notice.message === providerError));
+  assert.deepEqual(w.latest.notices.filter((notice) => notice.type === "error"), []);
   assert.deepEqual(w.latest.entryIds, ["e0", "e1", "e2"]);
   assert.equal(w.latest.messages.filter((message) => message.role === "assistant" && message.errorMessage === providerError).length, 1);
+  const bubble = ownRoot(render(React.createElement(MessageView, { message: w.latest.messages.at(-1) }), { wrapper: TestRoot }));
+  assert.ok(bubble.getByText(providerError), "the recovered saved message renders the failure to the user");
 });
 
 test("terminal full refresh updates branch metadata as well as cursor-owned history", async () => {
@@ -6393,6 +6870,7 @@ test("an interrupt-and-reply whose abort_and_prompt reply was lost is reported a
     assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
   });
 });
+
 
 test("the hosts channel decides the offline banner; a frame only speaks before its first snapshot", async () => {
   resetWorld();

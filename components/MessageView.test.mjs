@@ -1112,7 +1112,7 @@ test("a `!` run renders as a shell card with its command, status and output", ()
   fireEvent.click(ok.header);
   assert.equal(ok.view.container.querySelector(".shell-run-output").textContent, "clean\n");
   assert.equal(ok.view.container.querySelector(".shell-run-failed"), null);
-  assert.equal(ok.header.querySelector(".shell-run-tag"), null, "only `!!` runs are tagged local");
+  assert.equal(ok.header.querySelector(".shell-run-tag"), null, "only excluded runs are tagged");
   fireEvent.click(ok.header);
   assert.equal(ok.view.container.querySelector(".shell-run-output"), null, "the header closes it again");
   cleanup();
@@ -1126,10 +1126,6 @@ test("a `!` run renders as a shell card with its command, status and output", ()
 
   const cancelled = shell({ command: "sleep 9", output: "", cancelled: true });
   assert.match(cancelled.header.querySelector(".shell-run-status").textContent, /cancelled/);
-  cleanup();
-
-  const local = shell({ command: "env", output: "A=1", exitCode: 0, excludeFromContext: true });
-  assert.equal(local.header.querySelector(".shell-run-tag").textContent, "local");
   cleanup();
 
   const pending = shell({ command: "make", output: "" });

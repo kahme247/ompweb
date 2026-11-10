@@ -2,9 +2,9 @@
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
+import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Terminal, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
-import type { BuiltinSlashCommandResult, CompactResultInfo, PromptSubmissionResult, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
+import type { BuiltinSlashCommandResult, CompactResultInfo, PromptSendOptions, PromptSubmissionResult, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/ui/field";
@@ -15,7 +15,7 @@ import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
-import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, getDraft, getDraftRevision, markDraftEdited, mergeRecoveredText, moveDraftSubmissions, recoverDraft, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, getDraft, getDraftRevision, isSameDraft, markDraftEdited, mergeRecoveredText, moveDraftSubmissions, recoverDraft, requiresPromptMode, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -174,8 +174,9 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 
 interface Props {
   /** Without `outbox`, only a rejected submission is restored; completed/superseded runs must not be replayed.
-   *  `uploads`: the ids of files sent As file, passed only when there are some. */
-  onSend: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => Promise<PromptSubmissionResult>;
+   *  `uploads`: the ids of files sent As file, passed only when there are some. `options` preserves explicit model-input
+   *  intent when attachments or prefills would otherwise leave a shell-looking string. */
+  onSend: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>, options?: PromptSendOptions) => Promise<PromptSubmissionResult>;
   /** Sends go through the message outbox (an existing session): the composer clears once `onSend` (or a queue
    *  callback) reports the message stored, and keeps it otherwise. */
   outbox?: boolean;
@@ -273,7 +274,7 @@ interface Props {
 export interface ChatInputHandle {
   focus: () => void;
   insertText: (text: string) => void;
-  insertIfEmpty: (text: string) => void;
+  insertIfEmpty: (text: string, options?: PromptSendOptions) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
   openContextPanel: () => void;
@@ -429,6 +430,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [locale],
   );
   const [value, setRawValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  const [promptOnly, setPromptOnlyState] = useState(() => Boolean(draftKey && getDraft(draftKey)?.promptOnly));
+  const promptOnlyRef = useRef(promptOnly);
+  const setPromptOnly = useCallback((next: boolean) => {
+    promptOnlyRef.current = next;
+    setPromptOnlyState(next);
+  }, []);
   const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
     text: string;
     kind: "follow-up" | "steer";
@@ -455,12 +462,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [attachedUploads, setAttachedUploads] = useState<AttachedUpload[]>(() => (
     draftKey ? draftUploadsToAttachedUploads(getDraft(draftKey)?.uploads) : []
   ));
+  useLayoutEffect(() => {
+    if (promptOnly && !value && !attachedImages.length && !attachedTextFiles.length && !attachedUploads.length) {
+      setPromptOnly(false);
+    }
+  }, [promptOnly, value, attachedImages.length, attachedTextFiles.length, attachedUploads.length, setPromptOnly]);
   const [attachError, setAttachError] = useState<string | null>(null);
   /** An informational note about the last batch (images that went As file). */
   const [attachNotice, setAttachNotice] = useState<string | null>(null);
   const trimmedValue = value.trimStart();
-  const bashMode = attachedImages.length === 0 && attachedTextFiles.length === 0 && attachedUploads.length === 0 && trimmedValue.startsWith("!");
+  const bashMode = !promptOnly && attachedImages.length === 0 && attachedTextFiles.length === 0 && attachedUploads.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
+  // "!" shares output with the model (riskier, root-style warning); "!!" stays local (plain terminal).
+  const shellMode = bashMode ? (bashExcluded ? "local" : "model") : undefined;
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashMatch, setSlashMatch] = useState<SlashQueryMatch | null>(null);
@@ -561,6 +575,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   attachedUploadsRef.current = attachedUploads;
   uploadHostIdRef.current = uploadHostId;
 
+  const captureDraft = useCallback((): ChatDraft => {
+    const uploads = attachedUploadsRef.current;
+    const draft: ChatDraft = {
+      value: valueRef.current,
+      images: attachedImagesRef.current.map(imageToDraftImage),
+      files: attachedTextFilesRef.current.map(textFileToDraftFile),
+      ...(promptOnlyRef.current ? { promptOnly: true } : {}),
+      uploads,
+    };
+    // Establish intent from every live chip before unfinished upload payloads are omitted.
+    if (requiresPromptMode(draft)) draft.promptOnly = true;
+    draft.uploads = attachedUploadsToDraftUploads(uploads);
+    return draft;
+  }, []);
+
   const insertTextAtCursor = useCallback((text: string) => {
     const ta = textareaRef.current;
     if (!ta) {
@@ -594,10 +623,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     focus() {
       textareaRef.current?.focus();
     },
-    insertIfEmpty(text: string) {
+    insertIfEmpty(text: string, options?: PromptSendOptions) {
       const ta = textareaRef.current;
       const current = ta ? ta.value : value;
       if (current.trim()) return;
+      if (options?.promptOnly && text.trim()) setPromptOnly(true);
       setValue(text);
       setAtQuery(null);
       setSlashMatch(null);
@@ -965,6 +995,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const clearInput = useCallback(() => {
     setValue("");
+    setPromptOnly(false);
     setAtQuery(null);
     setSlashMatch(null);
     setHistoryMenuOpen(false);
@@ -979,7 +1010,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages, clearTextFiles, clearUploads, draftKey, setValue]);
+  }, [clearImages, clearTextFiles, clearUploads, draftKey, setValue, setPromptOnly]);
 
   /** A stored submission may finish after navigation/remount: clear only the draft revision it was sent from, never a
    * new composer's text or attachments, nor an equal-text retype made while the commit was pending. Capture before the
@@ -991,12 +1022,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const key = draftKeyRef.current;
     // Dictation can submit before the layout persistence effect sees its inserted text.
     if (key && draftRecoveryIdentityRef.current.key === key) {
-      setDraft(key, {
-        value: valueRef.current,
-        images: images.map(imageToDraftImage),
-        files: files.map(textFileToDraftFile),
-        uploads: attachedUploadsToDraftUploads(uploads),
-      });
+      setDraft(key, captureDraft());
     }
     const pending = beginDraftSubmission(draftKeyRef.current);
     const commit = () => {
@@ -1013,33 +1039,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     /** The submission settled without a commit (refused or failed): stop tracking it. */
     commit.release = () => endDraftSubmission(pending);
     return commit;
-  }, [clearInput]);
+  }, [clearInput, captureDraft]);
 
   useLayoutEffect(() => subscribeDraftConsumption((key, snapshot) => {
     if (draftKeyRef.current !== key) return;
-    const uploads = attachedUploadsToDraftUploads(attachedUploadsRef.current);
-    const current: ChatDraft = {
-      value: valueRef.current,
-      images: attachedImagesRef.current.map(imageToDraftImage),
-      files: attachedTextFilesRef.current.map(textFileToDraftFile),
-      ...(uploads.length ? { uploads } : {}),
-    };
-    if (JSON.stringify(current) === JSON.stringify(snapshot)) clearInput();
-  }), [clearInput]);
+    const current = captureDraft();
+    if (isSameDraft(current, snapshot)) clearInput();
+  }), [clearInput, captureDraft]);
 
   useLayoutEffect(() => {
     // The synchronous ref handoff can precede the prop commit. Keep live deltas in React for the existing move merge,
     // rather than recreating the obsolete key (which could evict an unrelated draft at capacity).
     if (!draftKey || draftKeyRef.current !== draftKey || draftRecoveryIdentityRef.current.key !== draftKey) return;
-    const draft = {
-      value,
-      images: attachedImages.map(imageToDraftImage),
-      files: attachedTextFiles.map(textFileToDraftFile),
-      uploads: attachedUploadsToDraftUploads(attachedUploads),
-    };
+    const draft = captureDraft();
     persistedDraftRef.current = draft;
     setDraft(draftKey, draft);
-  }, [attachedImages, attachedTextFiles, attachedUploads, draftKey, value]);
+  }, [attachedImages, attachedTextFiles, attachedUploads, draftKey, value, promptOnly, captureDraft]);
 
   useLayoutEffect(() => {
     const previousDraftKey = draftKeyRef.current;
@@ -1054,6 +1069,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // Add only live deltas to its merged snapshot, not the source twice.
       const source = draftIdentityMove.sourceDraft ?? persistedDraftRef.current;
       const draft = getDraft(draftKey);
+      setPromptOnly(promptOnlyRef.current || Boolean(draft?.promptOnly));
       draftKeyRef.current = draftKey;
       // A pending outbox commit (possibly from an earlier mount) follows only its own unchanged draft to the new key.
       moveDraftSubmissions(previousDraftKey, draftKey);
@@ -1108,17 +1124,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setQueuedDeleteTarget(null);
 
     if (previousDraftKey) {
-      setDraft(previousDraftKey, {
-        value: valueRef.current,
-        images: attachedImagesRef.current.map(imageToDraftImage),
-        files: attachedTextFilesRef.current.map(textFileToDraftFile),
-        uploads: attachedUploadsToDraftUploads(attachedUploadsRef.current),
-      });
+      setDraft(previousDraftKey, captureDraft());
     }
 
     const draft = draftKey ? getDraft(draftKey) : null;
     draftKeyRef.current = draftKey;
     setRawValue(draft?.value ?? "");
+    setPromptOnly(Boolean(draft?.promptOnly));
     setAtQuery(null);
     setSlashMatch(null);
     setHistoryMenuOpen(false);
@@ -1135,16 +1147,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       for (const upload of prev) if (upload.previewUrl) URL.revokeObjectURL(upload.previewUrl);
       return draftUploadsToAttachedUploads(draft?.uploads);
     });
-  }, [draftKey, draftIdentityMove]);
+  }, [draftKey, draftIdentityMove, setPromptOnly, captureDraft]);
 
   useLayoutEffect(() => subscribeDraftRecovery((key, recovery) => {
     if (draftKeyRef.current !== key) return;
     const { text } = recovery;
+    if (recovery.promptOnly) setPromptOnly(true);
     // Merge with pending edits rather than replacing them with a store snapshot.
     setValue((current) => mergeRecoveredText(current, recovery));
     const images = recovery.images ?? [];
     if (images.length) {
       setAttachedImages((prev) => [...prev, ...draftImagesToAttachedImages(images)]);
+    }
+    const files = draftFilesToAttachedFiles(recovery.files);
+    if (files.length) {
+      setAttachedTextFiles((prev) => [...prev, ...files]);
     }
     const uploads = draftUploadsToAttachedUploads(recovery.uploads);
     if (uploads.length) {
@@ -1162,14 +1179,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
     });
-  }), [setValue]);
+  }), [setValue, setPromptOnly]);
 
   useLayoutEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = "auto";
     if (value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, [value]);
+  }, [value, bashMode]); // the shell font changes the wrapping without changing the value
   useEffect(() => {
     return () => {
       // Drop any reads still in flight when the composer goes away entirely
@@ -1246,12 +1263,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
     // `!cmd` runs right away during a run too, as in omp's terminal; it is never queued as text.
-    const shellCommand = msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length;
+    const shellCommand = !promptOnlyRef.current && msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length;
     if (submissionBlockedRef.current || holdingRef.current || (isStreaming && !shellCommand)) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
     if (rejectsPendingUploads()) return;
-    const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
+    const files = attachedTextFilesRef.current;
+    const composedMessage = composeMessageWithTextAttachments(msg, files);
     if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
       const expansion = expandWebSlashCommand(msg);
       if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImagesRef.current)) return;
@@ -1261,11 +1279,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
     const key = draftKeyRef.current;
     const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
-    const recovery = { text: composedMessage, images: images?.map(imageToDraftImage), ...uploadRecovery(attachedUploadsRef.current) };
+    const recovery = { text: msg, images: images?.map(imageToDraftImage), files: files.length ? files.map(textFileToDraftFile) : undefined, ...(promptOnlyRef.current ? { promptOnly: true } : {}), ...uploadRecovery(attachedUploadsRef.current) };
     const stored = outbox && !shellCommand ? clearOnceStored(raw) : undefined;
+    // Preserve explicit prompt intent after inline files or native queue recovery lose their original structure.
+    const sendTail: [uploads?: string[], proofs?: Record<string, string>, options?: PromptSendOptions] = uploadArgs(attachedUploadsRef.current);
+    if (files.length || promptOnlyRef.current) sendTail[2] = { promptOnly: true };
     let pending: Promise<PromptSubmissionResult>;
     try {
-      pending = onSend(composedMessage, images, ...uploadArgs(attachedUploadsRef.current));
+      pending = onSend(composedMessage, images, ...sendTail);
     } catch (error) {
       stored?.release();
       throw error;
@@ -1740,7 +1761,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
     if (sendSideQuestion(msg, overrideText)) return;
     if (rejectsPendingUploads()) return;
-    if (msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) {
+    if (!promptOnlyRef.current && msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) {
       void handleSend(overrideText);
       return;
     }
@@ -1821,6 +1842,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // The button follows the same Settings choice as Enter: soft keyboards have no
   // Enter to submit with, so this button is how touch devices steer.
   const primaryActionMode = primaryActionQueuesMessage && onSteer && getSubmitDuringRunBehavior() === "steer" ? "steer" : "followup";
+  // `!cmd` runs at once even during a run (sendQueued hands it to handleSend), so the button must not offer to queue it.
+  const primaryActionRunsShell = primaryActionQueuesMessage && bashMode;
 
   // ── Queued follow-up bar ────────────────────────────────────────────────
   // Texts are mirrored locally; mutations wait for native acknowledgement.
@@ -1858,7 +1881,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (!removed || action !== "edit") return;
       // Recover to this conversation's last confirmed owner, not a later navigation.
       // omp labels an image-only message "[Image]": not text when it has images.
-      recoverDraft(recoveryIdentity.key, { text: entry.text === "[Image]" && removed.length > 0 ? "" : entry.text, images: removed });
+      recoverDraft(recoveryIdentity.key, { text: entry.text === "[Image]" && removed.length > 0 ? "" : entry.text, images: removed, promptOnly: true });
     } catch (error) {
       setQueuedDeleteTarget(null);
       toast.error(error instanceof Error ? error.message : String(error));
@@ -3132,8 +3155,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           <div
             role="status"
             aria-live="polite"
+            data-shell={shellMode}
             style={{
-              border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
+              border: "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
               borderBottom: "none",
               borderRadius: queuedCount > 0 ? 0 : "var(--radius-card) var(--radius-card) 0 0",
               background: "var(--bg-panel)",
@@ -3154,11 +3178,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         )}
           <div
             className="chat-input-shell"
+            data-shell={shellMode}
             style={{
               display: "flex",
               flexDirection: "column",
-              background: "var(--bg)",
-              border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
+              background: "var(--shell-bg, var(--bg))",
+              border: "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
               borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
@@ -3190,6 +3215,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             value={value}
             onChange={(e) => {
               setValue(e.target.value);
+              if (!e.target.value) setPromptOnly(false);
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
               updateSlashQuery(e.target.value, e.target.selectionStart);
@@ -3238,7 +3264,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               color: "var(--text)",
               fontSize: "var(--chat-user-font-size)",
               lineHeight: "var(--chat-line-height)",
-              fontFamily: "inherit",
+              fontFamily: bashMode ? "var(--font-mono)" : "inherit",
               minHeight: 24,
               maxHeight: 200,
               overflow: "auto",
@@ -3891,7 +3917,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   else sendQueued(primaryActionMode);
                 }}
                 disabled={submissionBlocked || isTranscribing}
-                title={t(primaryActionMode === "steer" ? "chatInput.steerNowTitle" : "chatInput.queueMessage")}
+                title={primaryActionRunsShell ? t("chatInput.runShell") : t(primaryActionMode === "steer" ? "chatInput.steerNowTitle" : "chatInput.queueMessage")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: "var(--accent-strong)",
@@ -3904,10 +3930,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   transition: "background var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                {primaryActionMode === "steer"
+                {primaryActionRunsShell
+                  ? <Terminal size={13} strokeWidth={2} aria-hidden="true" />
+                  : primaryActionMode === "steer"
                   ? <CornerDownRight size={13} strokeWidth={2} aria-hidden="true" />
                   : <ListChecks size={13} strokeWidth={2} aria-hidden="true" />}
-                {t(primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
+                {t(primaryActionRunsShell ? "chatInput.runShell" : primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
               </button>
             ) : isStreaming ? (
               <button
@@ -3971,7 +3999,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
         {/* Bash mode status label */}
         {bashMode && (
-          <div className="text-xs px-2 py-1" style={{ color: bashExcluded ? "var(--text-muted)" : "var(--accent)", marginTop: 4 }}>
+          <div className="shell-mode-label text-xs px-2 py-1" data-shell={shellMode} style={{ marginTop: 4 }}>
             {bashExcluded ? t("chatInput.shellLocal") : t("chatInput.shellToModel")}
           </div>
         )}
