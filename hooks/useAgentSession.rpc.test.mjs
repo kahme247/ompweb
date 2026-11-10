@@ -5530,6 +5530,74 @@ test("equal-path file tabs retain their originating session when the selected ow
   view.unmount();
 });
 
+test("a retained foreign-source tab cannot mention its path into the selected worker chat", async (t) => {
+  resetWorld();
+  servePooledWorkspace();
+  window.history.replaceState(null, "", "?session=worker-one");
+  t.after(() => window.history.replaceState(null, "", "/"));
+  const view = ownRoot(render(React.createElement(AppShell, { appName: "ompweb" }), { wrapper: TestRoot }));
+  await settle();
+  const stream = world.esInstances.find(({ channel }) => channel.kind === "host-tools");
+  assert.ok(stream);
+  await until(() => view.queryByRole("button", { name: translate("appShell.showFilePanel") }), "the source conversation is selected");
+  await act(async () => {
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "Worker one draft" } });
+    stream.emit({ type: "host_tool_call", id: "mention-first-open", sessionId: "worker-one", toolName: "open_file", arguments: { path: "/shared/report.txt" } });
+    await sleep(60);
+  });
+  await until(() => view.queryByText("FIRST OWNER CONTENT"), "the first owner's file opens");
+  await act(async () => { fireEvent.click(view.getByText("Worker two conversation")); await sleep(60); });
+  await act(async () => {
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "Worker two draft" } });
+    stream.emit({ type: "host_tool_call", id: "mention-second-open", sessionId: "worker-two", toolName: "open_file", arguments: { path: "/shared/report.txt" } });
+    await sleep(60);
+  });
+  await until(() => view.queryByText("SECOND OWNER CONTENT"), "the selected worker's equal-path file opens separately");
+  const tabs = view.getAllByRole("tab", { name: /report\.txt/ });
+  assert.equal(tabs.length, 2);
+  await act(async () => { fireEvent.click(tabs[0]); await sleep(30); });
+  assert.equal(view.queryAllByText("FIRST OWNER CONTENT").some((element) => !element.closest('[style*="display: none"]')), true);
+  const foreignMention = view.queryByRole("button", { name: translate("appShell.mentionFileInChat") });
+  if (foreignMention) await act(async () => { fireEvent.click(foreignMention); });
+  assert.equal(view.getByRole("textbox").value, "Worker two draft", "a source-relative path must not be inserted into another worker's composer");
+  assert.equal(foreignMention === null || foreignMention.disabled, true, "the foreign-source action is unavailable");
+  await act(async () => { fireEvent.click(view.getByText("Worker one conversation")); await sleep(60); });
+  const sourceMention = view.getByRole("button", { name: translate("appShell.mentionFileInChat") });
+  assert.equal(sourceMention.disabled, false, "returning to the source session restores the action");
+  await act(async () => {
+    const composer = view.getByRole("textbox");
+    composer.focus();
+    composer.setSelectionRange(composer.value.length, composer.value.length);
+    fireEvent.click(sourceMention);
+  });
+  assert.equal(view.getByRole("textbox").value.includes("@report.txt"), true);
+  assert.equal(view.getByRole("textbox").value.startsWith("Worker one draft"), true);
+  view.unmount();
+});
+
+test("a populated local pool member keeps legacy access without a physical add-workspace control", async () => {
+  for (const localMember of [false, true]) {
+    resetWorld();
+    const { pools } = servePooledWorkspace();
+    if (localMember) pools[0].members.push({ hostId: "local", projectsRoot: "/projects", provisioned: true, draining: false });
+    const selected = [];
+    const view = ownRoot(render(React.createElement(SessionSidebar, {
+      selectedSessionId: null, onSelectSession: (session) => selected.push(session),
+      addProjectOpen: false, setAddProjectOpen() {}, usageVisible: false,
+    }), { wrapper: TestRoot }));
+    await settle();
+    await until(() => view.queryByText("Mac conversation"), "the local host's unmatched conversation remains reachable");
+    const add = view.queryByRole("button", { name: translate("hosts.addWorkspaceOn", { host: "Mac" }) });
+    if (localMember) assert.equal(add, null, "membership takes precedence over the reserved local host ID");
+    else assert.equal(add?.disabled, false, "a standalone non-member Mac keeps its add-workspace action");
+    await act(async () => { fireEvent.click(view.getByText("Mac conversation")); });
+    assert.deepEqual(selected.map(({ id, hostId, cwd, poolId }) => ({ id, hostId, cwd, poolId })), [
+      { id: "mac", hostId: "local", cwd: "/shared", poolId: undefined },
+    ]);
+    view.unmount();
+  }
+});
+
 test("local artifact images rendered from an assistant reply retain the reply's originating session", async () => {
   resetWorld();
   const view = ownRoot(render(React.createElement(MessageView, {

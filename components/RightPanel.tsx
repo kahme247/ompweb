@@ -146,6 +146,7 @@ export const RightPanel = memo(function RightPanel({
     onOpenFile(filePath, fileName, sourceSessionId ?? null, explorerCwd);
   }, [onOpenFile, sourceSessionId, explorerCwd]);
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
+  const activeFileMatchesSource = activeFileTab?.sourceSessionId === (sourceSessionId ?? null);
   const gitBadge = explorerIsRepo ? explorerGitCount : 0;
   const unreadNotifications = useUnreadNotificationCount();
   const [visitedViews, setVisitedViews] = useState<Set<RightPanelView>>(() => new Set(["explorer"]));
@@ -311,9 +312,10 @@ export const RightPanel = memo(function RightPanel({
             <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={activeFileTab.filePath}>
               <button
                 onClick={onMentionActiveFile}
+                disabled={!activeFileMatchesSource}
                 title={t("appShell.mentionFileInChat")}
                 aria-label={t("appShell.mentionFileInChat")}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--accent)", cursor: "pointer" }}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--accent)", cursor: activeFileMatchesSource ? "pointer" : "default", opacity: activeFileMatchesSource ? 1 : 0.45 }}
                 onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
               >
@@ -498,7 +500,7 @@ export const RightPanel = memo(function RightPanel({
                 sourceSessionId={tab.sourceSessionId}
                 gitRefreshKey={explorerRefreshKey}
                 active={tab.id === activeFileTabId && rightPanelOpen && rightView === "file"}
-                onMentionLines={tab.id === activeFileTabId && rightPanelOpen && rightView === "file" && tab.sourceSessionId === (sourceSessionId ?? null) ? onMentionLines : undefined}
+                onMentionLines={tab.id === activeFileTabId && rightPanelOpen && rightView === "file" && activeFileMatchesSource ? onMentionLines : undefined}
                 onOpenFile={(filePath) => onOpenFile(
                   filePath,
                   getFileName(filePath),

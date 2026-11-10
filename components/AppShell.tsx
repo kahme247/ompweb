@@ -1686,9 +1686,9 @@ export function AppShell({ appName }: { appName: string }) {
   // File-panel integrations: every action works on the active tab so the right
   // panel behaves like an editor toolbar, not just a tab strip.
   const handleMentionActiveFile = useCallback(() => {
-    if (!activeFileTab) return;
+    if (!activeFileTab || activeFileTab.sourceSessionId !== (selectedSession?.id ?? null)) return;
     handleAtMention(getRelativeFilePath(activeFileTab.filePath, activeFileTab.sourceCwd ?? undefined), false);
-  }, [activeFileTab, handleAtMention]);
+  }, [activeFileTab, selectedSession?.id, handleAtMention]);
 
   const handleCopyActiveFilePath = useCallback(() => {
     if (!activeFileTab) return;

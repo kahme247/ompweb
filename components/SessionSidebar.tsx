@@ -1816,7 +1816,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             const row = hosts?.find((candidate) => candidate.id === host.id);
             const member = pools.some((pool) => pool.members.some((member) => member.hostId === host.id));
             if (member && entries.length === 0) return null;
-            const canAdd = host.id === LOCAL_HOST_ID || host.id.startsWith("pool:") || (poolsLoaded && !member);
+            const canAdd = host.id.startsWith("pool:") || (!member && (host.id === LOCAL_HOST_ID || poolsLoaded));
             return (
               <HostGroup
                 key={host.id}

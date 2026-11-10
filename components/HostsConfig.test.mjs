@@ -22,10 +22,18 @@ afterEach(() => {
   globalThis.Worker = originalWorker;
 });
 
+function mockHostRequests(t, respond) {
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    // Configuration discovery is separate from each test's mutation/update requests.
+    if (String(url) === "/api/hosts" && (init?.method ?? "GET") === "GET") return Response.json({ hosts: [], pools: [] });
+    return respond(url, init);
+  });
+}
+
 test("the one-time host token survives Escape; only Done closes it", async (t) => {
   // The hosts list rides the shared event-stream worker; a silent one keeps it idle.
   globalThis.Worker = FakeWorker;
-  t.mock.method(globalThis, "fetch", async () => Response.json({ host: { id: "h1", label: "Laptop" }, token: "tok-once", command: "ompweb host login --url https://omp.test" }));
+  mockHostRequests(t, async () => Response.json({ host: { id: "h1", label: "Laptop" }, token: "tok-once", command: "ompweb host login --url https://omp.test" }));
   render(createElement(HostsConfig));
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Add host" }));
@@ -44,7 +52,7 @@ test("the one-time host token survives Escape; only Done closes it", async (t) =
 test("this machine can be renamed but not revoked", async (t) => {
   globalThis.Worker = FakeWorker;
   const patches = [];
-  t.mock.method(globalThis, "fetch", async (url, init) => {
+  mockHostRequests(t, async (url, init) => {
     if (String(url).includes("/updates")) return Response.json(updateInfo());
     patches.push([init?.method, JSON.parse(init?.body ?? "null")]);
     return Response.json({});
@@ -74,7 +82,7 @@ test("this machine can be renamed but not revoked", async (t) => {
 
 test("an offline this-machine row says to start the service, with the server's install command", async (t) => {
   globalThis.Worker = FakeWorker;
-  t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  mockHostRequests(t, async () => Response.json({}));
   render(createElement(HostsConfig));
   const row = (fields) => ({ id: "local", label: "", status: "offline", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, serverPlatform: "darwin", daemonManaged: true, ...fields });
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
@@ -108,7 +116,7 @@ test("an offline this-machine row says to start the service, with the server's i
 
 test("the local name hint is the input's description, not part of its label", async (t) => {
   globalThis.Worker = FakeWorker;
-  t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  mockHostRequests(t, async () => Response.json({}));
   render(createElement(HostsConfig));
   const row = { id: "local", label: "", status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: 3, serverVersion: 3, serverPlatform: "linux", daemonManaged: true };
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
@@ -144,7 +152,7 @@ async function showHosts(hosts) {
 
 test("local host shows both installed versions and a blocked candidate with its server reason", async (t) => {
   const urls = [];
-  t.mock.method(globalThis, "fetch", async (url) => {
+  mockHostRequests(t, async (url) => {
     urls.push(String(url));
     return Response.json(updateInfo({
       ompweb: software({ installMethod: "npm", protocolVersion: 3, canUpdate: false, blockedReason: "Update the web server first: protocol 4 is not supported." }),
@@ -163,7 +171,7 @@ test("local host shows both installed versions and a blocked candidate with its 
 test("remote daemon update requires closing host sessions and targets only that host; acceptance is not success", async (t) => {
   const posts = [];
   let operation = null;
-  t.mock.method(globalThis, "fetch", async (url, init) => {
+  mockHostRequests(t, async (url, init) => {
     if (init?.method === "POST") {
       posts.push([String(url), JSON.parse(init.body)]);
       operation = { id: "op1", target: "ompweb", version: "1.1.0", state: "running" };
@@ -193,7 +201,7 @@ test("remote daemon update requires closing host sessions and targets only that 
 
 test("runtime update explains existing sessions without forcing any session restart", async (t) => {
   const requests = [];
-  t.mock.method(globalThis, "fetch", async (url, init) => {
+  mockHostRequests(t, async (url, init) => {
     requests.push([String(url), init?.method ?? "GET", init?.body]);
     if (init?.method === "POST") return Response.json({ accepted: true, operation: { id: "omp1", target: "omp", version: "1.1.0", state: "succeeded" } }, { status: 202 });
     return Response.json(updateInfo());
@@ -209,7 +217,7 @@ test("runtime update explains existing sessions without forcing any session rest
 
 test("offline and protocol-incompatible hosts render unavailable rows without requesting updates", async (t) => {
   const calls = [];
-  t.mock.method(globalThis, "fetch", async (url) => { calls.push(url); return Response.json({}); });
+  mockHostRequests(t, async (url) => { calls.push(url); return Response.json({}); });
   await showHosts([hostRow({ status: "offline" }), hostRow({ id: "old", label: "Old", status: "needs-upgrade", allowAgentStart: false })]);
   assert.equal(screen.getAllByText("ompweb host").length, 2);
   assert.equal(screen.getAllByText("omp runtime").length, 2);
@@ -220,7 +228,7 @@ test("offline and protocol-incompatible hosts render unavailable rows without re
 
 test("old daemon 501 stops checking and explains unsupported updates", async (t) => {
   let calls = 0;
-  t.mock.method(globalThis, "fetch", async () => {
+  mockHostRequests(t, async () => {
     calls++;
     return Response.json({ error: "unknown operation", code: "unknown_op" }, { status: 501 });
   });
@@ -232,7 +240,7 @@ test("old daemon 501 stops checking and explains unsupported updates", async (t)
 
 test("a failed manual check keeps known versions but never claims up to date", async (t) => {
   let fail = false;
-  t.mock.method(globalThis, "fetch", async () => fail
+  mockHostRequests(t, async () => fail
     ? Response.json({ error: "Registry unavailable" }, { status: 503 })
     : Response.json(updateInfo({ ompweb: software({ updateAvailable: false, availableVersion: null }), omp: software({ updateAvailable: false, availableVersion: null }) })));
   await showHosts([hostRow()]);
@@ -252,7 +260,7 @@ for (const [lost, answer] of [
   test(`after ${lost}, status is requested before another POST and shows the real failure`, async (t) => {
     const calls = [];
     let operation = null;
-    t.mock.method(globalThis, "fetch", async (url, init) => {
+    mockHostRequests(t, async (url, init) => {
       calls.push(init?.method ?? "GET");
       if (init?.method === "POST") {
         // The host received the request and started the update; only its answer was lost.
@@ -273,7 +281,7 @@ for (const [lost, answer] of [
 test("an unknown update outcome keeps Update disabled until a status read succeeds, then allows one fresh attempt", async (t) => {
   const methods = [];
   let statusAvailable = true;
-  t.mock.method(globalThis, "fetch", async (_url, init) => {
+  mockHostRequests(t, async (_url, init) => {
     methods.push(init?.method ?? "GET");
     if (init?.method === "POST") {
       statusAvailable = false;
@@ -305,7 +313,7 @@ test("an unknown update outcome keeps Update disabled until a status read succee
 
 test("unmount aborts an outstanding host update check", async (t) => {
   let signal;
-  t.mock.method(globalThis, "fetch", (_url, init) => {
+  mockHostRequests(t, (_url, init) => {
     signal = init.signal;
     return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError"))));
   });
@@ -317,7 +325,7 @@ test("unmount aborts an outstanding host update check", async (t) => {
 
 test("idle host checks stop, and a manual check bypasses cached release data", async (t) => {
   const urls = [];
-  t.mock.method(globalThis, "fetch", async (url) => {
+  mockHostRequests(t, async (url) => {
     urls.push(String(url));
     return Response.json(updateInfo());
   });
@@ -334,7 +342,7 @@ test("reconnect polling is bounded and requires a status check before any retry"
   let offset = 0;
   t.mock.method(Date, "now", () => now() + offset);
   let calls = 0;
-  t.mock.method(globalThis, "fetch", async () => {
+  mockHostRequests(t, async () => {
     calls++;
     return Response.json(updateInfo({ operation: { id: "running", target: "ompweb", version: "1.1.0", state: "running" } }));
   });
@@ -349,7 +357,7 @@ test("reconnect polling is bounded and requires a status check before any retry"
 });
 
 test("unavailable discovery retains versions advertised by the host", async (t) => {
-  t.mock.method(globalThis, "fetch", async () => Response.json({ error: "unknown_op", code: "unknown_op" }, { status: 501 }));
+  mockHostRequests(t, async () => Response.json({ error: "unknown_op", code: "unknown_op" }, { status: 501 }));
   await showHosts([hostRow({ ompwebVersion: "0.6.7", ompVersion: "20.0.1" })]);
   await screen.findByText("This host daemon does not support updates. Upgrade it manually first.");
   screen.getByText("Current: 0.6.7");
@@ -357,7 +365,7 @@ test("unavailable discovery retains versions advertised by the host", async (t) 
 });
 
 test("per-software discovery failure or unknown installed version never claims up to date", async (t) => {
-  t.mock.method(globalThis, "fetch", async () => Response.json(updateInfo({
+  mockHostRequests(t, async () => Response.json(updateInfo({
     ompweb: software({ availableVersion: null, updateAvailable: false, canUpdate: false, blockedReason: "Registry metadata could not be loaded", installMethod: "npm", protocolVersion: 3 }),
     omp: software({ currentVersion: null, availableVersion: null, updateAvailable: false, canUpdate: false, updatesDisabled: false }),
   })));
@@ -367,7 +375,7 @@ test("per-software discovery failure or unknown installed version never claims u
 });
 
 test("a registry version that is not newer is not shown as an available candidate", async (t) => {
-  t.mock.method(globalThis, "fetch", async () => Response.json(updateInfo({
+  mockHostRequests(t, async () => Response.json(updateInfo({
     ompweb: software({ currentVersion: "18.14.0", availableVersion: "18.14.0", updateAvailable: false, canUpdate: false, installMethod: "npm", protocolVersion: 3 }),
     omp: software({ currentVersion: "20.1.0-beta.1", availableVersion: "20.0.9", updateAvailable: false, canUpdate: false, updatesDisabled: false }),
   })));
@@ -380,7 +388,7 @@ test("a registry version that is not newer is not shown as an available candidat
 });
 
 test("resident-session blocking stays readable with a disabled daemon update and allows runtime updates", async (t) => {
-  t.mock.method(globalThis, "fetch", async () => Response.json(updateInfo({
+  mockHostRequests(t, async () => Response.json(updateInfo({
     ompweb: software({ canUpdate: false, blockedReason: "Close all sessions on Laptop before updating the host daemon.", installMethod: "npm", protocolVersion: 3 }),
   })));
   await showHosts([hostRow({ id: "laptop", label: "Laptop", allowAgentStart: false })]);
