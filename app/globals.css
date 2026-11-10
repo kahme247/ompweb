@@ -1661,6 +1661,23 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   filter: brightness(1.08);
 }
 
+.file-viewer-language-select {
+  height: 24px;
+  max-width: 140px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.file-viewer-language-select:hover {
+  color: var(--text);
+}
+
 .file-viewer-icon-button {
   display: inline-flex;
   align-items: center;
@@ -1695,7 +1712,8 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
 }
 
 .file-viewer-mode-button:focus-visible,
-.file-viewer-icon-button:focus-visible {
+.file-viewer-icon-button:focus-visible,
+.file-viewer-language-select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }

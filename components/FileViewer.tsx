@@ -5,6 +5,7 @@ import type { SyntaxHighlighterProps } from "react-syntax-highlighter";
 import {
   createSyntaxElement as renderSyntaxNode,
   ensureLanguageRegistered,
+  HIGHLIGHT_LANGUAGES,
   isLanguageRegistered,
   SyntaxHighlighter,
   vs,
@@ -823,6 +824,8 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
   }, [data]);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("source");
   const [wrapLines, setWrapLines] = useState(false);
+  // Picked by the user when the extension maps to the wrong grammar or none; null = detected.
+  const [languageOverride, setLanguageOverride] = useState<string | null>(null);
   const [watching, setWatching] = useState(false);
   const gitDiffRequestRef = useRef(0);
   const contentRequestRef = useRef(0);
@@ -888,6 +891,7 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
     setGitDiff(null);
     setDisplayMode("source");
     setWrapLines(false);
+    setLanguageOverride(null);
     setWatching(false);
 
     // Cancel effect-local work on filePath change so a stale in-flight load
@@ -1121,6 +1125,18 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
           <div className="file-viewer-actions">
             {displayMode === "source" && (
               <>
+                <Tooltip content={t("fileViewer.highlightLanguage")}>
+                  <select
+                    value={languageOverride ?? ""}
+                    onChange={(event) => setLanguageOverride(event.target.value || null)}
+                    aria-label={t("fileViewer.highlightLanguage")}
+                    className="file-viewer-language-select"
+                  >
+                    <option value="">{t("fileViewer.languageAuto", { language: data.language })}</option>
+                    <option value="plaintext">{t("fileViewer.plainText")}</option>
+                    {HIGHLIGHT_LANGUAGES.map((language) => <option key={language} value={language}>{language}</option>)}
+                  </select>
+                </Tooltip>
                 <Tooltip content={t("fileViewer.mentionSelectedLines")}>
                   <button
                     type="button"
@@ -1241,7 +1257,7 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
         ) : highlightReady ? (
           <SyntaxHighlighter
             className={wrapLines ? "file-source-view is-wrapped" : "file-source-view"}
-            language={data.language === "text" ? "plaintext" : data.language}
+            language={languageOverride ?? (data.language === "text" ? "plaintext" : data.language)}
             style={isDark ? vscDarkPlus : vs}
             showLineNumbers
             lineNumberStyle={{
