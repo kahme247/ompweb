@@ -286,6 +286,20 @@ export class StagedUploads {
     });
   }
 
+  /** Consume a completed staged body while abort and sweeping cannot remove it. */
+  async withCompleted<T>(id: unknown, maxBytes: number, consume: (path: string) => Promise<T>): Promise<T> {
+    if (!isUploadId(id)) throw new HostOpError(400, "invalid_request", "Invalid upload id");
+    return this.control(id, async () => {
+      const meta = await this.meta(id);
+      const part = this.path(id, "part");
+      const size = meta ? await sizeOf(part) : null;
+      if (!meta || meta.attached || size === null) throw new HostOpError(404, "upload_missing", "The staged body is missing");
+      if (this.open.has(id) || size !== meta.size) throw new HostOpError(409, "upload_incomplete", "The upload has not finished");
+      if (meta.size > maxBytes) throw new HostOpError(413, "upload_total_too_large", "Uploads must total 100MB or less");
+      return consume(part);
+    });
+  }
+
   /** Op uploadAttach: hard-link (or copy) a finished upload into the session's `local://uploads/`, never over an
    * existing file (a taken name gets ` (1)`, ` (2)`, ...). `sessionFile` is already confined to the sessions directory. */
   async attach(id: unknown, sessionFile: string, sessionId: unknown): Promise<{ path: string; url: string }> {

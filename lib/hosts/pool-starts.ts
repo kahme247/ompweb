@@ -122,6 +122,12 @@ function readJournal(): Journal {
   } catch { throw unavailable(); }
 }
 
+/** Retained real ownership is authoritative even before lazy transcript persistence. */
+export function pooledWorkspaceForSession(sessionId: string): { hostId: string; cwd: string; projectRoot: string } | null {
+  const entry = readJournal().starts.find((start) => start.sessionId === sessionId && start.prepared && start.creation !== "refused");
+  return entry?.prepared ? { hostId: entry.hostId, cwd: entry.prepared.cwd, projectRoot: entry.prepared.projectRoot } : null;
+}
+
 function writeJournal(journal: Journal): void {
   const file = journalPath();
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;

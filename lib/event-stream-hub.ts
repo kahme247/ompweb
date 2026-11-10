@@ -16,6 +16,8 @@ import {
 import { browserTransportState } from "./web-settings";
 import { isDeltaUpdate, mergeDeltaUpdates } from "./message-delta";
 import { isRecord } from "./type-guards";
+import { apiErrorResponse, resolveWorkspaceOwner } from "./api-utils";
+import { isLinkUp } from "./hosts/host";
 
 // Server half of the multiplexed live-event stream (see event-stream-protocol).
 // One EventStreamConnection = one `/api/events` SSE response = one browser
@@ -424,6 +426,45 @@ function openSessionChannel(sessionId: string, handle: SubscriptionHandle): Subs
 
 // Change notifications for one file open in the viewer.
 async function openFileChannel(rawPath: string, sessionId: string | null, handle: SubscriptionHandle): Promise<SubscribeResult> {
+  if (sessionId !== null) {
+    try {
+      const owner = await resolveWorkspaceOwner(sessionId);
+      if ("response" in owner) {
+        const error = await owner.response.json();
+        return { ok: false, status: owner.response.status, error: error.error, code: error.code };
+      }
+      const ops = owner.host.sessionOps;
+      const watch = await ops.workspaceWatch(owner.context, rawPath);
+      if (!watch.ok) return watch;
+      const id = watch.value.id;
+      if (!handle.active) { await ops.workspaceUnwatch(id); return SUBSCRIBED; }
+      let active = true;
+      const detachStatus = owner.host.onStatus((state) => { if (!isLinkUp(state)) handle.end(); });
+      handle.setDetach(() => {
+        active = false;
+        detachStatus();
+        void ops.workspaceUnwatch(id).catch(() => {});
+      });
+      handle.open();
+      handle.send({ type: "connected", filePath: watch.value.filePath });
+      const poll = async () => {
+        try {
+          while (active && handle.active) {
+            const update = await ops.workspaceWatchPoll(id);
+            if (!active || !handle.active) return;
+            if (!update.ok) { handle.end(); return; }
+            if (update.value) handle.send(update.value);
+          }
+        } catch { if (active) handle.end(); }
+      };
+      void poll();
+      return SUBSCRIBED;
+    } catch (error) {
+      const response = apiErrorResponse(error);
+      const body = await response.json();
+      return { ok: false, status: response.status, error: body.error, code: body.code ?? "subscribe_failed" };
+    }
+  }
   const access = await authorizeFileAccess(filePathApiSegments(rawPath), sessionId, true);
   if (!access.ok) return { ok: false, status: access.status, error: access.error, code: access.code };
   const { filePath } = access;

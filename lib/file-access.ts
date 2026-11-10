@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
 import path from "path";
@@ -7,6 +8,13 @@ import { hostSessions } from "./hosts/session-index";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 
 export { isWindowsAbsolutePath } from "./paths";
+
+const scopedRoots = new AsyncLocalStorage<Set<string>>();
+
+/** Owner roots are resolved by trusted session metadata, never browser input. */
+export function withFileAccessRoots<T>(roots: Set<string>, run: () => T): T {
+  return scopedRoots.run(roots, run);
+}
 
 // Allowed roots — in-memory plus session-derived, globalThis for hot-reload.
 declare global {
@@ -84,7 +92,7 @@ export function isConfigRootDeniedFile(filePath: string): boolean {
   const name = base.slice(base.lastIndexOf("/") + 1).toLowerCase();
   // SQLite sidecars carry the same credentials as the db itself.
   if (CONFIG_ROOT_DENIED_FILES.has(name)) return true;
-  return CONFIG_ROOT_DENIED_FILES.has(name.split(".").slice(0, -1).join(".")) && name.includes(".db");
+  return /^agent\.db(?:[-.].+)$/.test(name);
 }
 
 /** True when `filePath` lives under one of the omp config/agent roots. */
@@ -93,7 +101,21 @@ export function isUnderConfigRoot(filePath: string, configRoots: readonly string
   return configRoots.some((root) => isPathWithinRoots(target, new Set([normalizeSlashes(root)])));
 }
 
+/** Check both spelling and canonical destination, including a symlinked config root. */
+export function isProtectedConfigFile(filePath: string): boolean {
+  const roots = getConfigAgentRoots();
+  if (isUnderConfigRoot(filePath, roots) && isConfigRootDeniedFile(filePath)) return true;
+  let canonical = filePath;
+  try { canonical = realpathSync(filePath); } catch { /* A new upload target does not exist yet. */ }
+  const canonicalRoots = roots.flatMap((root) => {
+    try { return [realpathSync(root)]; } catch { return []; }
+  });
+  return isUnderConfigRoot(canonical, canonicalRoots) && isConfigRootDeniedFile(canonical);
+}
+
 export async function getAllowedFileRoots(): Promise<Set<string>> {
+  const scoped = scopedRoots.getStore();
+  if (scoped) return scoped;
   const now = Date.now();
   const cached = globalThis.__piAllowedRootsCache;
   if (cached && cached.expiresAt > now) return cached.roots;

@@ -706,7 +706,8 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     const pending = link.pending.get(result.id);
     if (pending) {
       pending.blobBytes += result.bytes.byteLength;
-      if (pending.blobBytes <= LINK_LIMITS.blobBytes) {
+      const limit = pending.op === "workspaceRead" ? LINK_LIMITS.pieceBytes : LINK_LIMITS.blobBytes;
+      if (pending.blobBytes <= limit) {
         pending.blob.push(result.bytes);
         // The deadline is for silence: at one unacked window per round trip a valid 64 MiB result outlasts a fixed one.
         // Only bytes the hub keeps count, so empty or surplus frames cannot hold an op open.
@@ -888,11 +889,12 @@ function settle(link: Link, message: Res): void {
     return;
   }
   if (!message.blob) return pending.resolve(message.result);
-  if (pending.blob.length === 0 || pending.blobBytes > LINK_LIMITS.blobBytes || pending.blobBytes !== message.blob.bytes) {
+  const limit = pending.op === "workspaceRead" ? LINK_LIMITS.pieceBytes : LINK_LIMITS.blobBytes;
+  if (pending.blob.length === 0 || pending.blobBytes > limit || pending.blobBytes !== message.blob.bytes) {
     return pending.reject(new HostOpError(502, "host_blob_missing", `${label} did not deliver the ${pending.op} result`));
   }
   const blob = pending.blob.length === 1 ? pending.blob[0] : Buffer.concat(pending.blob);
-  if (pending.op === "readMedia") return pending.resolve({ ok: true, value: blob });
+  if (pending.op === "readMedia" || pending.op === "workspaceRead") return pending.resolve({ ok: true, value: blob });
   try {
     pending.resolve(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(blob)));
   } catch {
@@ -935,6 +937,16 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
     // Media bytes only ever arrive through the blob leg.
     case "readMedia":
       return value instanceof Uint8Array;
+    case "workspaceRead":
+      return value === null || (value instanceof Uint8Array && value.byteLength <= LINK_LIMITS.pieceBytes);
+    case "workspaceRequest":
+      return isRecord(value) && Number.isInteger(value.status) && Number(value.status) >= 200 && Number(value.status) <= 599 && Array.isArray(value.headers)
+        && value.headers.every((header) => Array.isArray(header) && header.length === 2 && header.every((part) => typeof part === "string"))
+        && (value.readId === null || typeof value.readId === "string");
+    case "workspaceWatch":
+      return isRecord(value) && typeof value.id === "string" && typeof value.filePath === "string";
+    case "workspaceWatchPoll":
+      return value === null || (isRecord(value) && value.type === "change" && typeof value.mtime === "string" && typeof value.size === "number");
     // Main uses these paths (spawn cwd, project keys): they must be strings.
     case "validateCwd":
       return isRecord(value) && typeof value.cwd === "string" && typeof value.projectRoot === "string";

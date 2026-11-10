@@ -2,6 +2,7 @@
 // the omp children it asks for and answers host ops with this machine's files.
 // bin/omp-web-host.js loads it through jiti: no `next/*` or `@/` imports.
 import { lstatSync, realpathSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -49,6 +50,7 @@ import packageJson from "../../package.json";
 import { acknowledgeHostUpdateHealth, checkHostUpdates, configureHostUpdateSafety, getHostUpdateOperation, HostUpdateError, startHostUpdate } from "./updates";
 import type { HostUpdateCompatibility, HostUpdateOperation } from "./update-types";
 import { StagedUploads, UPLOAD_SWEEP_INTERVAL_MS } from "./uploads";
+import { runWorkspaceRequest, resetWorkspaceResources, workspaceReadsBusy, type WorkspaceRequest } from "../workspace-files";
 
 const FIRST_RETRY_MS = 1_000;
 const MAX_RETRY_MS = 60_000;
@@ -198,6 +200,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   let updateStateWarningLogged = false;
   // Upload acks go under the upload's own key, fair with the channels.
   const uploads = new StagedUploads((ack) => void queue({ type: "upload_ack", ...ack }, `up:${ack.id}`));
+  const workspaceUploads = new Set<string>();
+  const closeWorkspaceUploads = () => {
+    for (const id of workspaceUploads) void uploads.abort(id).catch(() => {});
+    workspaceUploads.clear();
+  };
   void uploads.sweep();
   // A cancel that never reached this host (the browser closed while offline) leaves its staged file: an idle host still
   // deletes it once it expires, not only at start or on the next upload.
@@ -249,6 +256,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     if (channels.size > 0 || spawnsInFlight > 0) return "Close this host's sessions before updating its daemon; sessions and subagents must not be interrupted.";
     if (preparationsInFlight > 0) return "Wait for pooled project preparation to finish before updating this daemon.";
     if (uploads.busy()) return "Wait for this host's active uploads and control writes to finish.";
+    if (workspaceReadsBusy()) return "Wait for active filesystem reads to finish.";
     if (operationsInFlight > 0) return "Wait for pending host operations to finish.";
     if (reliablePending.size > 0) return "Wait for reliable host results to be delivered.";
     return null;
@@ -576,11 +584,12 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     // A session op names its session `id`; host ops serve none.
     const session = isRecord(args) && typeof args.id === "string" && isValidSessionId(args.id) ? args.id : null;
     const nativeUpdate = op === "checkUpdates" || op === "updateSoftware";
+    const passiveWatch = op === "workspaceWatchPoll";
     if (nativeUpdate) nativeUpdatesInFlight += 1;
-    else operationsInFlight += 1;
+    else if (!passiveWatch) operationsInFlight += 1;
     try {
       const result = await runOp(op, args);
-      const media = op === "readMedia" && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
+      const media = (op === "readMedia" || op === "workspaceRead") && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
       const json = media ? undefined : JSON.stringify(result);
       const blob = media ?? (json !== undefined && Buffer.byteLength(json) > LINK_LIMITS.inlineResultBytes ? Buffer.from(json) : null);
       if (!blob) {
@@ -607,7 +616,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       queue({ type: "res", id, ok: false, error: failure }, id, { session });
     } finally {
       if (nativeUpdate) nativeUpdatesInFlight -= 1;
-      else operationsInFlight -= 1;
+      else if (!passiveWatch) operationsInFlight -= 1;
     }
   }
 
@@ -615,8 +624,24 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     // Preserve typed refusal for operations this daemon does not implement.
     if (!isHostOp(op)) throw new HostOpError(501, "unknown_op", `Unknown host op: ${op}`);
     if (!isRecord(args)) throw new HostOpError(400, "invalid_request", "Host op arguments must be an object");
-    if (drained) throw new HostOpError(409, "host_drained", "This host is locally drained for maintenance; resume it before starting new work");
+    if (drained && op !== "workspaceClose" && op !== "workspaceUnwatch") throw new HostOpError(409, "host_drained", "This host is locally drained for maintenance; resume it before starting new work");
     switch (op) {
+      case "workspaceRequest": {
+        const input = args.input as WorkspaceRequest;
+        const ownerLink = linked;
+        if (input?.context) {
+          const live = [...channels.values()].find((channel) => channel.pending.sessionId === input.context.sessionId);
+          if (live) input.context = { ...input.context, cwd: live.cwd };
+        }
+        if (input?.bodyUploadId) {
+          return uploads.withCompleted(input.bodyUploadId, 101 * 1024 * 1024, async (file) => {
+            const bytes = await readFile(file);
+            if (!ownerLink || linked !== ownerLink) throw new HostOpError(503, "host_offline", "The owner link closed");
+            return runWorkspaceRequest(input, new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) as Uint8Array<ArrayBuffer>);
+          });
+        }
+        return runWorkspaceRequest(input);
+      }
       case "spawn":
         return spawnChannel(args);
       case "sessionFileExists":
@@ -630,8 +655,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         if ((args.target !== "ompweb" && args.target !== "omp") || typeof args.version !== "string") throw new HostOpError(400, "invalid_request", "Invalid host update");
         return startHostUpdate(args.target, args.version, updateCompatibility(args.compatibility));
       case "uploadStart":
-        return uploads.start(args);
+        if (args.workspaceBody === true && typeof args.id === "string") workspaceUploads.add(args.id);
+        try { return await uploads.start(args); }
+        catch (error) { if (typeof args.id === "string") workspaceUploads.delete(args.id); throw error; }
       case "uploadAbort":
+        if (typeof args.id === "string") workspaceUploads.delete(args.id);
         return uploads.abort(args.id);
       case "uploadAttach":
         return uploads.attach(args.id, sessionsPath(args.sessionFile), args.sessionId);
@@ -750,6 +778,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       capacityTimer = undefined;
       socket = null;
       linked = null;
+      resetWorkspaceResources();
+      closeWorkspaceUploads();
       inFlight = [];
       inFlightBytes = 0;
       resolve(closed);
@@ -883,6 +913,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     stopping ??= (async () => {
       stopSignal.abort();
       socket?.close();
+      resetWorkspaceResources();
+      closeWorkspaceUploads();
       clearTimeout(flushTimer);
       clearTimeout(statsTimer);
       clearInterval(sweepTimer);

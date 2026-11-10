@@ -75,6 +75,12 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   hideProject: ["path"],
   validateCwd: ["path"],
   preparePoolProject: ["input"],
+  workspaceRequest: ["input"],
+  workspaceRead: ["id"],
+  workspaceClose: ["id"],
+  workspaceWatch: ["context", "path"],
+  workspaceWatchPoll: ["id"],
+  workspaceUnwatch: ["id"],
 };
 
 /** Every op a daemon answers. Older daemons refuse unknown ops with 501; uploads require v6, pool preparation v7. */

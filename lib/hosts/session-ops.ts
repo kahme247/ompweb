@@ -59,6 +59,7 @@ import { SUBAGENT_ID_RE } from "../subagent-types";
 import { isRecord } from "../type-guards";
 import type { ManagedProject, ProjectLaunchConfig, SessionContext, SessionInfo, SessionTitleSource } from "../types";
 import { resolveProject } from "../worktree";
+import { runWorkspaceRequest, readWorkspaceBody, closeWorkspaceBody, openWorkspaceWatch, pollWorkspaceWatch, closeWorkspaceWatch, type WorkspaceRequest, type WorkspaceResponse, type WorkspaceContext, type WorkspaceChange } from "../workspace-files";
 
 export type OpResult<T> = { ok: true; value: T } | { ok: false; status: number; code: string; error: string };
 
@@ -116,6 +117,12 @@ export interface SessionOps {
   validateCwd(path: string): Promise<OpResult<{ cwd: string; projectRoot: string }>>;
   /** Input origin and cloneRoot must come from the server's registered pool project. */
   preparePoolProject(input: Parameters<typeof preparePoolProject>[0]): Promise<OpResult<PreparedPoolProject>>;
+  workspaceRequest(input: WorkspaceRequest): Promise<OpResult<WorkspaceResponse>>;
+  workspaceRead(id: string): Promise<OpResult<Uint8Array | null>>;
+  workspaceClose(id: string): Promise<OpResult<null>>;
+  workspaceWatch(context: WorkspaceContext, path: string): Promise<OpResult<{ id: string; filePath: string }>>;
+  workspaceWatchPoll(id: string): Promise<OpResult<WorkspaceChange | null>>;
+  workspaceUnwatch(id: string): Promise<OpResult<null>>;
 }
 
 const execFileAsync = promisify(execFile);
@@ -289,6 +296,12 @@ async function runOmpExport(filePath: string, outputPath: string): Promise<void>
 
 /** This machine's session and project files. */
 export const sessionOps: SessionOps = {
+  workspaceRequest: runWorkspaceRequest,
+  workspaceRead: readWorkspaceBody,
+  workspaceClose: closeWorkspaceBody,
+  workspaceWatch: openWorkspaceWatch,
+  workspaceWatchPoll: pollWorkspaceWatch,
+  workspaceUnwatch: closeWorkspaceWatch,
   listSessions: () => listAllSessions(),
 
   async readSession(id, { deferThinking, deferMedia: deferToolResultImages }) {

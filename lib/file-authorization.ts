@@ -3,11 +3,9 @@ import { homedir } from "os";
 import path from "path";
 import {
   getAllowedFileRoots,
-  getConfigAgentRoots,
-  isConfigRootDeniedFile,
   isExistingFilePathAllowed,
   isFilePathAllowed,
-  isUnderConfigRoot,
+  isProtectedConfigFile,
   isWindowsAbsolutePath,
   normalizeSlashes,
   resolveRequestedFilePath,
@@ -65,7 +63,7 @@ export async function authorizeFileAccess(
   // store inside an allowed root. Deny those by name before anything can
   // stat, read or download them. Only paths outside the config roots are
   // exempt, so a workspace that happens to hold an `agent.db` still opens.
-  if (isUnderConfigRoot(filePath, getConfigAgentRoots()) && isConfigRootDeniedFile(filePath)) {
+  if (isProtectedConfigFile(filePath)) {
     return ACCESS_DENIED;
   }
   const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
