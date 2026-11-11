@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, ClusterError, isClusterMember, joinCluster, leaveCluster, type HostProjectFacts } from "@/lib/hosts/cluster";
-import { isLinkUp, type Host } from "@/lib/hosts/host";
+import type { Host } from "@/lib/hosts/host";
 import { getHost, getHostLinkProtocol, notifyHostsChange } from "@/lib/hosts/hub";
 import { HostOpError } from "@/lib/hosts/link-protocol";
-import { loadPools, savePools, validatePools, type HostPool, type PoolMember, type PoolProject } from "@/lib/hosts/pools";
+import { loadPools, poolProjectBindings, savePools, validatePools, type HostPool, type PoolMember, type PoolProject } from "@/lib/hosts/pools";
 import { LOCAL_HOST_ID, loadHosts } from "@/lib/hosts/registry";
 import type { OpResult } from "@/lib/hosts/session-ops";
 import { hostSessions } from "@/lib/hosts/session-index";
@@ -50,22 +50,26 @@ function valueOf<T>(result: OpResult<T>): T {
 }
 
 function requireReady(host: Host): void {
-  if (!isLinkUp(host.status())) throw new HostOpError(409, "host_offline", `${host.label} is offline`);
+  if (host.status() !== "online") throw new HostOpError(409, "host_offline", `${host.label} is offline`);
   if ((getHostLinkProtocol(host.id) ?? 0) >= CLUSTER_SINCE_VERSION && host.supportsWorkspaceOp("gitOrigins")) return;
   throw host.id === LOCAL_HOST_ID
     ? new HostOpError(409, "host_restart_required", "Restart this machine's ompweb host daemon to join the cluster")
     : new HostOpError(409, "host_upgrade_required", `Update ompweb on ${host.label} to join the cluster`);
 }
 
-/** The host's registry (hidden entries included), then the project roots of its sessions the registry does not list. */
+/** The host's projects in its own order (mergeProjects: the order the user sees), then its hidden registry entries, which move too. */
 async function hostFacts(host: Host): Promise<HostProjectFacts[]> {
   const registry = await host.sessionOps.listProjects();
-  const listed = new Set(registry.map((entry) => comparableProjectPath(entry.path)));
   const discovered = (await hostSessions(host.id)).map((session) => session.projectRoot ?? session.cwd);
   // As listProjectsAllHosts: only this machine's paths resolve here.
-  const found = mergeProjects({ version: 1, projects: registry }, discovered, host.id === LOCAL_HOST_ID ? undefined : (path) => path)
-    .filter((project) => !listed.has(comparableProjectPath(project.path)));
-  const projects = [...registry, ...found];
+  const projects: HostProjectFacts["project"][] = mergeProjects({ version: 1, projects: registry }, discovered, host.id === LOCAL_HOST_ID ? undefined : (path) => path);
+  const seen = new Set(projects.map((project) => comparableProjectPath(project.path)));
+  for (const entry of registry) {
+    const key = comparableProjectPath(entry.path);
+    if (!entry.hidden || seen.has(key)) continue;
+    seen.add(key);
+    projects.push(entry);
+  }
   // Longer paths are not sent: they stay pinned.
   const sendable = projects.map((project) => project.path).filter((path) => path.length <= MAX_ORIGIN_PATH_LENGTH);
   const origins = new Map<string, GitOrigin | undefined>();
@@ -101,13 +105,31 @@ export async function PUT(request: Request, { params }: Context) {
     } catch {
       return storageFailure();
     }
-    const joining = isClusterMember(pools, LOCAL_HOST_ID) ? [host] : [getHost(LOCAL_HOST_ID), host];
+    const addLocal = !isClusterMember(pools, LOCAL_HOST_ID);
+    const joining = addLocal ? [getHost(LOCAL_HOST_ID), host] : [host];
     joining.forEach(requireReady);
+    // The host round trips come first. pools.json is then read again, joined and saved with no await between, so a change
+    // made meanwhile (a leave, another join, a pool edit) is kept.
+    const gathered: { member: { hostId: string; projectsRoot: string }; facts: HostProjectFacts[] }[] = [];
+    for (const target of joining) {
+      const root = target === host ? projectsRoot : await localProjectsRoot(target);
+      gathered.push({ member: { hostId: target.id, projectsRoot: root }, facts: await hostFacts(target) });
+    }
+    try {
+      pools = loadPools();
+    } catch {
+      return storageFailure();
+    }
+    // This machine's facts were not gathered: it was a member when the join began.
+    if (!addLocal && !isClusterMember(pools, LOCAL_HOST_ID)) return fail("The cluster changed during the join; try again", "cluster_changed", 409);
     const now = new Date().toISOString();
     const valid = (project: PoolProject) => passes([], [project]);
-    for (const member of joining) {
-      const root = member === host ? projectsRoot : await localProjectsRoot(member);
-      pools = joinCluster(pools, { hostId: member.id, projectsRoot: root }, await hostFacts(member), now, randomUUID, valid);
+    for (const { member, facts } of gathered) {
+      // Added meanwhile by another join.
+      if (member.hostId === LOCAL_HOST_ID && isClusterMember(pools, LOCAL_HOST_ID)) continue;
+      // A checkout a pool already binds for this host stays with that pool.
+      const bound = poolProjectBindings(pools).get(member.hostId);
+      pools = joinCluster(pools, member, facts.filter(({ project }) => !bound?.has(comparableProjectPath(project.path))), now, randomUUID, valid);
     }
     savePools(pools);
     notifyHostsChange();
