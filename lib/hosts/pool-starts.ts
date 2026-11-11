@@ -10,7 +10,7 @@ import type { ProjectLaunchConfig } from "../types";
 import { sharesCredentials } from "./cluster";
 import type { Host } from "./host";
 import { adoptedChild, getHost, getHostCapacity, getHostLinkProtocol, hostOwnsLifecycle, isHostConfigCurrent, reconcilePooledChild } from "./hub";
-import { CREATION_ID_RE, HostOpError, SHARED_CREDENTIALS_SINCE_VERSION, type HelloChannel } from "./link-protocol";
+import { CLUSTER_CONFIG_SINCE_VERSION, CREATION_ID_RE, HostOpError, SHARED_CREDENTIALS_SINCE_VERSION, type HelloChannel } from "./link-protocol";
 import { loadPools, pathApi, selectPoolHost, type PoolHostSnapshot } from "./pools";
 
 export interface PoolCreateInput {
@@ -336,11 +336,12 @@ export function startPooledSession(input: PoolCreateInput, start: Start, authori
       }
       const hostId = selectPoolHost(pool, snapshots, pending, performance.now());
       if (!hostId) {
-        // Only when members would be eligible but for the configuration: every otherwise-eligible one was skipped for that alone.
-        const caughtUp = new Map([...snapshots].map(([id, snapshot]) => [id, { ...snapshot, configCurrent: true }]));
-        throw new PoolStartError(503, "pool_unavailable", selectPoolHost(pool, caughtUp, pending, performance.now()) === null
-          ? "No pool worker currently has eligible capacity"
-          : "The pool's workers are still receiving the cluster's configuration");
+        // Say why only when members would be eligible but for the configuration. A member below protocol 10 never
+        // catches up, so it counts as "receiving" only for the message that names the update it needs.
+        const ifCurrent = (reached: (snapshot: PoolHostSnapshot) => boolean) => selectPoolHost(pool, new Map([...snapshots].map(([id, snapshot]) => [id, { ...snapshot, configCurrent: snapshot.configCurrent || reached(snapshot) }])), pending, performance.now()) !== null;
+        throw new PoolStartError(503, "pool_unavailable", ifCurrent((snapshot) => snapshot.linkProtocol >= CLUSTER_CONFIG_SINCE_VERSION)
+          ? "The pool's workers are still receiving the cluster's configuration"
+          : ifCurrent(() => true) ? "Update ompweb on the pool's workers to use them in the cluster" : "No pool worker currently has eligible capacity");
       }
       const member = pool.members.find((candidate) => candidate.hostId === hostId)!;
       const cloneRoot = project.clonePaths[hostId] ?? pathApi(member.projectsRoot).join(member.projectsRoot, project.id);
