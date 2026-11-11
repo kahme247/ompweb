@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { apiErrorResponse, opErrorResponse, resolveHostOrError } from "@/lib/api-utils";
 import { isValidOmpProfile } from "@/lib/omp-profile";
 import { allowFileRoot } from "@/lib/file-access";
 import { LOCAL_HOST_ID } from "@/lib/hosts/registry";
-import { isValidPoolOrigin, loadPools, poolManagedProject, savePools } from "@/lib/hosts/pools";
+import { isValidPoolOrigin, loadPools, pathApi, poolManagedProject, savePools } from "@/lib/hosts/pools";
 import { listProjectsAllHosts } from "@/lib/hosts/session-index";
 import type { ProjectUpdate } from "@/lib/hosts/session-ops";
 import { applyProjectPresentation, isReservedLaunchArg, ProjectPathError, type ProjectPresentationUpdate } from "@/lib/project-registry";
@@ -126,7 +125,7 @@ export async function POST(req: Request) {
       if (typeof body.name === "string") project.name = body.name.trim();
       if (typeof body.defaultRef === "string") project.defaultRef = body.defaultRef;
       if (launchConfig !== undefined) project.launchConfig = launchConfig;
-      for (const member of pool.members) project.clonePaths[member.hostId] ??= join(member.projectsRoot, project.id);
+      for (const member of pool.members) project.clonePaths[member.hostId] ??= pathApi(member.projectsRoot).join(member.projectsRoot, project.id);
       savePools(pools);
       return Response.json({ project: poolManagedProject(pool, project) });
     }

@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import { comparableProjectPath } from "../comparable-path";
 import { cloneDirectoryName } from "../git-clone";
 import { getAgentDir } from "../omp/paths";
@@ -42,8 +42,10 @@ const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const GiB = 1024 ** 3;
 const safeId = (value: unknown): value is string => typeof value === "string" && SAFE_ID.test(value);
 const nonnegative = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+/** Member paths belong to the worker, not this server: a drive or UNC path is Windows, anything else POSIX. */
+export function pathApi(path: string): typeof posix { return win32.isAbsolute(path) && !posix.isAbsolute(path) ? win32 : posix; }
 const absoluteRoot = (value: unknown): value is string => typeof value === "string" && !value.includes("\0")
-  && isAbsolute(value) && resolve(value) === value && dirname(value) !== value;
+  && pathApi(value).isAbsolute(value) && pathApi(value).resolve(value) === value && pathApi(value).dirname(value) !== value;
 
 export function isValidPoolOrigin(value: unknown): value is string {
   if (typeof value !== "string" || value !== value.trim() || !cloneDirectoryName(value)) return false;
