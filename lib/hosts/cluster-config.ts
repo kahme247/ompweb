@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, realpathSync, statSync, type Stats } from "node:fs";
 import { join } from "node:path";
-import { isCollection, isMap, parseDocument } from "yaml";
+import { isMap, parseDocument, YAMLMap, type Document } from "yaml";
 
 export const CONFIG_LIMITS = { fileBytes: 5_242_880, bundleBytes: 52_428_800 };
 
@@ -48,7 +48,7 @@ export interface PluginEntry { kind: "npm" | "marketplace"; id: string; version:
 export interface ConfigManifest { version: string; files: ManifestFile[]; agentEnv: Record<string, string>; plugins: PluginEntry[] }
 
 export class ClusterConfigError extends Error {
-  constructor(readonly code: "file_too_large" | "bundle_too_large" | "invalid_settings" | "invalid_path", message: string) {
+  constructor(readonly code: "file_too_large" | "bundle_too_large" | "invalid_settings" | "invalid_path" | "unreadable", message: string) {
     super(message);
     this.name = "ClusterConfigError";
   }
@@ -57,51 +57,90 @@ export class ClusterConfigError extends Error {
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const sha256 = (data: Uint8Array | string) => createHash("sha256").update(data).digest("hex");
 
+/** Runs a filesystem call; its failure becomes `unreadable`, naming the manifest path and the errno, never content. */
+function io<T>(path: string, fn: () => T): T {
+  try {
+    return fn();
+  } catch (error) {
+    throw new ClusterConfigError("unreadable", `${path} cannot be read (${(error as NodeJS.ErrnoException).code ?? "error"})`);
+  }
+}
+
 /** Follows symbolic links; a broken link counts as missing. */
-function statOrNull(path: string): Stats | null {
+function statOrNull(path: string, manifestPath: string): Stats | null {
   try {
     return statSync(path);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ELOOP" || code === "ENOTDIR") return null;
-    throw error;
+    throw new ClusterConfigError("unreadable", `${manifestPath} cannot be read (${code ?? "error"})`);
   }
 }
 
+const invalidSettings = () => new ClusterConfigError("invalid_settings", "config.yml is not a valid YAML map");
+
 function parseSettings(yaml: string) {
-  const doc = parseDocument(yaml);
-  if (doc.errors.length > 0 || !isMap(doc.contents)) throw new ClusterConfigError("invalid_settings", "config.yml is not a valid YAML map");
+  const doc: Document = parseDocument(yaml);
+  if (doc.errors.length > 0) throw invalidSettings();
+  if (doc.contents === null) doc.contents = new YAMLMap(); // omp loads an empty document as {}
+  if (!isMap(doc.contents)) throw invalidSettings();
   return doc;
 }
 
 export function stripLocalSettings(masterYaml: string): string {
-  const doc = parseSettings(masterYaml);
-  for (const path of LOCAL_SETTINGS) if (doc.hasIn(path)) doc.deleteIn(path);
-  return doc.toString();
+  // Failures (e.g. an alias left dangling by a removed anchor) are reported without the file's content.
+  try {
+    const doc = parseSettings(masterYaml);
+    for (const path of LOCAL_SETTINGS) if (doc.hasIn(path)) doc.deleteIn(path);
+    const out = doc.toString();
+    const check = parseDocument(out);
+    if (check.errors.length > 0) throw invalidSettings();
+    check.toJS();
+    return out;
+  } catch (error) {
+    throw error instanceof ClusterConfigError ? error : invalidSettings();
+  }
+}
+
+/** The member's value at `path` as plain data, or undefined when absent. */
+function plainAt(data: unknown, path: readonly string[]): unknown {
+  let node = data;
+  for (const key of path) {
+    if (node === null || typeof node !== "object" || Array.isArray(node) || !Object.hasOwn(node, key)) return undefined;
+    node = (node as Record<string, unknown>)[key];
+  }
+  return node;
 }
 
 export function mergeLocalSettings(masterYaml: string, ownYaml: string | null): string {
-  const doc = parseSettings(stripLocalSettings(masterYaml));
-  // An unreadable own file keeps nothing, like an absent one: the member must still be able to sync.
-  const ownDoc = ownYaml === null ? null : parseDocument(ownYaml);
-  if (ownDoc && ownDoc.errors.length === 0 && isMap(ownDoc.contents)) {
+  const stripped = stripLocalSettings(masterYaml);
+  if (ownYaml === null) return stripped;
+  // An unusable own file keeps nothing, like an absent one: the member must still be able to sync.
+  try {
+    const ownDoc = parseDocument(ownYaml);
+    if (ownDoc.errors.length > 0) return stripped;
+    const own = ownDoc.toJS() as unknown; // plain data: aliases and anchors of the member's file do not travel
+    const doc = parseSettings(stripped);
     for (const path of LOCAL_SETTINGS) {
-      if (!ownDoc.hasIn(path)) continue;
-      // setIn throws when a parent exists but is not a collection (e.g. `python: 3`); the member's shape wins there.
+      const value = plainAt(own, path);
+      if (value === undefined) continue;
+      // setIn throws when a parent exists but is not a map (`python: 3`, `python: [1]`); the member's shape wins there.
       for (let i = 1; i < path.length; i++) {
         const parent = doc.getIn(path.slice(0, i), true);
-        if (parent !== undefined && !isCollection(parent)) doc.deleteIn(path.slice(0, i));
+        if (parent !== undefined && !isMap(parent)) doc.deleteIn(path.slice(0, i));
       }
-      doc.setIn(path, ownDoc.getIn(path));
+      doc.setIn(path, doc.createNode(value));
     }
+    return doc.toString();
+  } catch {
+    return stripped;
   }
-  return doc.toString();
 }
 
 export function isManagedPath(root: ConfigRoot, path: string): boolean {
   if (path === "" || path.includes("\\") || path.includes("\0")) return false;
   if (path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) return false;
-  return MIRRORED.some((entry) => entry.root === root && (path === entry.path || (entry.kind === "dir" && path.startsWith(`${entry.path}/`))));
+  return MIRRORED.some((entry) => entry.root === root && (entry.kind === "file" ? path === entry.path : path.startsWith(`${entry.path}/`)));
 }
 
 function canonicalJson(value: unknown): string {
@@ -128,28 +167,30 @@ export function buildManifest(
 
   /** `source` is where the master keeps it; `path` is the manifest path (differs for `config.yaml`). */
   const addFile = (root: ConfigRoot, path: string, source: string, stat: Stats) => {
+    if (!isManagedPath(root, path)) throw new ClusterConfigError("invalid_path", `${path} cannot be mirrored: its name is not a safe relative path`);
     checkSize(path, stat.size);
-    let bytes: Uint8Array = readFileSync(source);
+    let bytes: Uint8Array = io(path, () => readFileSync(source));
     if (root === "agent" && path === "config.yml") bytes = Buffer.from(stripLocalSettings(Buffer.from(bytes).toString("utf8")), "utf8");
     checkSize(path, bytes.length);
     total += bytes.length;
     if (total > CONFIG_LIMITS.bundleBytes) throw new ClusterConfigError("bundle_too_large", `the bundle exceeds ${CONFIG_LIMITS.bundleBytes} bytes at ${path}`);
     const hash = sha256(bytes);
     contents.set(hash, bytes);
-    files.push({ root, path, hash, size: bytes.length, exec: (stat.mode & 0o111) !== 0 });
+    files.push({ root, path, hash, size: bytes.length, exec: (stat.mode & 0o100) !== 0 });
   };
 
   // `walking` holds the real paths of the directories being walked, so a link back to an ancestor is skipped.
   const walk = (root: ConfigRoot, path: string, dir: string, walking: Set<string>) => {
-    const real = realpathSync(dir);
+    const real = io(path, () => realpathSync(dir));
     if (walking.has(real)) return;
     walking.add(real);
-    for (const name of readdirSync(dir)) {
+    for (const name of io(path, () => readdirSync(dir))) {
+      if (name === ".git") continue; // a directory, or a file in a worktree or submodule
       const source = join(dir, name);
-      const stat = statOrNull(source);
+      const stat = statOrNull(source, `${path}/${name}`);
       if (!stat) continue;
       if (stat.isDirectory()) {
-        if (name !== "node_modules" && name !== ".git") walk(root, `${path}/${name}`, source, walking);
+        if (name !== "node_modules") walk(root, `${path}/${name}`, source, walking);
       } else if (stat.isFile()) addFile(root, `${path}/${name}`, source, stat);
     }
     walking.delete(real);
@@ -158,13 +199,13 @@ export function buildManifest(
   for (const entry of MIRRORED) {
     const base = join(roots[entry.root], entry.path);
     if (entry.kind === "dir") {
-      if (statOrNull(base)?.isDirectory()) walk(entry.root, entry.path, base, new Set());
+      if (statOrNull(base, entry.path)?.isDirectory()) walk(entry.root, entry.path, base, new Set());
       continue;
     }
     // omp reads `.yml` before `.yaml`, so `.yaml` stands in only when `.yml` is absent.
     const sources = entry.root === "agent" && (entry.path === "config.yml" || entry.path === "models.yml") ? [base, base.replace(/\.yml$/, ".yaml")] : [base];
     for (const source of sources) {
-      const stat = statOrNull(source);
+      const stat = statOrNull(source, entry.path);
       if (!stat?.isFile()) continue;
       addFile(entry.root, entry.path, source, stat);
       break;
