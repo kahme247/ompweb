@@ -25,6 +25,23 @@ export function cloneDirectoryName(url: string): string | null {
   return DIRECTORY_NAME.test(name) && name !== "." && name !== ".." ? name : null;
 }
 
+const SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+const SCP_HOST = /^((?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+):/;
+
+/** Same-repository identity `<host>/<path>`: host lower-cased; user, scheme and port ignored;
+ *  scp-like `host:path` read as `ssh://host/path`; trailing `/` and `.git` removed; path case-sensitive.
+ *  Null exactly where cloneDirectoryName is. */
+export function repositoryKey(url: string): string | null {
+  if (cloneDirectoryName(url) === null) return null;
+  const trimmed = url.trim();
+  const rest = SCHEME.test(trimmed) ? trimmed.replace(SCHEME, "") : trimmed.replace(SCP_HOST, "$1/");
+  const slash = rest.indexOf("/");
+  const authority = slash < 0 ? rest : rest.slice(0, slash);
+  const path = slash < 0 ? "" : rest.slice(slash + 1);
+  const host = authority.slice(authority.lastIndexOf("@") + 1).replace(/:\d*$/, "").toLowerCase();
+  return `${host}/${path.replace(/\/+$/, "").replace(/\.git$/, "")}`;
+}
+
 const MAX_PROGRESS_LINES = 200;
 const MAX_PROGRESS_CHARS = 256 * 1024;
 

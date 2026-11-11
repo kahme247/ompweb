@@ -2,7 +2,7 @@ import { execFile, spawn } from "child_process";
 import { lstat, mkdir, realpath } from "fs/promises";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "path";
 import { promisify } from "util";
-import { cloneDirectoryName } from "./git-clone";
+import { cloneDirectoryName, repositoryKey } from "./git-clone";
 import { cloneRepository, withProjectReservation } from "./project-clone";
 import { createChildProcessEnvironment } from "./project-command-env";
 import type { OpResult } from "./hosts/session-ops";
@@ -160,7 +160,9 @@ async function prepare(input: {
     }
     // Reject multiple literal URLs: Git fetches the first, whereas config --get returns the last.
     // remote get-url expands insteadOf rewrites and cannot verify the registered literal origin.
-    if (await git(cloneRoot, "config", "--null", "--get-all", "remote.origin.url") !== `${origin}\0`) {
+    const origins = (await git(cloneRoot, "config", "--null", "--get-all", "remote.origin.url")).split("\0").slice(0, -1);
+    const key = repositoryKey(origin);
+    if (origins.length !== 1 || key === null || repositoryKey(origins[0]) !== key) {
       throw new PreparationError("pool_origin_mismatch", "Clone must have exactly one origin matching the registered project");
     }
     try {
