@@ -65,12 +65,13 @@ export function joinFilePath(parent: string, child: string): string {
 export function getFileApiUrl(
   filePath: string,
   type: "list" | "read" | "download" | "meta" | "preview",
-  hostId: string,
+  hostId?: string,
   sourceSessionId?: string | null,
   params: Record<string, string | number | undefined> = {},
 ): string {
   const encoded = encodeFilePathForApi(filePath);
-  const searchParams = new URLSearchParams({ type, hostId });
+  const searchParams = new URLSearchParams({ type });
+  if (hostId !== undefined) searchParams.set("hostId", hostId);
   if (sourceSessionId) searchParams.set("sessionId", sourceSessionId);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) searchParams.set(key, String(value));

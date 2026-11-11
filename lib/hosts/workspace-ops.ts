@@ -63,7 +63,8 @@ async function access(input: WorkspaceFileRequest, reference: boolean) {
   if (!isRecord(input) || !Array.isArray(input.segments) || !input.segments.every((part) => typeof part === "string")
     || !(input.sessionId === null || typeof input.sessionId === "string")
     || !(input.sessionFile === undefined || input.sessionFile === null || typeof input.sessionFile === "string")) throw invalid();
-  const checked = await authorizeFileAccess(input.segments, input.sessionId, reference, await getWorkspaceRoots(), input.sessionFile);
+  if (input.owner && input.owner.sessionId !== input.sessionId) throw invalid();
+  const checked = await authorizeFileAccess(input.segments, input.sessionId, reference, await getWorkspaceRoots(input.owner), input.sessionFile);
   if (!checked.ok) throw new HostOpError(checked.status, checked.code, checked.error);
   return checked;
 }
@@ -112,10 +113,17 @@ async function bashPath(sessionId: string, requested: string): Promise<string> {
   if (!await isBashOutputPathReferencedBySession(resolved, sessionId)) throw new HostOpError(403, "access_denied", "Access denied");
   return resolved;
 }
+export interface WorkspaceService {
+  ops: WorkspaceOps;
+  busy(): boolean;
+  onDisconnect(): void;
+  stop(): Promise<void>;
+}
 
-export function createWorkspaceService(uploads: StagedUploads, emit: (id: string, epoch: string, event: WorkspaceFileEvent) => void) {
+export function createWorkspaceService(uploads: StagedUploads, emit: (id: string, epoch: string, event: WorkspaceFileEvent) => void): WorkspaceService {
   const reads = new WorkspaceReads();
   const clones = new WorkspaceClones();
+  let epoch = 0;
   const watches = new WorkspaceWatches(async (input) => { const checked = await access(input, true); return fileInfo(checked.filePath, checked.stat); }, emit);
   const ops: WorkspaceOps = {
     home: () => result(async () => ({ home: homedir() })),
@@ -149,11 +157,11 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
       if (!located.ok) throw new HostOpError(located.status, located.code, located.error);
       return { path: located.path };
     }),
-    gitStatus: (cwd) => result(async () => getGitStatus(await authorizeWorkspaceDirectory(cwd))),
-    gitDiff: (cwd, requested) => result(async () => {
-      const directory = await authorizeWorkspaceDirectory(cwd);
+    gitStatus: (cwd, owner) => result(async () => getGitStatus(await authorizeWorkspaceDirectory(cwd, owner))),
+    gitDiff: (cwd, requested, owner) => result(async () => {
+      const directory = await authorizeWorkspaceDirectory(cwd, owner);
       if (typeof requested !== "string" || !path.isAbsolute(requested)) throw invalid();
-      const checked = await access({ segments: filePathApiSegments(requested), sessionId: null }, false);
+      const checked = await access({ segments: filePathApiSegments(requested), sessionId: owner?.sessionId ?? null, owner }, false);
       return getGitFileDiff(directory, checked.filePath);
     }),
     githubRepo: (cwd) => result(async () => ({ repo: await resolveGithubRepo(await authorizeWorkspaceDirectory(cwd)) })),
@@ -188,24 +196,31 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
     })),
     watchFile: (id, epoch, input) => result(() => watches.watch(id, epoch, input)),
     unwatchFile: (id, epoch) => result(async () => { watches.unwatch(id, epoch); return null; }),
-    inspectUploads: (directory, names) => result(async () => {
+    inspectUploads: (directory, names, owner) => result(async () => {
       if (!Array.isArray(names) || names.length > 1000 || !names.every((name) => typeof name === "string")) throw invalid();
       const error = validateUploadFileNames(names);
       if (error) throw new HostOpError(400, "invalid_file_name", error);
-      return inspectUploadTargets(await authorizeWorkspaceDirectory(directory), names);
+      return inspectUploadTargets(await authorizeWorkspaceDirectory(directory, owner), names);
     }),
-    publishUpload: (id, directory, name, conflict) => result(() => uploads.publish(id, directory, name, conflict)),
+    publishUpload: (id, directory, name, conflict, owner) => result(() => uploads.publish(id, directory, name, conflict, owner)),
     listFiles: (input, showHidden) => result(async () => {
       if (typeof showHidden !== "boolean") throw invalid();
       return listDirectory(input, null);
     }),
     listFilesInRoot: (input, root) => result(() => listDirectory(input, root)),
     fileInfo: (input) => result(async () => { const checked = await access(input, true); return fileInfo(checked.filePath, checked.stat); }),
-    openFile: (input) => result(async () => { const opened = await openFile(input); return reads.add(opened.handle, opened.info); }),
+    openFile: (input) => result(async () => {
+      const started = epoch;
+      const opened = await openFile(input);
+      if (started !== epoch) { await opened.handle.close(); throw new HostOpError(503, "host_offline", "The owner link closed"); }
+      return reads.add(opened.handle, opened.info);
+    }),
     readFileChunk: (id, offset, length) => result(() => reads.read(id, offset, length)),
     closeFile: (id) => result(async () => { if (typeof id !== "string") throw invalid(); await reads.close(id); return null; }),
     readTextFile: (input) => result(async () => {
+      const started = epoch;
       const opened = await openFile(input);
+      if (started !== epoch) { await opened.handle.close(); throw new HostOpError(503, "host_offline", "The owner link closed"); }
       const ticket = reads.add(opened.handle, opened.info);
       try {
         if (opened.info.size > TEXT_PREVIEW_MAX_BYTES) throw new HostOpError(413, "file_too_large_preview", "File too large for preview (>256KB)");
@@ -213,11 +228,11 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
         return { content, language: opened.info.language, size: opened.info.size };
       } finally { await reads.close(ticket.id); }
     }),
-    fileIndex: (cwd, query, limit, kind, refresh) => result(async () => {
+    fileIndex: (cwd, query, limit, kind, refresh, owner) => result(async () => {
       if (typeof cwd !== "string" || !path.isAbsolute(cwd)) throw new HostOpError(400, "cwd_must_be_absolute", "cwd must be an absolute path");
       if (typeof query !== "string" || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_RESULT_LIMIT
         || (kind !== "all" && kind !== "file") || typeof refresh !== "boolean") throw invalid();
-      const roots = await getWorkspaceRoots();
+      const roots = await getWorkspaceRoots(owner);
       if (!isFilePathAllowed(cwd, roots)) throw new HostOpError(403, "access_denied", "Access denied");
       let stat: fs.Stats;
       try { stat = fs.statSync(cwd); } catch { throw new HostOpError(404, "directory_not_found", "Directory not found"); }
@@ -231,14 +246,17 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
         : { tooLarge: false as const, output: read.content };
     }),
     openBashOutput: (id, requested) => result(async () => {
+      const started = epoch;
       const resolved = await bashPath(id, requested);
       const opened = await openRegularFileNoFollow(resolved);
+      if (started !== epoch) { await opened.handle.close(); throw new HostOpError(503, "host_offline", "The owner link closed"); }
       return reads.add(opened.handle, fileInfo(resolved, opened.fileInfo));
     }),
   };
   return {
     ops,
-    onDisconnect: () => { watches.closeAll(); void reads.closeAll().catch(() => {}); },
-    stop: async () => { watches.closeAll(); await Promise.all([reads.closeAll(), clones.stop()]); },
+    busy: () => reads.size > 0 || clones.busy(),
+    onDisconnect: () => { epoch++; watches.closeAll(); void reads.closeAll().catch(() => {}); },
+    stop: async () => { epoch++; watches.closeAll(); await Promise.all([reads.closeAll(), clones.stop()]); },
   };
 }

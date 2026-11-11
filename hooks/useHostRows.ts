@@ -3,15 +3,32 @@
 import { useEffect, useState } from "react";
 import { openEventStream } from "@/lib/event-stream";
 import type { HostRow } from "@/lib/hosts/hub";
+import type { HostPool } from "@/lib/hosts/pools";
 
-/** Every host's live status from the `hosts` channel: this machine first, then
- *  the linked hosts. `hosts` is null until the first snapshot; `failed` is
- *  true while the stream is down. */
-export function useHostRows(): { hosts: HostRow[] | null; failed: boolean } {
+/** Live host status plus retained pool configuration from the authenticated snapshot.
+ * Hosts-only SSE frames cannot erase the configured logical targets. */
+export function useHostRows(): { hosts: HostRow[] | null; pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; failed: boolean } {
   const [hosts, setHosts] = useState<HostRow[] | null>(null);
   const [failed, setFailed] = useState(false);
+  const [pools, setPools] = useState<HostPool[]>([]);
+  const [poolsLoaded, setPoolsLoaded] = useState(false);
+  const [poolsFailed, setPoolsFailed] = useState(false);
 
   useEffect(() => {
+    const controller = new AbortController();
+    void fetch("/api/hosts", { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json() as { hosts?: HostRow[]; pools?: HostPool[] };
+        if (controller.signal.aborted) return;
+        if (!Array.isArray(data.pools)) throw new Error("Host pool configuration is unavailable");
+        setPools(data.pools);
+        setPoolsLoaded(true);
+        setPoolsFailed(false);
+        // SSE owns host status; this request supplies the retained pool configuration.
+        if (Array.isArray(data.hosts)) setHosts((current) => current ?? data.hosts!);
+      })
+      .catch(() => { if (!controller.signal.aborted) { setPoolsFailed(true); setFailed(true); } });
     const stream = openEventStream({ kind: "hosts" });
     stream.onmessage = (event) => {
       try {
@@ -25,8 +42,8 @@ export function useHostRows(): { hosts: HostRow[] | null; failed: boolean } {
       }
     };
     stream.onerror = () => setFailed(true);
-    return () => stream.close();
+    return () => { controller.abort(); stream.close(); };
   }, []);
 
-  return { hosts, failed };
+  return { hosts, pools, poolsLoaded, poolsFailed, failed };
 }

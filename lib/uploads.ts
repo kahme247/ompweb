@@ -8,7 +8,7 @@ import { HostOpError, LINK_LIMITS } from "./hosts/link-protocol";
 import { isRecord } from "./type-guards";
 import { formatUploadSize, MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE, UPLOAD_WINDOW_BYTES } from "./upload-limits";
 import type { UploadConflictStrategy } from "./file-upload";
-import type { WorkspaceUploadResult } from "./workspace-types";
+import type { WorkspaceOwner, WorkspaceUploadResult } from "./workspace-types";
 import { completedUpload, forgetCompletedUpload, outboxScope, outboxUsesUpload, saveCompletedUpload } from "./message-outbox";
 
 /** Unfinished uploads one owner may have registered: each may hold a window of bytes in its host link's queue. */
@@ -542,7 +542,7 @@ export function forgetUploads(ids: string[], owner: string, receipts?: OutboxUpl
 }
 
 /** Bind one completed upload to one authorized workspace destination, including lost-reply retries. */
-export async function publishWorkspaceUpload(id: string, owner: string, hostId: string, directory: string, name: string, conflict: UploadConflictStrategy): Promise<WorkspaceUploadResult> {
+export async function publishWorkspaceUpload(id: string, owner: string, hostId: string, directory: string, name: string, conflict: UploadConflictStrategy, workspaceOwner?: WorkspaceOwner): Promise<WorkspaceUploadResult> {
   const upload = uploads().get(id);
   if (!upload || upload.owner !== owner) throw missing();
   if (upload.hostId !== hostId) throw new UploadError(409, "upload_wrong_host", "The file was uploaded to another host");
@@ -559,7 +559,7 @@ export async function publishWorkspaceUpload(id: string, owner: string, hostId: 
   if (binding.pending) return binding.pending;
   const host = getHost(hostId);
   if (!host) throw missing();
-  const pending = host.workspaceOps.publishUpload(id, directory, name, conflict).then((result) => {
+  const pending = host.workspaceOps.publishUpload(id, directory, name, conflict, workspaceOwner).then((result) => {
     if (!result.ok) throw new UploadError(result.status, result.code, result.error);
     binding.result = result.value;
     return result.value;

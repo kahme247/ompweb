@@ -1,11 +1,17 @@
 import { closeHostLink, hostsSnapshot, listHosts, notifyHostsChange } from "@/lib/hosts/hub";
-import { createHost, HostRegistryUnreadableError, revokeHost, UnknownHostError, updateHost } from "@/lib/hosts/registry";
+import { loadPools, savePools, type HostPool } from "@/lib/hosts/pools";
+import { createHost, HostRegistryUnreadableError, readHosts, revokeHost, UnknownHostError, updateHost } from "@/lib/hosts/registry";
 import { isRecord } from "@/lib/type-guards";
 
 const MAX_LABEL_LENGTH = 100;
 const noStore = { "cache-control": "no-store" };
 
 const fail = (error: string, status: number) => Response.json({ error }, { status, headers: noStore });
+const poolStorageFailure = () => fail("The pool registry (omp-web/pools.json) cannot be read or written; fix it before changing pools", 503);
+
+function hasOnlyKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).every((key) => keys.includes(key));
+}
 
 function failFor(error: unknown) {
   if (error instanceof HostRegistryUnreadableError) {
@@ -47,7 +53,51 @@ function requestOrigin(req: Request): string {
 }
 
 export function GET() {
-  return Response.json(hostsSnapshot(), { headers: noStore });
+  let pools: HostPool[];
+  try {
+    pools = loadPools();
+  } catch {
+    return poolStorageFailure();
+  }
+  return Response.json({ ...hostsSnapshot(), pools }, { headers: noStore });
+}
+
+export async function PUT(req: Request) {
+  const body = await readBody(req);
+  if (!hasOnlyKeys(body, ["pools"]) || !Array.isArray(body.pools)) return fail("pools must be an array", 400);
+  const knownHosts = new Set(["local"]);
+  try {
+    for (const host of readHosts()) knownHosts.add(host.id);
+  } catch (error) {
+    return failFor(error);
+  }
+  for (const pool of body.pools) {
+    if (!hasOnlyKeys(pool, ["id", "label", "enabled", "members", "projects"])
+      || !Array.isArray(pool.members) || !Array.isArray(pool.projects)) return fail("Invalid pool configuration", 400);
+    for (const member of pool.members) {
+      if (!hasOnlyKeys(member, ["hostId", "projectsRoot", "provisioned", "draining"])
+        || typeof member.hostId !== "string" || !knownHosts.has(member.hostId)) return fail("Invalid or unknown pool member", 400);
+    }
+    for (const project of pool.projects) {
+      if (!hasOnlyKeys(project, ["id", "name", "origin", "defaultRef", "clonePaths", "addedAt", "hidden", "alias", "sortOrder", "pinOrder", "launchConfig"])
+        || (project.launchConfig !== undefined && !hasOnlyKeys(project.launchConfig, ["profile", "advisor", "extraArgs"]))) {
+        return fail("Invalid pool project configuration", 400);
+      }
+    }
+  }
+  try {
+    loadPools();
+  } catch {
+    return poolStorageFailure();
+  }
+  try {
+    savePools(body.pools as HostPool[]);
+  } catch (error) {
+    // Core validation precedes persistence; filesystem errors carry an errno code.
+    if (isRecord(error) && typeof error.code === "string") return poolStorageFailure();
+    return fail("Invalid pool configuration", 400);
+  }
+  return Response.json({ pools: body.pools }, { headers: noStore });
 }
 
 export async function POST(req: Request) {

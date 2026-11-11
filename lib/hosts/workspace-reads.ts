@@ -7,6 +7,8 @@ interface OpenRead { handle: FileHandle; info: WorkspaceFileInfo; timer: NodeJS.
 
 export class WorkspaceReads {
   private readonly files = new Map<string, OpenRead>();
+  private readonly closing = new Set<Promise<void>>();
+  get size(): number { return this.files.size + this.closing.size; }
 
   private idle(id: string): NodeJS.Timeout {
     const timer = setTimeout(() => void this.close(id).catch(() => {}), 120_000);
@@ -44,10 +46,12 @@ export class WorkspaceReads {
     if (!file) return;
     this.files.delete(id);
     clearTimeout(file.timer);
-    await file.handle.close();
+    const closing = file.handle.close().finally(() => this.closing.delete(closing));
+    this.closing.add(closing);
+    await closing;
   }
 
   async closeAll(): Promise<void> {
-    await Promise.all([...this.files.keys()].map((id) => this.close(id)));
+    await Promise.all([...this.closing, ...[...this.files.keys()].map((id) => this.close(id))]);
   }
 }

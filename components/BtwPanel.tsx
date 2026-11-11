@@ -43,6 +43,7 @@ function BtwStatusLabel({ status }: { status: BtwStatus }) {
 /** Markdown links to workspace files open in the file viewer, as in chat. */
 interface FileLinkProps {
   cwd?: string;
+  sourceSessionId?: string | null;
   onOpenFile?: (filePath: string) => void;
 }
 
@@ -50,7 +51,7 @@ interface FileLinkProps {
  * it is a polite live region, busy until the answer settles so screen readers
  * read it once instead of per token, then hear how it ended. Memoized: only
  * the streaming turn changes per delta, so earlier answers are not re-parsed. */
-const BtwTurnView = memo(function BtwTurnView({ turn, live = false, cwd, onOpenFile }: FileLinkProps & { turn: BtwTurn; live?: boolean }) {
+const BtwTurnView = memo(function BtwTurnView({ turn, live = false, cwd, sourceSessionId, onOpenFile }: FileLinkProps & { turn: BtwTurn; live?: boolean }) {
   const { t } = useI18n();
   const running = turn.status === "running";
   return (
@@ -58,7 +59,7 @@ const BtwTurnView = memo(function BtwTurnView({ turn, live = false, cwd, onOpenF
       <p className="m-0 text-xs font-medium text-text-muted" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{turn.question}</p>
       <div aria-live={live ? "polite" : undefined} aria-busy={live && running ? true : undefined} className="min-w-0 text-sm text-text">
         {turn.answer
-          ? <SafeMarkdownBody isStreaming={running} cwd={cwd} onOpenFile={onOpenFile}>{turn.answer}</SafeMarkdownBody>
+          ? <SafeMarkdownBody isStreaming={running} cwd={cwd} onOpenFile={onOpenFile} sourceSessionId={sourceSessionId}>{turn.answer}</SafeMarkdownBody>
           : running ? <span className="text-xs text-text-dim">{t("btw.waiting")}</span> : null}
         {turn.error && <p className="m-0 text-xs" style={{ color: "var(--status-error)", overflowWrap: "anywhere" }}>{turn.error}</p>}
         {live && !running && turn.status !== "complete" && <span className="sr-only">{t(STATUS_KEYS[turn.status])}</span>}
@@ -94,7 +95,7 @@ export interface BtwPanelProps extends FileLinkProps {
 /** Composer-attached side-question panel: the active topic's turns with the
  * latest answer streaming, plus cancel / copy / follow-up actions. Callers key
  * it by record id so each new topic starts expanded with an empty follow-up. */
-export function BtwPanel({ record, onCancel, onFollowUp, onClose, cwd, onOpenFile }: BtwPanelProps) {
+export function BtwPanel({ record, onCancel, onFollowUp, onClose, cwd, sourceSessionId, onOpenFile }: BtwPanelProps) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(false);
   const [draft, setDraft] = useState("");
@@ -185,7 +186,7 @@ export function BtwPanel({ record, onCancel, onFollowUp, onClose, cwd, onOpenFil
             style={{ maxHeight: "min(36vh, 320px)", overflowY: "auto" }}
           >
             {turns.map((turn, index) => (
-              <BtwTurnView key={`${turn.createdAt}:${index}`} turn={turn} live={index === turns.length - 1} cwd={cwd} onOpenFile={onOpenFile} />
+              <BtwTurnView key={`${turn.createdAt}:${index}`} turn={turn} live={index === turns.length - 1} cwd={cwd} onOpenFile={onOpenFile} sourceSessionId={sourceSessionId} />
             ))}
           </div>
           <div
@@ -236,7 +237,7 @@ export function BtwPanel({ record, onCancel, onFollowUp, onClose, cwd, onOpenFil
 
 /** `/btw` with no question: the session's side questions, newest first, each
  * expandable to all its turns with Copy and Follow-up. */
-export function BtwHistoryDialog({ open, onOpenChange, records, onFollowUp, cwd, onOpenFile }: FileLinkProps & {
+export function BtwHistoryDialog({ open, onOpenChange, records, onFollowUp, cwd, sourceSessionId, onOpenFile }: FileLinkProps & {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   records: BtwRecord[];
@@ -295,7 +296,7 @@ export function BtwHistoryDialog({ open, onOpenChange, records, onFollowUp, cwd,
                   {expanded && (
                     <div className="grid gap-2.5 border-t border-border px-3 py-2.5">
                       {btwTurns(record).map((turn, index) => (
-                        <BtwTurnView key={`${turn.createdAt}:${index}`} turn={turn} cwd={cwd} onOpenFile={onOpenFile} />
+                        <BtwTurnView key={`${turn.createdAt}:${index}`} turn={turn} cwd={cwd} onOpenFile={onOpenFile} sourceSessionId={sourceSessionId} />
                       ))}
                       <div className="flex flex-wrap items-center gap-1.5">
                         {latest.status !== "running" && (

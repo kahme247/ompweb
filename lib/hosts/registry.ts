@@ -59,7 +59,7 @@ export class HostRegistryUnreadableError extends Error {
 }
 
 /** Every usable record; a missing file is an empty registry, an unreadable one throws. */
-function readHosts(): HostRecord[] {
+export function readHosts(): HostRecord[] {
   const file = join(getAgentDir(), "omp-web", "hosts.json");
   let text: string;
   try {

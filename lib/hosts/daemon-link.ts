@@ -5,6 +5,7 @@ import { isLoopbackHost } from "./host-login";
 import type { HostLink } from "./host-login";
 import { acknowledgeHostUpdateHealth } from "./updates";
 import { decodeBlobFrame, decodeDown, encodeLine, encodeQueued, HostOpError, LINK_CLOSE, LINK_LIMITS, LINK_PROTOCOL_VERSION, MIN_LINK_PROTOCOL_VERSION, LinkLimitError, LinkProtocolError, LinkSender, Outbox, PartJoiner, SeqWindow, UnknownMessageLog, type DownMessage, type UpMessage, type Unsequenced, type UnknownMessage, type LinkStatSample, type SendItem } from "./link-protocol";
+import type { HostCapacity } from "./capacity";
 
 const FIRST_RETRY_MS = 1000;
 const PONG_LINE = encodeLine({ type: "pong" });
@@ -18,6 +19,7 @@ interface Queued {
   /** Child output bytes this ack releases from its channel's buffer (on a message's last part). */
   bytes: number;
   output: boolean;
+  reliable: boolean;
   /** Bytes this ack takes out of `unackedBytes`: the line's own, plus on a `res` the result bytes sent ahead of it. */
   unacked: number;
   /** Its link sample, set on the line that completes a message (a whole line, or its last part), with `t`, its queue
@@ -30,7 +32,7 @@ interface Queued {
 type UpSample = { at: number; t: number; blob: number; bytesAhead: number; session: string | null };
 
 /** `counted`: child output, held against its channel's buffer until acked. */
-type Pending = Extract<SendItem, { line: string }> & { counted: boolean; sample: UpSample | null } | Extract<SendItem, { blob: Uint8Array }>;
+type Pending = Extract<SendItem, { line: string }> & { counted: boolean; sample: UpSample | null; reliable: boolean } | Extract<SendItem, { blob: Uint8Array }>;
 
 /** How a socket closed; `opened` is false for a dial the server refused or never answered. A string instead: why
  * the daemon gave the socket up itself. */
@@ -73,6 +75,8 @@ export class DaemonLink {
   stop(): Promise<void> { return this.runtime.stop(); }
   rekey(token: string): void { this.runtime.rekey(token); }
   isUp(): boolean { return this.runtime.isUp(); }
+  busy(): boolean { return this.runtime.busy(); }
+  reportCapacity(sample: HostCapacity): void { this.runtime.reportCapacity(sample); }
   queue(body: Unsequenced<UpMessage>, key: string, options?: { counted?: boolean; session?: string | null; blob?: number; ahead?: number }): number | null { return this.runtime.queue(body, key, options); }
   output(body: Unsequenced<Extract<UpMessage, { type: "stdout" | "stderr" }>>, session: string | null): void { this.runtime.output(body.ch, body, session); }
   discard(ch: string): void { this.runtime.discard(ch); }
@@ -126,6 +130,17 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
   /** Link samples of acked messages, waiting for their `stats` message. */
   const samples: LinkStatSample[] = [];
   let statsTimer: NodeJS.Timeout | undefined;
+  let reliablePending = 0;
+
+  function reportCapacity(sample: HostCapacity): void {
+    const ws = linked;
+    if (stopped || !ws || ws.readyState !== 1 || ws.bufferedAmount >= SEND_BUFFER_BYTES || inFlightBytes >= LINK_LIMITS.unackedBytes) return;
+    const data = encodeLine({ type: "ack", ack: down.acked }) + encodeLine({ type: "capacity", sample });
+    const bytes = Buffer.byteLength(data);
+    if (inFlightBytes + bytes > LINK_LIMITS.unackedBytes) return;
+    ws.send(data); inFlight.push(bytes); inFlightBytes += bytes;
+    ackOwed = false; appliedSince = 0;
+  }
 
   /** Queue an uplink message under `key` (its channel, the request id of a `res`, or "stats"); its byte size, or null
    * when it exceeds the line limit. `counted`: child output, held against its channel's buffer. `session`, `blob` (the
@@ -147,7 +162,9 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
     // Ahead of it: what is unacked and what is queued to go (counters, no scan; a queued line counts at its size before
     // its seq is filled in). A `stats` message is not measured itself: its sample would need another one.
     const sample = body.type === "stats" ? null : { at: Date.now(), t: performance.now(), blob, bytesAhead: Math.max(0, ahead ?? unackedBytes + sender.queuedBytes), session };
-    sender.push(key, { line, size, counted, sample });
+    const reliable = ["res", "upload_ack", "exit", "resync"].includes(body.type);
+    if (reliable) reliablePending++;
+    sender.push(key, { line, size, counted, sample, reliable });
     unsentBytes += size;
     scheduleFlush();
     return size;
@@ -191,6 +208,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
       const channel = channels.get(item.key);
       if (channel) channel.buffered -= item.bytes;
       unackedBytes -= item.unacked;
+      if (item.reliable) reliablePending--;
       // One sample per message: a split one carries it on its last part, acked with the whole message.
       if (item.sample) {
         const { t, ...sample } = item.sample;
@@ -245,7 +263,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
     const sample = unit.done && item.sample
       ? { session: item.sample.session, bytes: unit.messageBytes + item.sample.blob, bytesAhead: item.sample.bytesAhead, at: item.sample.at, t: item.sample.t }
       : null;
-    outbox.push({ seq: unit.seq, line: unit.line, key: unit.key, bytes, output: item.counted, unacked: size + sentBlob, sample });
+    outbox.push({ seq: unit.seq, line: unit.line, key: unit.key, bytes, output: item.counted, reliable: unit.done && item.reliable, unacked: size + sentBlob, sample });
     unackedBytes += size;
     return unit.line;
   }
@@ -453,7 +471,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
     stopped = true; stopSignal.abort(); socket?.close(); clearTimeout(flushTimer); clearTimeout(statsTimer);
     await loop;
   }
-  return { queue, output, discard, result, ackedDown: () => down.acked, isUp: () => linked !== null && !stopped,
+  return { queue, output, discard, result, reportCapacity, busy: () => reliablePending > 0, ackedDown: () => down.acked, isUp: () => linked !== null && !stopped,
     rekey: (token: string) => { owner.login.token = token; authorization = "Bearer " + token; socket?.close(1001, "credentials changed"); },
     start: () => { if (!started && !stopped) { started = true; loop = keepLinked(); } }, stop };
 }

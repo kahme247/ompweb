@@ -36,7 +36,7 @@ function hubReceipts(details: unknown): Array<{ to: string; outcome: string }> {
  * `waiting on N jobs` row) renders the structured job list. Returns null
  * for other hub ops so the generic tool rendering stays.
  */
-export function HubResultPanel({ input, result }: { input: unknown; result?: ToolResultMessage }) {
+export function HubResultPanel({ input, result, cwd, onOpenFile, sourceSessionId }: { input: unknown; result?: ToolResultMessage; cwd?: string; onOpenFile?: (filePath: string) => void; sourceSessionId?: string | null }) {
   if (!isRecord(input) || typeof input.op !== "string") return null;
 
   if (input.op === "send") {
@@ -64,7 +64,7 @@ export function HubResultPanel({ input, result }: { input: unknown; result?: Too
           )}
         </div>
         {send.message ? (
-          <MarkdownBody className="markdown-hub-message">{send.message}</MarkdownBody>
+          <MarkdownBody className="markdown-hub-message" cwd={cwd} onOpenFile={onOpenFile} sourceSessionId={sourceSessionId}>{send.message}</MarkdownBody>
         ) : null}
       </div>
     );

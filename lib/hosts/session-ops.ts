@@ -1,7 +1,7 @@
-// The file-reading half of the session and project API routes. Every op takes
-// a session id (never a path) and returns JSON-serializable values, so the
-// `ompweb host` daemon can run the same code for a remote host. Live-wrapper
-// work (RPC sends, stopping a child) stays in the routes on main.
+// Session/project operations shared by API routes and the authenticated host daemon.
+// Session reads take IDs, never paths; pooled preparation takes registered paths
+// derived by server admission, never browser-supplied filesystem authority.
+// Live-wrapper work (RPC sends, stopping a child) stays in the routes on main.
 // No `next/*` or `@/` imports: the daemon loads this through plain jiti.
 import { randomUUID } from "crypto";
 import { execFile } from "child_process";
@@ -27,6 +27,7 @@ import {
   setSessionTitle,
   writeSessionFileAtomicSync,
 } from "../omp/session-files";
+import { preparePoolProject, type PreparedPoolProject } from "../pooled-projects";
 import { projectIdentityKey, sessionPathKey } from "../paths";
 import {
   hideProject,
@@ -128,6 +129,8 @@ export interface SessionOps {
   /** Applied in one registry load/save. `newRoots` were registered by this call. */
   updateProject(updates: ProjectUpdate[]): Promise<OpResult<{ projects: ProjectRegistryEntry[]; newRoots: string[] }>>;
   hideProject(path: string): Promise<OpResult<null>>;
+  /** Input origin and cloneRoot must come from the server's registered pool project. */
+  preparePoolProject(input: Parameters<typeof preparePoolProject>[0]): Promise<OpResult<PreparedPoolProject>>;
   validateCwd(path: string): Promise<OpResult<{ cwd: string; projectRoot: string; projectKey?: string }>>;
 }
 
@@ -781,5 +784,15 @@ export const sessionOps: SessionOps = {
     }
     const project = await resolveProject(normalizedCwd);
     return ok({ cwd: normalizedCwd, projectRoot: project.projectRoot, projectKey: projectIdentityKey(project.projectRoot) });
+  },
+
+  async preparePoolProject(input) {
+    if (!isRecord(input)
+      || typeof input.projectId !== "string" || typeof input.creationId !== "string"
+      || typeof input.origin !== "string" || typeof input.cloneRoot !== "string"
+      || (input.ref !== undefined && typeof input.ref !== "string")) {
+      return fail(400, "invalid_request", "Invalid pool project preparation input");
+    }
+    return preparePoolProject(input);
   },
 };

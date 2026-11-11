@@ -156,7 +156,7 @@ function safeParse(text) {
 }
 
 function jsonResponse(status, value) {
-  return { ok: status >= 200 && status < 300, status, json: async () => value };
+  return { ok: status >= 200 && status < 300, status, headers: new Headers(), json: async () => value };
 }
 
 // Backend snapshot the router serves. Tests mutate these between phases.
@@ -175,6 +175,7 @@ const world = {
   wrappers: new Map(),
   nativeHistories: new Map(), // isolated, parent-linked native history fixtures
   btwHistory: new Map(), // sid -> BtwRecord[] served by get_btw_history
+  respond: null, // Optional test-owned HTTP boundary; the real components still consume its DTOs.
   clientMessageStatuses: new Map(), // sid -> explicit native selective-read result, never reconstructed from submitted text
   outbox: [], // held entries the fake dispatcher has not sent yet
   outboxHold: false,
@@ -195,6 +196,8 @@ async function fetchStub(url, init = {}) {
       return jsonResponse(status, value);
     }
   }
+  const response = world.respond?.(method, u, body, init);
+  if (response) return await response;
 
   let m;
   if ((m = u.match(/\/api\/sessions\/([^/?#]+)\/state/))) {
@@ -289,9 +292,11 @@ const overrides = [
   [globalThis, "SharedWorker", { value: FakeSharedWorker }],
   [globalThis, "fetch", { value: fetchStub }],
   [globalThis, "ResizeObserver", { value: class { observe() {} disconnect() {} } }],
+  [globalThis, "CSS", { value: globalThis.CSS ?? { escape: (value) => value } }], // Existing TabBar test shim; fixture IDs contain no CSS escapes.
   [window.HTMLElement.prototype, "scrollIntoView", { value() {} }],
   [document, "hidden", { get: () => visibilityState === "hidden" }],
   [document, "visibilityState", { get: () => visibilityState }],
+  [document, "fonts", { value: new window.EventTarget() }],
   [window, "matchMedia", {
     value: (media) => Object.assign(new window.EventTarget(), { matches: false, media }),
   }],
@@ -355,8 +360,13 @@ afterEach(async () => {
   }
 });
 
-// The hook chain includes components/ui/toast.tsx, whose DOM toasts must never fire in tests.
-mock.module("@/components/ui/toast", () => import("./__fixtures__/toast-stub.mjs"));
+// Replace only the imperative notification boundary. AppShell's transitive
+// notification UI keeps the real provider, descriptions, gestures and icons.
+const realToastExports = { ...await import("@/components/ui/toast") };
+const { toast: testToast, toastCalls: testToastCalls } = await import("./__fixtures__/toast-stub.mjs");
+mock.module("@/components/ui/toast", () => ({
+  ...realToastExports, toast: testToast, default: testToast,
+}));
 const { useAgentSession } = await import("../hooks/useAgentSession.ts");
 const { selectSessionHistory } = await import("@/lib/session-sync");
 const { publishSessionsChanged } = await import("@/lib/session-change-bus");
@@ -374,10 +384,13 @@ const onlineHost = {
   autoApproveExtension: () => false,
 };
 const { isUnknownSlashCommand, slashCommandName, runHostTool } = await import("@/hooks/useAgentSession-stream");
-const { toastCalls } = await import("@/components/ui/toast");
+const toastCalls = testToastCalls;
 const { MessageView } = await import("@/components/MessageView");
 const { translate } = await import("@/lib/i18n");
 const { ChatWindow } = await import("@/components/ChatWindow");
+const { SessionSidebar } = await import("@/components/SessionSidebar");
+const { AppShell } = await import("@/components/AppShell");
+const { FileExplorer } = await import("@/components/FileExplorer");
 const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await import("@/lib/omp/session-edit-extension.mjs");
 // Edit only opens a confirm dialog; the edit starts from its confirm button.
 async function confirmEdit(view, button) {
@@ -462,11 +475,55 @@ function resetWorld() {
   world.btwHistory.clear();
   world.clientMessageStatuses.clear();
   world.abortRestoreQueue = null;
+  world.respond = null;
   world.outbox.length = 0;
   world.outboxHold = false;
   world.outboxCommit = null;
   world.outboxDrop = null;
   workerPort?.onmessage?.({ data: { outbox: [] } });
+}
+
+function servePooledWorkspace() {
+  const sessions = [
+    { ...sessionInfo("worker-one"), name: "Worker one conversation", cwd: "/shared", projectRoot: "/shared", hostId: "h1", poolId: "workers", projectId: "app", projectKey: "pool:workers:app" },
+    { ...sessionInfo("worker-two"), name: "Worker two conversation", cwd: "/shared", projectRoot: "/shared", hostId: "h2", poolId: "workers", projectId: "app", projectKey: "pool:workers:app" },
+    { ...sessionInfo("legacy"), name: "Worker legacy conversation", cwd: "/legacy", projectRoot: "/legacy", hostId: "h1" },
+    { ...sessionInfo("mac"), name: "Mac conversation", cwd: "/shared", projectRoot: "/shared", hostId: "local" },
+  ];
+  const projects = [
+    { path: "/shared", hostId: "h1", poolId: "workers", projectId: "app", projectKey: "pool:workers:app", name: "Pool app", origin: "git@example.invalid:app.git" },
+    { path: "/legacy", hostId: "h1", alias: "Worker legacy project" },
+    { path: "/shared", hostId: "local", alias: "Mac project" },
+  ];
+  const hosts = [
+    { id: "local", label: "Mac", status: "online", ompVersion: "18.4.4", ompwebVersion: "0.6.0", platform: "darwin", lastSeenAt: null, hostVersion: 2, serverVersion: 2, serverPlatform: "darwin", daemonManaged: false },
+    ...["h1", "h2"].map((id, index) => ({ id, label: `Worker ${index + 1}`, status: "online", ompVersion: "18.4.4", ompwebVersion: "0.6.0", platform: "linux", lastSeenAt: "2026-11-10T00:00:00.000Z", allowAgentStart: true, hostVersion: 2, serverVersion: 2 })),
+  ];
+  const pools = [{
+    id: "workers", label: "Worker pool", enabled: true,
+    members: ["h1", "h2"].map((hostId) => ({ hostId, projectsRoot: "/projects", provisioned: true, draining: false })),
+    projects: [{ id: "app", name: "Pool app", origin: "git@example.invalid:app.git", clonePaths: { h1: "/shared", h2: "/shared" }, addedAt: "2026-11-10T00:00:00.000Z" }],
+  }];
+  for (const session of sessions) primeSession(session.id, [userMsg(`${session.id}-u`, `Question for ${session.name}`)]);
+  world.respond = (method, raw) => {
+    if (method !== "GET") return null;
+    const url = new URL(raw, "https://omp.test");
+    if (url.pathname === "/api/sessions") return jsonResponse(200, { sessions, runningSessionIds: [], runningSessions: [] });
+    if (url.pathname === "/api/projects") return jsonResponse(200, { projects });
+    if (url.pathname === "/api/hosts") return jsonResponse(200, { hosts, pools });
+    if (url.pathname === "/api/worktrees") return jsonResponse(200, { isGit: false, isTopLevel: false, worktrees: [] });
+    if (url.pathname.startsWith("/api/git/")) return jsonResponse(200, url.pathname.endsWith("/status") ? { isGitRepository: false, repositoryRoot: null, files: [] } : { supported: false });
+    if (url.pathname.startsWith("/api/files/")) {
+      const owner = url.searchParams.get("sessionId");
+      if (url.searchParams.get("type") === "list") return jsonResponse(200, { entries: [{ name: owner === "worker-one" ? "owner-only.txt" : "central-decoy.txt", isDir: false, size: 12 }] });
+      const content = owner === "worker-one" ? "FIRST OWNER CONTENT" : owner === "worker-two" ? "SECOND OWNER CONTENT" : "CENTRAL DECOY CONTENT";
+      return jsonResponse(200, { content, language: "text", size: content.length });
+    }
+    if (url.pathname === "/api/file-index") return jsonResponse(200, { matches: url.searchParams.get("sessionId") === "worker-one" ? [{ path: "worker-search-result.txt", isDir: false }] : [], truncated: false });
+    return null;
+  };
+  localStorage.setItem("omp-web:expanded-projects", JSON.stringify(["pool:workers:app", "h1:/legacy", "/shared"]));
+  return { sessions, projects, hosts, pools };
 }
 
 function primeSession(sid, messages) {
@@ -6596,6 +6653,481 @@ test("a fresh chat whose host drops after the spawn adopts the kept session, so 
   assert.equal(retry.status, "accepted");
   assert.equal(callsTo("POST", "/api/agent/new").length, 1, "the retry reuses the kept session");
   assert.equal(callsTo("POST", "/api/agent/kept-remote").some((call) => call.body?.type === "prompt"), true);
+});
+
+test("a lost pooled creation response retries the original identity and frozen initialization, then adopts its owner", async () => {
+  resetWorld();
+  const creationId = "e740daaa-78c7-46ae-9985-409064653f01";
+  const journal = new Map();
+  let loseResponse = true;
+  const create = async () => {
+    const request = callsTo("POST", "/api/agent/new").at(-1).body;
+    if (!journal.has(request.creationId)) {
+      journal.set(request.creationId, { sessionId: "pooled-original", hostId: "h2", cwd: "/worker-2/worktrees/original" });
+      primeSession("pooled-original", []);
+    }
+    if (loseResponse) {
+      loseResponse = false;
+      throw new TypeError("Response lost after creation");
+    }
+    return { value: { success: true, ...journal.get(request.creationId), data: {} } };
+  };
+  world.holds.push(
+    { match: (method, url) => method === "POST" && url === "/api/agent/new", produce: create },
+    { match: (method, url) => method === "POST" && url === "/api/agent/new", produce: create },
+  );
+  const promoted = [];
+  const w = await mountSession(null, undefined, {
+    newSessionCwd: "/diagnostic/representative", newSessionHostId: "h1",
+    newSessionCreationId: creationId, newSessionPoolId: "workers", newSessionProjectId: "app",
+    onSessionCreated: (session) => promoted.push(session),
+  });
+  await act(async () => { await w.latest.loadSlashCommands().catch(() => []); });
+  await act(async () => {
+    await w.latest.handleModelChange("anthropic", "changed-after-loss");
+    await w.latest.handleThinkingLevelChange("high");
+    await w.latest.handleToolPresetChange("none");
+    w.latest.handleAdvisorChange(true);
+  });
+  await act(async () => { await w.latest.loadSlashCommands(); });
+  let sending;
+  await act(async () => { sending = w.latest.handleSend("first prompt"); await sleep(30); });
+  let receipt;
+  await act(async () => { lastEs()?.open(); receipt = await sending; });
+  w.unmount();
+  const requests = callsTo("POST", "/api/agent/new").map((call) => call.body);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].creationId, creationId);
+  assert.equal(requests[0].poolId, "workers");
+  assert.equal(requests[0].projectId, "app");
+  assert.equal("cwd" in requests[0], false, "a representative checkout is not a creation target");
+  assert.equal("hostId" in requests[0], false);
+  assert.deepEqual(requests[1], requests[0], "a retry must not change an already-journaled initialization");
+  assert.equal(requests[1].type, "ensure_session", "the first prompt uses the owner route, not a changed creation intent");
+  assert.equal(journal.size, 1);
+  assert.equal(receipt.status, "accepted");
+  assert.deepEqual(promoted.map(({ id, hostId, cwd, poolId, projectId }) => ({ id, hostId, cwd, poolId, projectId })), [
+    { id: "pooled-original", hostId: "h2", cwd: "/worker-2/worktrees/original", poolId: "workers", projectId: "app" },
+  ]);
+  assert.equal(callsTo("POST", "/api/agent/pooled-original").filter((call) => call.body?.type === "prompt").length, 1);
+});
+
+test("pooled creation uncertainty with a known id adopts the owner without resending the initial command", async () => {
+  resetWorld();
+  const owner = { sessionId: "uncertain-owner", hostId: "h2", cwd: "/worker-2/worktrees/uncertain" };
+  primeSession(owner.sessionId, []);
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({
+      status: 503,
+      value: { ...owner, error: "The initialization answer was lost", code: "pool_delivery_unknown", delivery: "unknown" },
+    }),
+  });
+  const promoted = [];
+  const w = await mountSession(null, undefined, {
+    newSessionCwd: "/diagnostic/representative", newSessionHostId: "h1",
+    newSessionCreationId: "9eaaed5b-773b-419a-b03e-9b07866623a1", newSessionPoolId: "workers", newSessionProjectId: "app",
+    onSessionCreated: (session) => promoted.push(session),
+  });
+  let first;
+  await act(async () => { first = await w.latest.handleSend("do not resend automatically"); await sleep(30); });
+  assert.equal(first.status, "rejected");
+  assert.equal(w.latest.sessionIdRef.current, owner.sessionId);
+  assert.equal(callsTo("POST", `/api/agent/${owner.sessionId}`).filter((call) => call.body?.type === "prompt").length, 0);
+  let retry;
+  await act(async () => { retry = w.latest.handleSend("explicit retry"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); retry = await retry; });
+  w.unmount();
+  assert.equal(retry.status, "accepted");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1, "a known owner is never placed again");
+  assert.deepEqual(promoted.map(({ hostId, cwd }) => ({ hostId, cwd })), [{ hostId: "h2", cwd: owner.cwd }]);
+  assert.deepEqual(callsTo("POST", `/api/agent/${owner.sessionId}`).filter((call) => call.body?.type === "prompt").map((call) => call.body.message), ["explicit retry"]);
+});
+
+test("a pooled session whose owner is offline never creates on another target", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 503, value: {
+      sessionId: "offline-pool-owner", hostId: "h2", cwd: "/worker-2/worktrees/offline",
+      error: "Owner is offline", code: "host_offline", delivery: "refused",
+    } }),
+  });
+  const w = await mountSession(null, undefined, {
+    newSessionCwd: "/diagnostic/representative", newSessionHostId: "h1",
+    newSessionCreationId: "3af9fe09-0719-4942-b105-755ed9b0c5ec", newSessionPoolId: "workers", newSessionProjectId: "app",
+  });
+  await act(async () => { await w.latest.handleSend("first"); });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.includes("/api/agent/offline-pool-owner") && body?.type === "prompt",
+    produce: async () => ({ status: 503, value: { error: "Owner is offline", code: "host_offline", hostOffline: true, delivery: "refused" } }),
+  });
+  let retry;
+  await act(async () => { retry = w.latest.handleSend("retry"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); retry = await retry; });
+  w.unmount();
+  assert.equal(retry.status, "rejected");
+  assert.equal(w.latest.sessionIdRef.current, "offline-pool-owner");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1);
+});
+
+test("choosing a different logical project starts a distinct creation intent without a representative path", async () => {
+  resetWorld();
+  const ids = ["a0f374af-d4cd-4ce0-8d24-e417fa5ad60c", "b2317aee-c4a0-411e-bd6e-49837012ae96"];
+  for (const [index, projectId] of ["app", "other-app"].entries()) {
+    world.holds.push({
+      match: (method, url) => method === "POST" && url === "/api/agent/new",
+      produce: async () => ({ status: 503, value: { error: "No capacity", code: "pool_unavailable" } }),
+    });
+    const w = await mountSession(null, undefined, {
+      newSessionCwd: null, newSessionCreationId: ids[index], newSessionPoolId: "workers", newSessionProjectId: projectId,
+    });
+    await act(async () => { await w.latest.loadSlashCommands().catch(() => []); });
+    w.unmount();
+  }
+  assert.deepEqual(callsTo("POST", "/api/agent/new").map(({ body }) => ({
+    creationId: body.creationId, poolId: body.poolId, projectId: body.projectId,
+  })), [
+    { creationId: ids[0], poolId: "workers", projectId: "app" },
+    { creationId: ids[1], poolId: "workers", projectId: "other-app" },
+  ]);
+});
+
+test("reopening a pending pooled composer reuses its frozen creation body instead of new defaults", async () => {
+  resetWorld();
+  const creationId = "183df38f-688a-4b72-b8e7-0d6dc95407e9";
+  const target = { newSessionCwd: null, newSessionCreationId: creationId, newSessionPoolId: "workers", newSessionProjectId: "app" };
+  let initialization;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => { throw new TypeError("Response lost after creation"); },
+  });
+  const first = await mountSession(null, undefined, { ...target, onNewSessionInitialization: (body) => { initialization = body; } });
+  await act(async () => { await first.latest.handleModelChange("anthropic", "original-model"); });
+  await act(async () => { await first.latest.loadSlashCommands().catch(() => []); });
+  first.unmount();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { success: true, sessionId: "reopened-original", hostId: "h2", cwd: "/worker-2/original", data: {} } }),
+  });
+  const reopened = await mountSession(null, undefined, { ...target, newSessionInitialization: initialization });
+  await act(async () => { await reopened.latest.loadSlashCommands(); });
+  const requests = callsTo("POST", "/api/agent/new").map(({ body }) => body);
+  assert.deepEqual(requests[1], requests[0], "navigation must not change the already-used creation intent");
+  assert.equal(reopened.latest.sessionIdRef.current, "reopened-original");
+  assert.equal(callsTo("POST", "/api/agent/reopened-original").some(({ body }) => body?.type === "prompt"), false);
+  reopened.unmount();
+});
+
+test("resolving a pooled file owner preserves the live composer until its first command sends the completed upload", async (t) => {
+  resetWorld();
+  const sid = "pooled-upload-first-command";
+  const file = new File([new Uint8Array([80, 75, 0, 0, 1, 2])], "before-first-prompt.zip", { type: "application/zip" });
+  primeSession(sid, []);
+  let releaseCreation;
+  let releaseUpload;
+  t.after(() => { releaseCreation?.(); releaseUpload?.(); });
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: () => new Promise((resolve) => { releaseCreation = () => resolve({ value: { success: true, sessionId: sid, hostId: "h2", cwd: "/worker-2/owned", data: {} } }); }),
+  }, {
+    match: (method, url) => method === "PUT" && url.startsWith("/api/uploads/"),
+    produce: () => new Promise((resolve) => { releaseUpload = () => resolve({ value: { received: file.size, done: true } }); }),
+  });
+  world.respond = (method, url) => url === "/api/uploads" && method === "POST" ? jsonResponse(200, { received: 0 }) : null;
+  const chatInputRef = React.createRef();
+  const promoted = [];
+  function Shell() {
+    const [session, setSession] = React.useState(null);
+    return React.createElement(ChatWindow, {
+      session, newSessionCwd: null, chatInputRef,
+      ...(!session ? { newSessionPoolId: "workers", newSessionProjectId: "app", newSessionCreationId: "4c9dbe74-5d07-46b6-aa7b-87bf6ad55761" } : {}),
+      onSessionCreated(created) { promoted.push(created); setSession(created); },
+    });
+  }
+  const view = ownRoot(render(React.createElement(Shell), { wrapper: TestRoot }));
+  await settle();
+  const composer = view.getByRole("textbox");
+  await act(async () => {
+    fireEvent.change(composer, { target: { value: "Keep this draft with its upload" } });
+    chatInputRef.current.addFiles([file]);
+    await sleep(30);
+  });
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1);
+  await act(async () => { releaseCreation(); await sleep(50); });
+  assert.equal(view.getByRole("textbox") === composer, true, "resolving ownership is not a view transition");
+  assert.equal(composer.value, "Keep this draft with its upload");
+  assert.equal(view.queryAllByText(file.name).length, 1);
+  assert.deepEqual(promoted, [], "the owner is retained without promoting before the first command");
+  await until(() => releaseUpload, "the owned upload starts");
+  const upload = callsTo("POST", "/api/uploads")[0].body;
+  assert.equal(upload.host, "h2");
+  assert.equal(callsTo("DELETE", "/api/uploads/").length, 0);
+  await act(async () => { lastEs()?.open(); releaseUpload(); await sleep(50); });
+  assert.equal(composer.value, "Keep this draft with its upload");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: translate("chatInput.send") })); await sleep(50); lastEs()?.open(); });
+  await until(() => callsTo("POST", `/api/agent/${sid}`).some(({ body }) => body?.type === "prompt"), "the first prompt reaches its retained owner");
+  const prompt = callsTo("POST", `/api/agent/${sid}`).find(({ body }) => body?.type === "prompt").body;
+  assert.equal(prompt.message, "Keep this draft with its upload");
+  assert.deepEqual(prompt.uploads, [upload.id]);
+  assert.deepEqual(promoted.map(({ id, hostId }) => ({ id, hostId })), [{ id: sid, hostId: "h2" }]);
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1);
+  view.unmount();
+});
+
+test("nonprompt pooled placement failures are visible once while rejection and frozen retry intent are retained", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  const error = "Repository authentication failed on the worker. Configure access to git@example.invalid:app.git.";
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: () => new Promise((resolve) => { release = () => resolve({ status: 503, value: { error, code: "pool_preparation_failed" } }); }),
+  });
+  let systemPromptLoader;
+  const view = ownRoot(render(React.createElement(ChatWindow, {
+    session: null, newSessionCwd: null, newSessionPoolId: "workers", newSessionProjectId: "app",
+    newSessionCreationId: "49ad40e2-ed0d-497a-a7aa-5bc20751395e",
+    onSystemPromptLoaderChange: (loader) => { systemPromptLoader = loader; },
+  }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.change(view.getByRole("textbox"), { target: { value: "/" } }); await sleep(30); });
+  let systemResult;
+  await act(async () => {
+    systemResult = systemPromptLoader().then(() => ({ accepted: true }), (failure) => ({ accepted: false, failure }));
+    release();
+    await systemResult;
+    await sleep(30);
+  });
+  assert.equal((await systemResult).accepted, false, "nonprompt consumers still receive rejection");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1, "concurrent lazy consumers share one attempt");
+  const visibleErrors = view.queryAllByText(error, { exact: false }).length + toastCalls.filter((call) => String(call[1]).includes(error)).length;
+  assert.equal(visibleErrors, 1, "the actionable server failure is displayed once, not only logged or swallowed");
+  assert.equal(callsTo("POST", "/api/agent/").some(({ url, body }) => url !== "/api/agent/new" && body?.type === "prompt"), false);
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { success: true, sessionId: "prepared-after-explicit-retry", hostId: "h2", cwd: "/worker-2/prepared", data: {} } }),
+  });
+  await act(async () => { await systemPromptLoader(); });
+  const attempts = callsTo("POST", "/api/agent/new").map(({ body }) => body);
+  assert.equal(attempts.length, 2, "only the explicit later action retries placement");
+  assert.deepEqual(attempts[1], attempts[0]);
+  assert.equal(callsTo("POST", "/api/agent/").some(({ body }) => body?.type === "prompt"), false);
+  view.unmount();
+});
+
+test("known-ID upload uncertainty retains the pending composer and retries the bound owner without another placement", async () => {
+  resetWorld();
+  const sid = "known-upload-owner";
+  const file = new File([new Uint8Array([80, 75, 0, 0])], "uncertain-upload.zip", { type: "application/zip" });
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 503, value: { sessionId: sid, hostId: "h2", cwd: "/worker-2/known", delivery: "unknown", code: "pool_delivery_unknown", error: "The initialization answer was lost; inspect the retained owner." } }),
+  });
+  world.respond = (method, url) => url === "/api/uploads" && method === "POST"
+    ? jsonResponse(200, { received: 0 })
+    : method === "PUT" && url.startsWith("/api/uploads/") ? jsonResponse(200, { received: file.size, done: true }) : null;
+  const inputRef = React.createRef();
+  const promoted = [];
+  function Shell() {
+    const [session, setSession] = React.useState(null);
+    return React.createElement(ChatWindow, {
+      session, newSessionCwd: null, chatInputRef: inputRef,
+      ...(!session ? { newSessionPoolId: "workers", newSessionProjectId: "app", newSessionCreationId: "080bc04b-0806-4f4d-ae4e-a354608d9cc0" } : {}),
+      onSessionCreated(created) { promoted.push(created); setSession(created); },
+    });
+  }
+  const view = ownRoot(render(React.createElement(Shell), { wrapper: TestRoot }));
+  await settle();
+  const composer = view.getByRole("textbox");
+  await act(async () => {
+    fireEvent.change(composer, { target: { value: "Keep the uncertain owner's draft" } });
+    inputRef.current.addFiles([file]);
+    await sleep(50);
+  });
+  assert.equal(view.getByRole("textbox") === composer, true);
+  assert.equal(composer.value, "Keep the uncertain owner's draft");
+  assert.ok(view.queryByText(file.name));
+  assert.deepEqual(promoted, []);
+  assert.equal(callsTo("POST", "/api/uploads").length, 0);
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: translate("chatInput.uploadRetry") })); await sleep(50); });
+  await until(() => callsTo("POST", "/api/uploads").length === 1, "the explicit upload retry uses its retained owner");
+  assert.equal(callsTo("POST", "/api/uploads")[0].body.host, "h2");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1);
+  assert.equal(callsTo("POST", `/api/agent/${sid}`).some(({ body }) => body?.type === "prompt"), false);
+  view.unmount();
+});
+
+test("the rendered sidebar keeps member-owned legacy sessions accessible beside pooled and Mac projects", async () => {
+  resetWorld();
+  servePooledWorkspace();
+  const selected = [];
+  const view = ownRoot(render(React.createElement(SessionSidebar, {
+    selectedSessionId: null, onSelectSession: (session) => selected.push(session),
+    addProjectOpen: false, setAddProjectOpen() {}, usageVisible: false,
+  }), { wrapper: TestRoot }));
+  await settle();
+  await until(() => view.queryByText("Pool app"), "the configured logical project renders");
+  assert.equal(view.queryAllByText("Pool app").length, 1);
+  assert.ok(view.queryByText("Worker one conversation"));
+  assert.ok(view.queryByText("Worker two conversation"));
+  assert.ok(view.queryByText("Mac conversation"));
+  assert.ok(view.queryByText("Worker legacy conversation"), "a member's unmatched physical workspace remains reachable");
+  assert.equal(view.queryByRole("button", { name: translate("hosts.addWorkspaceOn", { host: "Worker 1" }) }), null, "existing-session presentation must not expose a member creation target");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: translate("sessionSidebar.search") })); });
+  await until(() => view.queryByRole("textbox", { name: translate("sessionSidebar.search") }), "the user-opened search field commits");
+  await act(async () => {
+    fireEvent.change(view.getByRole("textbox", { name: translate("sessionSidebar.search") }), { target: { value: "legacy" } });
+    await sleep(30);
+  });
+  await act(async () => { fireEvent.click(view.getByText("Worker legacy conversation")); });
+  assert.deepEqual(selected.map(({ id, hostId, cwd, poolId }) => ({ id, hostId, cwd, poolId })), [
+    { id: "legacy", hostId: "h1", cwd: "/legacy", poolId: undefined },
+  ]);
+  view.unmount();
+});
+
+test("a selected remote session can browse its owner files without reading a same-path central decoy", async (t) => {
+  resetWorld();
+  servePooledWorkspace();
+  window.history.replaceState(null, "", "?session=worker-one");
+  t.after(() => window.history.replaceState(null, "", "/"));
+  const view = ownRoot(render(React.createElement(AppShell, { appName: "ompweb" }), { wrapper: TestRoot }));
+  await settle();
+  await until(() => view.queryByRole("button", { name: translate("appShell.showFilePanel") }), "the restored remote session's panel control appears");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: translate("appShell.showFilePanel") })); await sleep(60); });
+  await until(() => view.queryByText("owner-only.txt"), "the remote owner's directory renders");
+  assert.equal(view.queryByText("central-decoy.txt"), null);
+  await act(async () => { fireEvent.click(view.getByText("owner-only.txt")); await sleep(60); });
+  await until(() => view.queryByText("FIRST OWNER CONTENT"), "the file opens against the same real owner");
+  assert.equal(view.queryByText("CENTRAL DECOY CONTENT"), null);
+  view.unmount();
+});
+
+test("equal-path file tabs retain their originating session when the selected owner changes", async (t) => {
+  resetWorld();
+  servePooledWorkspace();
+  window.history.replaceState(null, "", "?session=worker-one");
+  t.after(() => window.history.replaceState(null, "", "/"));
+  const view = ownRoot(render(React.createElement(AppShell, { appName: "ompweb" }), { wrapper: TestRoot }));
+  await settle();
+  const stream = world.esInstances.find(({ channel }) => channel.kind === "host-tools");
+  assert.ok(stream);
+  await until(() => view.queryByRole("button", { name: translate("appShell.showFilePanel") }), "the first owner is selected");
+  await act(async () => {
+    stream.emit({ type: "host_tool_call", id: "first-open", sessionId: "worker-one", hostId: "h1", cwd: "/shared", toolName: "open_file", arguments: { path: "/shared/report.txt" } });
+    await sleep(60);
+  });
+  await until(() => view.queryByText("FIRST OWNER CONTENT"), "the first owner file opens");
+  await act(async () => { fireEvent.click(view.getByText("Worker two conversation")); await sleep(60); });
+  await act(async () => {
+    stream.emit({ type: "host_tool_call", id: "second-open", sessionId: "worker-two", hostId: "h2", cwd: "/shared", toolName: "open_file", arguments: { path: "/shared/report.txt" } });
+    await sleep(60);
+  });
+  await until(() => view.queryByText("SECOND OWNER CONTENT"), "the equal path opens on the second owner");
+  const tabs = view.getAllByRole("tab", { name: /report\.txt/ });
+  assert.equal(tabs.length, 2, "equal physical paths on different owners are different tabs");
+  await act(async () => { fireEvent.click(tabs[0]); await sleep(30); });
+  const visibleFirst = view.queryAllByText("FIRST OWNER CONTENT").some((element) => !element.closest('[style*="display: none"]'));
+  assert.equal(visibleFirst, true, "returning to the first tab still displays its original owner");
+  assert.equal(view.queryByText("CENTRAL DECOY CONTENT"), null);
+  view.unmount();
+});
+
+test("a retained foreign-source tab cannot mention its path into the selected worker chat", async (t) => {
+  resetWorld();
+  servePooledWorkspace();
+  window.history.replaceState(null, "", "?session=worker-one");
+  t.after(() => window.history.replaceState(null, "", "/"));
+  const view = ownRoot(render(React.createElement(AppShell, { appName: "ompweb" }), { wrapper: TestRoot }));
+  await settle();
+  const stream = world.esInstances.find(({ channel }) => channel.kind === "host-tools");
+  assert.ok(stream);
+  await until(() => view.queryByRole("button", { name: translate("appShell.showFilePanel") }), "the source conversation is selected");
+  await act(async () => {
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "Worker one draft" } });
+    stream.emit({ type: "host_tool_call", id: "mention-first-open", sessionId: "worker-one", hostId: "h1", cwd: "/shared", toolName: "open_file", arguments: { path: "/shared/report.txt" } });
+    await sleep(60);
+  });
+  await until(() => view.queryByText("FIRST OWNER CONTENT"), "the first owner's file opens");
+  await act(async () => { fireEvent.click(view.getByText("Worker two conversation")); await sleep(60); });
+  await act(async () => {
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "Worker two draft" } });
+    stream.emit({ type: "host_tool_call", id: "mention-second-open", sessionId: "worker-two", hostId: "h2", cwd: "/shared", toolName: "open_file", arguments: { path: "/shared/report.txt" } });
+    await sleep(60);
+  });
+  await until(() => view.queryByText("SECOND OWNER CONTENT"), "the selected worker's equal-path file opens separately");
+  const tabs = view.getAllByRole("tab", { name: /report\.txt/ });
+  assert.equal(tabs.length, 2);
+  await act(async () => { fireEvent.click(tabs[0]); await sleep(30); });
+  assert.equal(view.queryAllByText("FIRST OWNER CONTENT").some((element) => !element.closest('[style*="display: none"]')), true);
+  const foreignMention = view.queryByRole("button", { name: translate("appShell.mentionFileInChat") });
+  if (foreignMention) await act(async () => { fireEvent.click(foreignMention); });
+  assert.equal(view.getByRole("textbox").value, "Worker two draft", "a source-relative path must not be inserted into another worker's composer");
+  assert.equal(foreignMention === null || foreignMention.disabled, true, "the foreign-source action is unavailable");
+  await act(async () => { fireEvent.click(view.getByText("Worker one conversation")); await sleep(60); });
+  const sourceMention = view.getByRole("button", { name: translate("appShell.mentionFileInChat") });
+  assert.equal(sourceMention.disabled, false, "returning to the source session restores the action");
+  await act(async () => {
+    const composer = view.getByRole("textbox");
+    composer.focus();
+    composer.setSelectionRange(composer.value.length, composer.value.length);
+    fireEvent.click(sourceMention);
+  });
+  assert.equal(view.getByRole("textbox").value.includes("@report.txt"), true);
+  assert.equal(view.getByRole("textbox").value.startsWith("Worker one draft"), true);
+  view.unmount();
+});
+
+test("a populated local pool member keeps legacy access without a physical add-workspace control", async () => {
+  for (const localMember of [false, true]) {
+    resetWorld();
+    const { pools } = servePooledWorkspace();
+    if (localMember) pools[0].members.push({ hostId: "local", projectsRoot: "/projects", provisioned: true, draining: false });
+    const selected = [];
+    const view = ownRoot(render(React.createElement(SessionSidebar, {
+      selectedSessionId: null, onSelectSession: (session) => selected.push(session),
+      addProjectOpen: false, setAddProjectOpen() {}, usageVisible: false,
+    }), { wrapper: TestRoot }));
+    await settle();
+    await until(() => view.queryByText("Mac conversation"), "the local host's unmatched conversation remains reachable");
+    const add = view.queryByRole("button", { name: translate("hosts.addWorkspaceOn", { host: "Mac" }) });
+    if (localMember) assert.equal(add, null, "membership takes precedence over the reserved local host ID");
+    else assert.equal(add?.disabled, false, "a standalone non-member Mac keeps its add-workspace action");
+    await act(async () => { fireEvent.click(view.getByText("Mac conversation")); });
+    assert.deepEqual(selected.map(({ id, hostId, cwd, poolId }) => ({ id, hostId, cwd, poolId })), [
+      { id: "mac", hostId: "local", cwd: "/shared", poolId: undefined },
+    ]);
+    view.unmount();
+  }
+});
+
+test("local artifact images rendered from an assistant reply retain the reply's originating session", async () => {
+  resetWorld();
+  const view = ownRoot(render(React.createElement(MessageView, {
+    message: assistantMsg("image-reply", "![worker screenshot](/var/tmp/owner-shot.png)"),
+    cwd: "/shared", sessionId: "worker-one", onOpenFile() {},
+  }), { wrapper: TestRoot }));
+  await settle();
+  const image = view.getByRole("img", { name: "worker screenshot" });
+  const url = new URL(image.getAttribute("src"), "https://omp.test");
+  assert.equal(url.pathname.startsWith("/api/files/"), true);
+  assert.equal(url.searchParams.get("sessionId"), "worker-one", "the browser must not fetch the central machine's same-looking image");
+  assert.equal(url.searchParams.get("hostId"), null, "without physical context the remote session derives its owner, never a guessed local hint");
+  view.unmount();
+});
+
+test("workspace file search stays in its source session rather than a same-path central directory", async () => {
+  resetWorld();
+  servePooledWorkspace();
+  const view = ownRoot(render(React.createElement(FileExplorer, {
+    cwd: "/shared", hostId: "h1", sourceSessionId: "worker-one", fileSearchOpen: true, onOpenFile() {},
+  }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.change(view.getByRole("textbox", { name: translate("fileExplorer.searchFiles") }), { target: { value: "worker" } }); await sleep(200); });
+  await until(() => view.queryByText("worker-search-result.txt"), "the owner-scoped index result renders");
+  assert.equal(view.queryByText("central-decoy.txt"), null);
+  view.unmount();
 });
 
 test("a fresh local chat sends no host id and keeps the pre-hosts draft key", async () => {

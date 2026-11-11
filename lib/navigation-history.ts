@@ -17,6 +17,11 @@ export interface NavigationEntry {
   cwd: string | null;
   /** Host of a new-chat view's cwd; absent for this machine. */
   hostId?: string;
+  poolId?: string;
+  projectId?: string;
+  creationId?: string;
+  /** Initial ensure_session configuration only; never prompt text or credentials. */
+  initialization?: string;
 }
 
 export interface NavigationHistory {
@@ -42,6 +47,7 @@ export function createNavigationHistory(): NavigationHistory {
 export function navigationEntriesEqual(a: NavigationEntry, b: NavigationEntry): boolean {
   if (a.sessionId !== b.sessionId) return false;
   if (a.sessionId !== null) return true;
+  if (a.poolId || b.poolId) return a.poolId === b.poolId && a.projectId === b.projectId && a.creationId === b.creationId;
   return (a.cwd ?? null) === (b.cwd ?? null) && a.hostId === b.hostId;
 }
 
@@ -61,7 +67,12 @@ export function pushNavigationEntry(history: NavigationHistory, entry: Navigatio
     return { entries: [entry], index: 0 };
   }
   const current = history.entries[history.index];
-  if (current && navigationEntriesEqual(current, entry)) return history;
+  if (current && navigationEntriesEqual(current, entry)) {
+    if (!current.poolId || current.initialization !== undefined || entry.initialization === undefined) return history;
+    const entries = [...history.entries];
+    entries[history.index] = { ...current, initialization: entry.initialization };
+    return { ...history, entries };
+  }
   const entries = history.entries.slice(0, history.index + 1);
   entries.push(entry);
   if (entries.length > NAVIGATION_HISTORY_MAX_ENTRIES) {

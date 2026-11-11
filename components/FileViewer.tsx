@@ -870,6 +870,7 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
 
     try {
       const params = new URLSearchParams({ cwd, path: targetPath, hostId });
+      if (sourceSessionId) params.set("sessionId", sourceSessionId);
       const response = await fetch(`/api/git/diff?${params.toString()}`);
       const next = await response.json() as GitFileDiffResponse & { error?: string };
       if (requestId !== gitDiffRequestRef.current) return;
@@ -877,7 +878,12 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
     } catch {
       if (requestId === gitDiffRequestRef.current) setGitDiff(null);
     }
-  }, [cwd, hostId]);
+  }, [cwd, hostId, sourceSessionId]);
+
+  // Reset per file, not per activation: switching tabs back keeps the user's pick.
+  useEffect(() => {
+    setLanguageOverride(null);
+  }, [filePath]);
 
   // Reset per file, not per activation: switching tabs back keeps the user's pick.
   useEffect(() => {
