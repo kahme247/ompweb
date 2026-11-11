@@ -396,3 +396,35 @@ test("resident-session blocking stays readable with a disabled daemon update and
   assert.ok(screen.getByRole("button", { name: "Update ompweb host" }).disabled);
   assert.equal(screen.getByRole("button", { name: "Update omp runtime" }).disabled, false);
 });
+
+test("sharing credentials is confirmed before it is turned on, and turned off at once", async (t) => {
+  const patches = [];
+  mockHostRequests(t, async (url, init) => {
+    if (String(url).includes("/updates")) return Response.json(updateInfo());
+    patches.push(JSON.parse(init?.body ?? "null"));
+    return Response.json({});
+  });
+  const user = userEvent.setup();
+  await showHosts([
+    hostRow(),
+    hostRow({ id: "h1", label: "Laptop", allowAgentStart: false, shareCredentials: false }),
+    hostRow({ id: "h2", label: "Desk", allowAgentStart: false, shareCredentials: true }),
+  ]);
+  const localRow = (await screen.findByRole("button", { name: "Rename This machine" })).closest("li");
+  assert.equal(within(localRow).queryByRole("switch", { name: /provider logins/ }), null);
+
+  await user.click(screen.getByRole("switch", { name: "Use this server's provider logins on Laptop" }));
+  const dialog = await screen.findByRole("dialog", { name: "Share credentials with Laptop?" });
+  assert.deepEqual(patches, []);
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  assert.deepEqual(patches, []);
+
+  await user.click(screen.getByRole("switch", { name: "Use this server's provider logins on Laptop" }));
+  await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Share" }));
+  await waitFor(() => assert.deepEqual(patches, [{ id: "h1", shareCredentials: true }]));
+
+  await user.click(screen.getByRole("switch", { name: "Use this server's provider logins on Desk" }));
+  await waitFor(() => assert.deepEqual(patches.at(-1), { id: "h2", shareCredentials: false }));
+  assert.equal(screen.queryByRole("dialog"), null);
+});

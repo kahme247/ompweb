@@ -111,7 +111,7 @@ function HostDialog({ dialog, onClose }: { dialog: NonNullable<Dialogs>; onClose
   );
 }
 
-function HostCard({ host, onRename, onRevoke }: { host: HostRow; onRename: () => void; onRevoke: () => void }) {
+function HostCard({ host, onRename, onRevoke, onShare }: { host: HostRow; onRename: () => void; onRevoke: () => void; onShare: () => void }) {
   const { t } = useI18n();
   const name = hostName(t, host);
   const linked = "allowAgentStart" in host ? host : null;
@@ -150,6 +150,16 @@ function HostCard({ host, onRename, onRevoke }: { host: HostRow; onRename: () =>
             />
           </div>
         )}
+        {linked && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: "100%" }}>
+            <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.shareCredentials")}</span>
+            <ToggleSwitch
+              checked={linked.shareCredentials}
+              aria-label={t("hostsConfig.shareCredentialsAria", { name })}
+              onChange={(shareCredentials) => { if (shareCredentials) onShare(); else void call("PATCH", "/api/hosts", { id: host.id, shareCredentials }).catch(failure); }}
+            />
+          </div>
+        )}
         <button type="button" className="ui-focus-ring" aria-label={t("hostsConfig.renameAria", { name })} style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5 }} onClick={onRename}>
           <Pencil size={13} aria-hidden="true" />{t("hostsConfig.rename")}
         </button>
@@ -169,7 +179,21 @@ export function HostsConfig() {
   const { hosts, failed: loadFailed } = useHostRows();
   const [dialog, setDialog] = useState<Dialogs>(null);
   const [revoking, setRevoking] = useState<HostRow | null>(null);
+  const [sharing, setSharing] = useState<HostRow | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const share = async () => {
+    if (!sharing) return;
+    setBusy(true);
+    try {
+      await call("PATCH", "/api/hosts", { id: sharing.id, shareCredentials: true });
+      setSharing(null);
+    } catch (error) {
+      failure(error);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const revoke = async () => {
     if (!revoking) return;
@@ -202,7 +226,7 @@ export function HostsConfig() {
       ) : (
         <ul aria-label={t("hostsConfig.title")} style={{ margin: 0, padding: 0 }}>
           {hosts.map((host) => (
-            <HostCard key={host.id} host={host} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} />
+            <HostCard key={host.id} host={host} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} onShare={() => setSharing(host)} />
           ))}
           {hosts.length === 1 && <li style={{ listStyle: "none", fontSize: 12, color: "var(--text-dim)" }}>{t("hostsConfig.empty")}</li>}
         </ul>
@@ -218,6 +242,16 @@ export function HostsConfig() {
         danger
         busy={busy}
         onConfirm={() => void revoke()}
+      />
+      <ConfirmDialog
+        open={sharing !== null}
+        onOpenChange={(open) => { if (!open) setSharing(null); }}
+        title={t("hostsConfig.shareCredentialsTitle", { name: sharing?.label ?? "" })}
+        description={t("hostsConfig.shareCredentialsDescription", { name: sharing?.label ?? "" })}
+        confirmLabel={t("hostsConfig.shareCredentialsConfirm")}
+        cancelLabel={t("hostsConfig.cancel")}
+        busy={busy}
+        onConfirm={() => void share()}
       />
     </div>
   );
