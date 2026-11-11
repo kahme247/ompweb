@@ -243,9 +243,13 @@ executable/entrypoint identity and maintenance state without credentials.
 `ompweb host drain` synchronously checks children (idle included), preparations,
 uploads/controls, pending operations and reliable results, and closes new-work admission
 only when idle. A busy refusal never kills work or changes admission.
-`ompweb host resume` reopens the live daemon. Controls use a private Unix socket inside
-the existing daemon, not TCP or a separate service. A disconnected deployer cannot release
-a live drain. Ordinary standalone Windows hosts remain unchanged; local controls are Unix-only.
+`ompweb host resume` reopens the live daemon. Controls run inside the existing daemon, not
+TCP or a separate service: a private Unix socket on Linux and macOS, and on Windows a named
+pipe with a random name and a per-start token. Windows keeps both in
+`<agent dir>/omp-web/host-control.json`, which only the daemon's user can read through the
+agent directory; a request without the current token is refused. A disconnected deployer
+cannot release a live drain. Windows hosts report CPU and memory capacity too, so they can be
+pool workers.
 Disable central member admission before worker rollout; native drain is the final race-free guard.
 
 Worker service cutovers can additionally start drained through `OMP_WEB_HOST_DRAINED=1`
