@@ -1549,6 +1549,7 @@ export interface LinkedHostRow {
   platform: string | null;
   lastSeenAt: string | null;
   allowAgentStart: boolean;
+  shareCredentials: boolean;
   /** Link protocol version the daemon last presented; null before it ever dialed. */
   hostVersion: number | null;
   serverVersion: number;
@@ -1567,6 +1568,7 @@ export function listHosts(): LinkedHostRow[] {
       platform: link?.platform ?? null,
       lastSeenAt: link?.lastSeenAt ?? record.lastSeenAt,
       allowAgentStart: record.allowAgentStart,
+      shareCredentials: record.shareCredentials,
       hostVersion: link?.hostVersion ?? null,
       serverVersion: LINK_PROTOCOL_VERSION,
       workspaceOps: [...(link?.workspaceOps ?? [])],
