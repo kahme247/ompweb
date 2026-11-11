@@ -218,10 +218,11 @@ the daemon's link when it starts, so start the web server first.
 
 ### Transparent host pools
 
-ompweb has at most one cluster: the first pool in `pools.json`. This machine is its master
-and always a member. The cluster appears in the sidebar as one group with one entry per Git
-repository. Choose the cluster rather than a member; new independent sessions are placed on
-an eligible member and receive an isolated local worktree. Adding a cluster project registers
+ompweb has at most one cluster: the first pool in `pools.json`. This machine is its master.
+Creating the cluster adds this machine; an existing first pool that lacks it gains it on the
+next join. The cluster appears in the sidebar as one group with one entry per Git repository.
+Choose the cluster rather than a member; new independent sessions are placed on an eligible
+member and receive an isolated local worktree. Adding a cluster project registers
 its Git origin, not a central clone. The selected member prepares its checkout when the
 session starts and reports authentication, preparation, or repository conflicts explicitly.
 Standalone hosts, including the Mac, keep their own groups with typed paths and local clone
@@ -233,8 +234,8 @@ remains an explicit user action.
 **Joining and leaving.** Each linked host has an **In the cluster** switch in **Settings →
 Hosts**. Turning it on asks for a folder on that host for the checkouts the cluster creates
 (default `<home>/ompweb-cluster`) and shows what changes. It needs the host online, its daemon
-on link protocol 9 and the `gitOrigins` operation; otherwise the switch is disabled and says
-which is missing.
+on link protocol 9 and the `gitOrigins` operation; otherwise the disabled switch asks for an
+update or shows the host's unavailable status.
 
 - **Joining:** the host's Git projects are matched by repository: the same repository on
   several members is one cluster project, and its sessions are listed together. `git@github.com:a/b.git`
@@ -242,6 +243,9 @@ which is missing.
   subfolders and linked worktrees stay on their node; the cluster shows them with the node's
   name, and a new session there starts on that node. Nothing on the host's disk changes. When
   this machine joins, which happens with the first host, its projects are handled the same way.
+  A second checkout of a repository already bound on that host also stays on its node.
+  Projects inside, or containing, the chosen checkout folder stay on their node too; pick an
+  empty folder that is not a parent of existing projects.
 - **Leaving:** the host takes no new cluster sessions. Its matched projects are listed under
   the host again. Checkouts the cluster created inside the host's folder stay bound, so
   sessions the cluster started there stay under the cluster's projects. This machine cannot
@@ -253,13 +257,15 @@ which is missing.
   keys.
 - **Limits:** a host that is too slow to report its Git remotes within the time limit keeps
   the remaining projects on its node; leaving and joining again retries them. A pool disabled
-  through the API takes no new sessions, and Settings has no switch for it.
+  through the API takes no new sessions; Settings cannot enable it again.
 
-**Upgrade note.** After this update, every host that is already a member of the first pool uses
-this machine's provider logins, without a confirmation having been shown. Every member needs
-an updated ompweb host daemon (link protocol 9) and omp 15.13.1 or newer; until then, session
-starts on that member are refused. Remove a host that should not receive the logins from the
-first pool before updating.
+**Upgrade note.** After this update, every linked host already in the first pool uses this
+machine's provider logins (it can read their access tokens and stored API keys), without a
+confirmation having been shown. Each linked member needs an updated ompweb host daemon
+(link protocol 9) and omp 15.13.1 or newer; until then, session starts on that member are
+refused. Before updating, remove a host that should not receive the logins from the first
+pool using `PUT /api/hosts` or editing `~/.omp/agent/omp-web/pools.json`; the old version has
+no membership switch.
 
 Creation retries reuse the same intent and creation identity. Once a real session is known,
 its owner remains authoritative for resume, files, terminal, uploads, artifacts, rename, and

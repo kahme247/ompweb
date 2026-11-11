@@ -156,7 +156,7 @@ lib/
     daemon-broker.ts   daemon side: the loopback forwarder that gives a sharing host's omp processes `OMP_AUTH_BROKER_URL`/`OMP_AUTH_BROKER_TOKEN` (`credentialsEnv`); forwards to the link's server with the link's host token
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
-    cluster.ts         pure cluster rules: `clusterOf` (= `pools[0]`), `isClusterMember`, `sharesCredentials`, `joinCluster`/`leaveCluster`, `CLUSTER_SINCE_VERSION`; browser-importable (Settings uses it)
+    cluster.ts         pure cluster rules: `clusterOf` (= `pools[0]`), `isClusterMember`, `sharesCredentials`, `joinCluster`/`leaveCluster`, `clusterJoinBlock`; browser-importable (Settings uses it)
     update-types.ts    shared per-host software status and operation contract
     updates.ts         daemon-side version checks, compatibility gate and durable update state
     update-worker.ts   host-only install/restart helper; never starts or stops the web-server service
@@ -572,16 +572,18 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     refresh tokens stay on the server. Not shared: `models.yml` custom providers,
     environment-variable API keys, omp settings.
 - **Cluster** (`docs/specs/2026-11-11-cluster-membership-design.md`). The
-  cluster is `pools[0]`; `local` is its master and always a member. The rest of
-  `pools.json` is ignored by the interface.
+  cluster is `pools[0]`; `local` is its master, added on creation or on the next
+  join if an existing first pool lacks it. The rest of `pools.json` is ignored
+  by the interface.
   - **Membership computes credential sharing; it is never stored.** A member
     other than `local` shares regardless of its `shareCredentials` flag
     (`sharesCredentials(record, pools)`), so leaving restores the host's own
     setting. An unreadable `pools.json` refuses a start (503
     `pool_storage_unavailable`) rather than starting with other logins.
   - **Every writer of `pools.json` that can end a host's sharing aborts that
-    host's broker requests** (`abortBrokerRequests`): `PUT /api/hosts`, the
-    cluster `DELETE`, a flag change or a revoke.
+    host's broker requests** (`abortBrokerRequests`): `PUT /api/hosts` and the
+    cluster `DELETE`. A flag change or revoke writes `hosts.json` and likewise
+    aborts requests when sharing ends.
   - **Only grouping passes `pools` to `projectTargetId`.** Selection, expand
     keys, reorder, pin and drag use the project's own target.
 - **Remote paths never reach `allowFileRoot`** or any other main-side
