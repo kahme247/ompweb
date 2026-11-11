@@ -140,15 +140,24 @@ for (const tab of ["models", "safety"]) {
   });
 }
 
-for (const tab of ["general", "system"]) {
-  test(`the ${tab} tab, which is this browser's or this server's own, never shows the notice`, async (t) => {
-    recordRequests(t);
-    render(createElement(SettingsConfig, { ...settingsProps, activeTab: tab, remoteHost: true, cluster: true }));
-    await settle();
-    assert.ok(screen.getByRole("tabpanel"));
-    assert.equal(screen.queryByText(NOTICE), null);
-  });
-}
+test("the general tab, which is this browser's own, never shows the notice", async (t) => {
+  recordRequests(t);
+  render(createElement(SettingsConfig, { ...settingsProps, activeTab: "general", remoteHost: true, cluster: true }));
+  await settle();
+  assert.ok(screen.getByRole("tabpanel"));
+  assert.equal(screen.queryByText(NOTICE), null);
+});
+
+test("the system tab shows the notice next to the agent environment variables, which are mirrored, for a cluster session only", async (t) => {
+  recordRequests(t);
+  render(createElement(SettingsConfig, { ...settingsProps, activeTab: "system", remoteHost: true, cluster: true }));
+  const env = await screen.findByRole("textbox", { name: "Agent environment variables" });
+  assert.deepEqual(screen.getAllByText(NOTICE).map((notice) => env.parentElement.contains(notice)), [true]);
+  cleanup();
+  render(createElement(SettingsConfig, { ...settingsProps, activeTab: "system", remoteHost: true, cluster: false }));
+  await screen.findByRole("textbox", { name: "Agent environment variables" });
+  assert.equal(screen.queryByText(NOTICE), null);
+});
 
 test("without a workspace the Plugins panel works at the user level: no cwd, global installs only", async (t) => {
   const requests = recordRequests(t);

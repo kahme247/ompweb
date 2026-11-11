@@ -292,8 +292,10 @@ export function createClusterConfig(deps: {
     try {
       removeAll(d.stage);
       removeAll(d.trash);
-      // Step 5. On the first apply the member's settings are still live, about to become the backup.
-      const own = ownSettings(first ? roots.agent : join(d.own, "agent"));
+      // Step 5. On the first apply the member's settings are still live, about to become the backup; read through a link
+      // there and kept as a plain copy, since a relative link no longer resolves once it is moved.
+      const settingsCopy = join(d.own, "settings.yml");
+      const own = first ? ownSettings(roots.agent) : exists(settingsCopy) ? { path: settingsCopy, yaml: readFileSync(settingsCopy, "utf8") } : null;
       let settings = false;
       for (const file of manifest.files) {
         const bytes = readFileSync(join(d.objects, file.hash));
@@ -308,6 +310,7 @@ export function createClusterConfig(deps: {
       if (first) {
         // absent.json last: once it exists, entries may have moved, and a restore puts them back.
         writeAtomic(join(d.own, "plugins.json"), JSON.stringify(ownPlugins));
+        if (own) writeAtomic(settingsCopy, own.yaml);
         writeAtomic(join(d.own, "agent-env.json"), JSON.stringify(previousEnv));
         writeAtomic(join(d.own, "server.json"), JSON.stringify(serverUrl));
         owner = serverUrl;
@@ -401,10 +404,12 @@ export function createClusterConfig(deps: {
     install(manifest, ownPlugins, adopted, serverUrl);
     adopt(serverUrl);
 
+    // An unchanged plugin set that is in place stays current: the member stays placeable while its plugin step re-checks it.
+    const samePlugins = plugins === "current" && JSON.stringify(applied?.plugins) === JSON.stringify(manifest.plugins);
     applied = { version: manifest.version, plugins: manifest.plugins };
     files = "current";
     filesError = null;
-    plugins = "pending";
+    if (!samePlugins) plugins = "pending";
     try {
       removeAll(d.trash);
       removeAll(d.stage);

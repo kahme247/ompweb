@@ -472,8 +472,8 @@ function BrowserTransportSetting() {
 
 /** Server-side omp-web setting (issue #104): KEY=VALUE text injected into the
  * `omp` child process. Parsing/validation lives in lib/omp/agent-env.ts; this only
- * feeds it localized messages and renders the result. */
-function AgentEnvSetting() {
+ * feeds it localized messages and renders the result. `cluster`: the members run it too (spec K1). */
+function AgentEnvSetting({ cluster }: { cluster: boolean }) {
   const { t } = useI18n();
   const [text, setText] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -571,6 +571,7 @@ function AgentEnvSetting() {
           </ul>
         )}
         <p id="agent-env-note" style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("settingsConfig.agentEnvNote")}</p>
+        {cluster && <p style={{ margin: 0, fontSize: 11, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settings.clusterConfigNotice")}</p>}
         <div>
           <button
             type="button"
@@ -1856,7 +1857,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
                 <UploadRetentionSetting />
 
-                <AgentEnvSetting />
+                <AgentEnvSetting cluster={cluster} />
 
                 {/* ompweb app update card */}
                 <section style={{ padding: 14, border: appUpdateIsAvailable ? "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))" : "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>

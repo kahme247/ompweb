@@ -163,7 +163,7 @@ test("joining asks for the folder, prefilled from the host's home, and sends it"
   assert.deepEqual(calls.filter((call) => call.url.startsWith("/api/home")), [{ method: "GET", url: "/api/home?hostId=h1" }]);
   assert.ok(within(dialog).getByText(/Its Git projects become cluster projects/));
   assert.ok(within(dialog).getByText(/Laptop will use this machine's provider logins/));
-  assert.ok(within(dialog).getByText("Its omp configuration (settings, models, MCP servers, skills, plugins, rules) is replaced by this machine's until it leaves; its own is kept and put back then."));
+  assert.ok(within(dialog).getByText("It receives this machine's omp configuration (settings, models, MCP servers, skills, plugins, rules), API keys and environment values included, in place of its own until it leaves; its own is kept and put back then."));
   assert.equal(calls.some((call) => call.method === "PUT"), false);
 
   await user.click(within(dialog).getByRole("button", { name: "Add to cluster" }));
@@ -225,7 +225,7 @@ test("leaving is confirmed, then sends DELETE", async (t) => {
   const { calls, user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local", "h1") });
   await user.click(clusterSwitch("Laptop"));
   const dialog = await screen.findByRole("dialog", { name: "Remove Laptop from the cluster?" });
-  assert.ok(within(dialog).getByText(/The cluster keeps the projects it gained from Laptop; hide any you do not want\./));
+  assert.ok(within(dialog).getByText(/The cluster keeps the projects it gained from Laptop; hide any you do not want\. Laptop gets its own omp configuration back\./));
   assert.equal(calls.some((call) => call.method === "DELETE"), false);
   await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
   await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
@@ -289,6 +289,14 @@ test("without linked members the master configuration error is not shown", async
   const { frame } = await showHosts(t, { hosts, pools: cluster("local") });
   frame({ hosts, masterConfigError: MASTER_ERROR });
   assert.deepEqual(masterErrors(), []);
+});
+
+test("while members cannot get this machine's configuration, no member row says it is updating", async (t) => {
+  const hosts = [hostRow(), linked("h1", "Laptop"), linked("h2", "Desk", { clusterConfig: configState({ plugins: "pending", current: false }) })];
+  const { frame } = await showHosts(t, { hosts, pools: cluster("local", "h1", "h2") });
+  assert.deepEqual([configLines("Laptop"), configLines("Desk")], [["Configuration: updating…"], ["Configuration: updating…"]]);
+  frame({ hosts, masterConfigError: MASTER_ERROR });
+  assert.deepEqual([configLines("Laptop"), configLines("Desk")], [[], []]);
 });
 
 test("a standalone host shows no configuration line, even with a report", async (t) => {

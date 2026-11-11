@@ -1757,9 +1757,12 @@ export async function masterConfigVersion(): Promise<string> {
     const errorChanged = JSON.stringify(master.error ?? null) !== JSON.stringify(failure);
     if (failure && errorChanged) console.warn(`[omp-web] cluster members cannot get this machine's configuration (${failure.code}: ${failure.message})`);
     if (master.version !== version || errorChanged) {
+      // A new version reaches the members now, not at the next 30 s round (spec K3); the sync piles no op on another.
+      const changed = master.version !== null && version !== null && master.version !== version;
       master.version = version;
       master.error = failure;
       notifyHostsChange();
+      if (changed) void syncClusterConfig();
     }
   }
 }

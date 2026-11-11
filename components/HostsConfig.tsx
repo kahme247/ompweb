@@ -176,7 +176,7 @@ function JoinDialog({ host, localJoins, onClose }: { host: HostRow; localJoins: 
 }
 
 /** `localBlocked`: this machine is not a member yet, so a join adds it too, and its own daemon is not ready for that. */
-type ClusterState = { pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; localBlocked: boolean };
+type ClusterState = { pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; localBlocked: boolean; masterFailed: boolean };
 
 const joinBlock = (row: HostRow) => clusterJoinBlock({ status: row.status, protocol: row.hostVersion, supports: (operation) => row.workspaceOps.includes(operation) });
 
@@ -201,16 +201,18 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
     linked && (host.lastSeenAt ? t("hostsConfig.lastSeen", { time: new Date(host.lastSeenAt).toLocaleString() }) : t("hostsConfig.neverSeen")),
   ].filter(Boolean).join(" · ");
   // A member's configuration (spec K4): no line while it is offline; a daemon below link protocol 10 never applies it,
-  // so it needs an update; a member without a report yet is still being brought up to date.
+  // so it needs an update; a member without a report yet is still being brought up to date, unless this machine cannot
+  // serve its configuration, which the message above the rows says once.
   const memberBlock = member && linked ? joinBlock(host) : null;
   const outdated = memberBlock === "upgrade" || memberBlock === "needs-upgrade";
   const config = member && !outdated ? linked?.clusterConfig : undefined;
+  const updating = cluster.masterFailed ? null : t("hostsConfig.configUpdating");
   const configLine = !member || !linked || host.status === "offline" ? null
     : outdated ? t("hostsConfig.joinUpgrade")
-      : !config ? t("hostsConfig.configUpdating")
+      : !config ? updating
         : config.version !== null && !config.owned ? t("hostsConfig.configHeldElsewhere")
           : config.error ? t("hostsConfig.configFailed", { reason: config.error })
-            : t(config.current ? "hostsConfig.configCurrent" : "hostsConfig.configUpdating");
+            : config.current ? t("hostsConfig.configCurrent") : updating;
 
   return (
     <li className="settings-card" style={{ flexWrap: "wrap", listStyle: "none" }}>
@@ -359,7 +361,7 @@ export function HostsConfig() {
       ) : (
         <ul aria-label={t("hostsConfig.title")} style={{ margin: 0, padding: 0 }}>
           {hosts.map((host) => (
-            <HostCard key={host.id} host={host} cluster={{ pools, poolsLoaded, poolsFailed, localBlocked }} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} onShare={() => setSharing(host)} onJoin={() => setJoining(host)} onLeave={() => setLeaving(host)} />
+            <HostCard key={host.id} host={host} cluster={{ pools, poolsLoaded, poolsFailed, localBlocked, masterFailed: masterConfigError !== null }} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} onShare={() => setSharing(host)} onJoin={() => setJoining(host)} onLeave={() => setLeaving(host)} />
           ))}
           {hosts.length === 1 && <li style={{ listStyle: "none", fontSize: 12, color: "var(--text-dim)" }}>{t("hostsConfig.empty")}</li>}
         </ul>

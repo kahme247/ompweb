@@ -269,7 +269,16 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         if (links.get(login.url) !== link) return;
         links.delete(login.url); ended.set(login.url, login.token); channels.linkGone(link);
         dropLink(link); electNotifier();
-        if (links.size === 0) { log(why === "revoked" ? "the server rejected this host's token (revoked?); stopping its omp sessions" : "the last host link ended"); void shutdown(why === "replaced" ? 0 : 1); }
+        // A revoked server can never send its restore, and while host.json still names it no other server may (spec K6).
+        const restored = why === "revoked" && config.holds(login.url)
+          ? config.restore(login.url).catch(error => log("could not put this host's own omp configuration back: " + reason(error)))
+          : null;
+        if (restored) log("the server that revoked this host held its omp configuration; putting this host's own back");
+        if (links.size === 0) {
+          log(why === "revoked" ? "the server rejected this host's token (revoked?); stopping its omp sessions" : "the last host link ended");
+          const code = why === "replaced" ? 0 : 1;
+          void (restored ? restored.then(() => shutdown(code)) : shutdown(code));
+        }
       },
     });
     services.set(link.id, createWorkspaceService(uploads, (id, epoch, event) => link.queue({ type: "workspace_file", id, epoch, event }, "watch:" + id)));
