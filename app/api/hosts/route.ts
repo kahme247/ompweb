@@ -1,6 +1,7 @@
 import { closeHostLink, hostsSnapshot, listHosts, notifyHostsChange } from "@/lib/hosts/hub";
 import { loadPools, savePools, type HostPool } from "@/lib/hosts/pools";
 import { createHost, HostRegistryUnreadableError, readHosts, revokeHost, UnknownHostError, updateHost } from "@/lib/hosts/registry";
+import { abortBrokerRequests } from "@/lib/omp/auth-broker";
 import { isRecord } from "@/lib/type-guards";
 
 const MAX_LABEL_LENGTH = 100;
@@ -135,6 +136,7 @@ export async function PATCH(req: Request) {
   if (label === undefined && allowAgentStart === undefined && shareCredentials === undefined) return fail("Nothing to update", 400);
   try {
     updateHost(body.id, { label, allowAgentStart, shareCredentials });
+    if (shareCredentials === false) abortBrokerRequests(body.id);
     notifyHostsChange();
     return Response.json({ host: hostsSnapshot().hosts.find((h) => h.id === body.id) }, { headers: noStore });
   } catch (error) {
@@ -150,6 +152,7 @@ export async function DELETE(req: Request) {
     // Registry first: with the record gone a daemon that redials gets 401 instead of reconnecting.
     if (!revokeHost(id)) return fail("Unknown host", 404);
     closeHostLink(id);
+    abortBrokerRequests(id);
     notifyHostsChange();
     return Response.json({ ok: true }, { headers: noStore });
   } catch (error) {
