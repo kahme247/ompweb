@@ -504,8 +504,11 @@ export function createClusterConfig(deps: {
     return keptPlugins();
   }
 
-  /** Leaving: the member's own files, then its plugins. The plugin list stays in the backup until they are back, so leaving again retries them and a new backup adopts it. */
-  async function restoreNow() {
+  /**
+   * The member's own files, then its plugins: a leave, or (`recovery`) the restore at the start that finishes an apply
+   * or a restore cut short. A plugin step cut short by a stop keeps the backup's plugin list.
+   */
+  async function restoreNow(recovery: boolean) {
     const d = dirs();
     if (!exists(d.own)) return;
     if (stopped) throw failure(new Error("the host daemon is stopping"), "restoring");
@@ -528,7 +531,10 @@ export function createClusterConfig(deps: {
       throw new HostOpError(409, "cluster_config_failed", "the host daemon stopped before this host's own plugins were back; its next start finishes it");
     }
     try {
-      clearBackup(failed !== null);
+      // After a recovery the live plugins may still be the master's: a failed plugin step keeps the list, for the next
+      // start and for a new backup to adopt. A leave that ran its plugin step to the end is done with it, failures
+      // included: kept, it would undo the plugins the user chooses afterwards.
+      clearBackup(recovery && failed !== null);
       removeAll(d.cc);
     } catch (error) {
       throw failure(error, "restoring");
@@ -554,7 +560,7 @@ export function createClusterConfig(deps: {
     enqueue(() => syncPlugins(target)).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
   } else if (exists(dirs().own)) {
     plugins = "pending";
-    enqueue(restoreNow).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
+    enqueue(() => restoreNow(true)).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
   }
 
   return {
@@ -589,7 +595,7 @@ export function createClusterConfig(deps: {
     /** Leaving the cluster: put the member's own configuration back. */
     restore(): Promise<void> {
       restoring++;
-      return enqueue(restoreNow).finally(() => {
+      return enqueue(() => restoreNow(false)).finally(() => {
         restoring--;
       });
     },
