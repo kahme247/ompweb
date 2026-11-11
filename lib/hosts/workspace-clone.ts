@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { lstat, mkdir, mkdtemp, rename, rm, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { cloneDirectoryName, type CloneFrame, type CloneProgress } from "../git-clone";
-import { createChildProcessEnvironment } from "../project-command-env";
+import { createGitEnvironment } from "../project-command-env";
 import { HostOpError } from "./link-protocol";
 import { authorizeWorkspaceDirectory, grantWorkspaceRoot } from "./workspace-roots";
 
@@ -24,7 +24,7 @@ function runGitClone(url: string, target: string, signal: AbortSignal, output: (
   return new Promise((resolve) => {
     const child = spawn("git", ["clone", "--progress", "--", url, target], {
       stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32", windowsHide: true,
-      env: createChildProcessEnvironment({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
+      env: createGitEnvironment({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
     });
     let escalation: NodeJS.Timeout | undefined;
     const kill = (force: boolean) => {

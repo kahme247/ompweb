@@ -3,7 +3,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { dirname, join } from "node:path";
 import { getAgentDir } from "../omp/paths";
 import { RpcCommandError } from "../omp/rpc-process";
-import type { PreparedPoolProject } from "../pooled-projects";
+import { sessionWorktreeName, type PreparedPoolProject } from "../pooled-projects";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import type { ProjectLaunchConfig } from "../types";
@@ -91,7 +91,7 @@ function fingerprint(value: unknown): string { return createHash("sha256").updat
 function absolute(path: unknown): path is string { return typeof path === "string" && !path.includes("\0") && pathApi(path).isAbsolute(path) && pathApi(path).normalize(path) === path; }
 function creationCwd(cloneRoot: string, creationId: string): string {
   const path = pathApi(cloneRoot);
-  return path.join(path.dirname(cloneRoot), `.${path.basename(cloneRoot)}_worktrees`, "session", creationId);
+  return path.join(path.dirname(cloneRoot), `.${path.basename(cloneRoot)}_worktrees`, "session", sessionWorktreeName(cloneRoot, creationId));
 }
 
 function readJournal(): Journal {

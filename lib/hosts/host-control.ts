@@ -159,7 +159,9 @@ async function createWindowsHostControlServer(control: (command: HostControlComm
     await closed.promise;
     throw error;
   } finally {
-    try { unlinkSync(temporary); } catch (error) { if (errno(error) !== "ENOENT") throw error; }
+    // The descriptor is already published or this start already failed: a leftover temporary file is
+    // harmless, so its removal must not strand a listening pipe behind a rejected start.
+    try { unlinkSync(temporary); } catch { /* best effort */ }
   }
   let closing: Promise<void> | undefined;
   return {

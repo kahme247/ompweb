@@ -236,7 +236,7 @@ there is no live migration or unpublished-work failover. After an uncertain resp
 inspect the retained session before explicitly retrying a command that may have run.
 
 
-### Local worker maintenance (Unix)
+### Local worker maintenance
 
 `ompweb host status` prints daemon PID, native version/protocol, welcomed-link readiness,
 executable/entrypoint identity and maintenance state without credentials.
