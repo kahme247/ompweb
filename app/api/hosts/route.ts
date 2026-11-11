@@ -76,12 +76,13 @@ export function GET() {
 export async function PUT(req: Request) {
   const body = await readBody(req);
   if (!hasOnlyKeys(body, ["pools"]) || !Array.isArray(body.pools)) return fail("pools must be an array", 400);
-  const knownHosts = new Set(["local"]);
+  let hosts: HostRecord[];
   try {
-    for (const host of readHosts()) knownHosts.add(host.id);
+    hosts = readHosts();
   } catch (error) {
     return failFor(error);
   }
+  const knownHosts = new Set(["local", ...hosts.map((host) => host.id)]);
   for (const pool of body.pools) {
     if (!hasOnlyKeys(pool, ["id", "label", "enabled", "members", "projects"])
       || !Array.isArray(pool.members) || !Array.isArray(pool.projects)) return fail("Invalid pool configuration", 400);
@@ -96,19 +97,25 @@ export async function PUT(req: Request) {
       }
     }
   }
+  let before: HostPool[];
   try {
-    loadPools();
+    before = loadPools();
   } catch {
     return poolStorageFailure();
   }
+  const after = body.pools as HostPool[];
   try {
-    savePools(body.pools as HostPool[]);
+    savePools(after);
   } catch (error) {
     // Core validation precedes persistence; filesystem errors carry an errno code.
     if (isRecord(error) && typeof error.code === "string") return poolStorageFailure();
     return fail("Invalid pool configuration", 400);
   }
-  return Response.json({ pools: body.pools }, { headers: noStore });
+  // Leaving the first pool, or no longer being in it, can end a host's sharing: cut off what it already has open.
+  for (const host of hosts) {
+    if (sharesCredentials(host, before) && !sharesCredentials(host, after)) abortBrokerRequests(host.id);
+  }
+  return Response.json({ pools: after }, { headers: noStore });
 }
 
 export async function POST(req: Request) {
