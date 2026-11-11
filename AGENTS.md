@@ -106,6 +106,7 @@ app/api/
   hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart?, shareCredentials? } (`local`: label only, empty resets to "This machine"; `shareCredentials` on `local` is 400) | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
   hosts/link/route.ts             GET WebSocket upgrade (the `ompweb host` daemon; bearer checked before the upgrade, skipped by the `proxy.ts` gate) | POST 426 for pre-WebSocket daemons
   hosts/broker/[...path]/route.ts allow-listed forwarding of an omp auth broker's endpoints for a host with `shareCredentials`; authenticated by the host token, outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Shared credentials"
+  hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`; this machine is added with the first host) | DELETE leave; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -155,6 +156,7 @@ lib/
     daemon-broker.ts   daemon side: the loopback forwarder that gives a sharing host's omp processes `OMP_AUTH_BROKER_URL`/`OMP_AUTH_BROKER_TOKEN` (`credentialsEnv`); forwards to the link's server with the link's host token
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
+    cluster.ts         pure cluster rules: `clusterOf` (= `pools[0]`), `isClusterMember`, `sharesCredentials`, `joinCluster`/`leaveCluster`, `CLUSTER_SINCE_VERSION`; browser-importable (Settings uses it)
     update-types.ts    shared per-host software status and operation contract
     updates.ts         daemon-side version checks, compatibility gate and durable update state
     update-worker.ts   host-only install/restart helper; never starts or stops the web-server service
@@ -569,6 +571,19 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   - **Scope.** The host can read current access tokens and stored API keys;
     refresh tokens stay on the server. Not shared: `models.yml` custom providers,
     environment-variable API keys, omp settings.
+- **Cluster** (`docs/specs/2026-11-11-cluster-membership-design.md`). The
+  cluster is `pools[0]`; `local` is its master and always a member. The rest of
+  `pools.json` is ignored by the interface.
+  - **Membership computes credential sharing; it is never stored.** A member
+    other than `local` shares regardless of its `shareCredentials` flag
+    (`sharesCredentials(record, pools)`), so leaving restores the host's own
+    setting. An unreadable `pools.json` refuses a start (503
+    `pool_storage_unavailable`) rather than starting with other logins.
+  - **Every writer of `pools.json` that can end a host's sharing aborts that
+    host's broker requests** (`abortBrokerRequests`): `PUT /api/hosts`, the
+    cluster `DELETE`, a flag change or a revoke.
+  - **Only grouping passes `pools` to `projectTargetId`.** Selection, expand
+    keys, reorder, pin and drag use the project's own target.
 - **Remote paths never reach `allowFileRoot`** or any other main-side
   filesystem check: they mean nothing on main. `startNewRpcSession` calls
   `allowFileRoot` and the local session-list invalidation only for the local
