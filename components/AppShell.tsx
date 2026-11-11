@@ -7,7 +7,7 @@ import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useSidebarHistory } from "@/hooks/useSidebarHistory";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useNavigationHistory } from "@/hooks/useNavigationHistory";
-import { isMacPlatform, navigateShortcutHint, NAVIGATION_HISTORY_MAX_ENTRIES } from "@/lib/navigation-history";
+import { isMacPlatform, navigateShortcutHint } from "@/lib/navigation-history";
 import { useMobileSidebarGestures } from "@/hooks/useMobileSidebarGestures";
 import { SessionSidebar } from "./SessionSidebar";
 import type { SearchMatchTarget } from "./SessionSearchMatches";
@@ -37,7 +37,7 @@ import { getFileApiUrl, getFileName, getRelativeFilePath, joinFilePath } from "@
 import { normalizeLocalPath } from "@/lib/file-links";
 import type { WorkspaceFileSource } from "@/lib/workspace-types";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
-import { getInitialNavigation } from "@/lib/initial-navigation";
+import { getInitialNavigation, readCreationInitialization, rememberCreationInitialization } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { hostProjectKey, LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
 import { useHostRows } from "@/hooks/useHostRows";
@@ -120,10 +120,30 @@ type AutoNameStatus =
   | { kind: "error"; message: string };
 type TimerHandle = NodeJS.Timeout;
 
+function viewUrl({ sessionId, cwd, hostId, poolId, projectId, creationId, sidebarOpen }: { sessionId?: string; cwd?: string | null; hostId?: string; poolId?: string; projectId?: string; creationId?: string; sidebarOpen: boolean }): string {
+  const params = new URLSearchParams();
+  if (sessionId) params.set("session", sessionId);
+  else if (poolId || projectId) {
+    if (poolId) params.set("poolId", poolId);
+    if (projectId) params.set("projectId", projectId);
+    if (creationId) params.set("creationId", creationId);
+  }
+  else if (cwd) {
+    params.set("cwd", cwd);
+    if (hostId && hostId !== LOCAL_HOST_ID) params.set("hostId", hostId);
+  }
+  params.set("sidebar", sidebarOpen ? "open" : "closed");
+  return `/?${params}`;
+}
+
 export function AppShell({ appName }: { appName: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
+  const initialNavigation = useMemo(() => getInitialNavigation(searchParams), [searchParams]);
+  const navViewVersionRef = useRef(0);
+  useEffect(() => {
+    navViewVersionRef.current += 1;
+  }, [searchParams]);
   const { t, locale } = useI18n();
   const isMobile = useIsMobile();
   const isCompactOverlay = useIsCompactOverlay();
@@ -136,6 +156,7 @@ export function AppShell({ appName }: { appName: string }) {
   const [newSessionCreation, setNewSessionCreation] = useState<{ id?: string; initialization?: string }>({});
   const newSessionCreationId = newSessionCreation.id;
   const handleNewSessionInitialization = useCallback((initialization: string) => {
+    if (newSessionCreationId) initialization = rememberCreationInitialization(newSessionCreationId, initialization);
     setNewSessionCreation((current) => current.id === newSessionCreationId && current.initialization === undefined ? { ...current, initialization } : current);
   }, [newSessionCreationId]);
   const [newSessionPoolProject, setNewSessionPoolProject] = useState<ManagedProject | null>(null);
@@ -161,7 +182,15 @@ export function AppShell({ appName }: { appName: string }) {
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const [archiveBrowserOpen, setArchiveBrowserOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const sidebarOpen = searchParams.get("sidebar") === "open" || (searchParams.get("sidebar") !== "closed" && !isMobile);
+  const setSidebarOpen = useCallback((next: boolean | ((open: boolean) => boolean)) => {
+    const params = new URLSearchParams(window.location.search);
+    const previous = params.get("sidebar") === "open" || (params.get("sidebar") !== "closed" && !isMobile);
+    const open = typeof next === "function" ? next(previous) : next;
+    if (open === previous) return;
+    params.set("sidebar", open ? "open" : "closed");
+    router.push(`/?${params}`);
+  }, [isMobile, router]);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
@@ -346,11 +375,6 @@ export function AppShell({ appName }: { appName: string }) {
       advanceAppUpdateVisibleStage(next);
     }
   }, [advanceAppUpdateVisibleStage]);
-  // On mobile the sidebar is an overlay drawer; hide it by default so the chat
-  // is visible on load. Runs once the breakpoint resolves after hydration.
-  useEffect(() => {
-    if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
   useEffect(() => {
     setMobileSidebarReady(true);
   }, []);
@@ -734,7 +758,7 @@ export function AppShell({ appName }: { appName: string }) {
   const toggleTopPanel = useCallback((panel: "branches" | "system") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
-  }, [isMobile]);
+  }, [isMobile, setSidebarOpen]);
 
   // Generation speed — current live t/s and the session average.
   const [generationSpeed, setGenerationSpeed] = useState<GenerationSpeedInfo | null>(null);
@@ -768,7 +792,7 @@ export function AppShell({ appName }: { appName: string }) {
       if (mobileToolsRef.current) mobileToolsRef.current.open = false;
     }
     setSidebarOpen((open) => !open);
-  }, [isMobile]);
+  }, [isMobile, setSidebarOpen]);
 
   const resetSidebarWidth = useCallback(() => {
     setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
@@ -1109,6 +1133,10 @@ export function AppShell({ appName }: { appName: string }) {
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
     if (!requestedCwd) return;
+    if (!selectedSession && newSessionCwd === requestedCwd && newSessionHostId === remoteHostId(initialNavigation.hostId)) {
+      setInitialCwdStatus("ready");
+      return;
+    }
 
     const controller = new AbortController();
     setInitialCwdStatus("validating");
@@ -1130,6 +1158,12 @@ export function AppShell({ appName }: { appName: string }) {
         // The sidebar will notify us when it adopts this cwd. Avoid remounting
         // the just-created empty chat during that initial synchronization.
         suppressCwdRef.current = data.cwd;
+        setSettingsTab(null);
+        setSelectedSession(null);
+        setNewSessionPoolProject(null);
+        setActivePoolProject(null);
+        setSessionKey((key) => key + 1);
+        setInitialSessionRestored(true);
         setNewSessionCwd(data.cwd);
         setNewSessionHostId(remoteHostId(initialNavigation.hostId));
         setActiveCwd(data.cwd);
@@ -1143,7 +1177,51 @@ export function AppShell({ appName }: { appName: string }) {
       });
 
     return () => controller.abort();
-  }, [initialNavigation]);
+  }, [initialNavigation.requestedCwd, initialNavigation.hostId, selectedSession, newSessionCwd, newSessionHostId]);
+
+  useEffect(() => {
+    const { poolId, projectId, creationId } = initialNavigation;
+    if (!poolId && !projectId) return;
+    if (!poolsLoaded) return;
+    const project = workspaceOptions.projects.find((candidate) => candidate.poolId === poolId && candidate.projectId === projectId);
+    if (!poolId || !projectId || !project) {
+      setInitialCwdError(translate("agentSession.invalidPoolTarget"));
+      setInitialCwdStatus("error");
+      return;
+    }
+    if (!creationId) {
+      router.replace(viewUrl({ poolId, projectId, creationId: crypto.randomUUID(), sidebarOpen }));
+      return;
+    }
+    if (!selectedSession && newSessionPoolProject?.poolId === poolId && newSessionPoolProject.projectId === projectId && newSessionCreation.id === creationId) return;
+    setSelectedSession(null);
+    setSettingsTab(null);
+    setNewSessionCwd(null);
+    setNewSessionHostId(undefined);
+    setNewSessionPoolProject(project);
+    setActivePoolProject(project);
+    setActiveCwd(null);
+    setActiveHostId(undefined);
+    setNewSessionCreation({ id: creationId, initialization: readCreationInitialization(creationId) });
+    setSessionKey((key) => key + 1);
+    setInitialCwdStatus("idle");
+    setInitialSessionRestored(true);
+  }, [initialNavigation, poolsLoaded, workspaceOptions.projects, newSessionPoolProject, newSessionCreation.id, selectedSession, router, sidebarOpen]);
+
+  useEffect(() => {
+    if (initialNavigation.sessionId || initialNavigation.requestedCwd || initialNavigation.poolId || initialNavigation.projectId) return;
+    if (selectedSession || newSessionCwd || newSessionHostId || newSessionPoolProject || activePoolProject) {
+      setSelectedSession(null);
+      setNewSessionCwd(null);
+      setNewSessionHostId(undefined);
+      setNewSessionPoolProject(null);
+      setActivePoolProject(null);
+      setSessionKey((key) => key + 1);
+      setSettingsTab(null);
+    }
+    setInitialCwdStatus("idle");
+    setInitialSessionRestored(true);
+  }, [initialNavigation.sessionId, initialNavigation.requestedCwd, initialNavigation.poolId, initialNavigation.projectId, selectedSession, newSessionCwd, newSessionHostId, newSessionPoolProject, activePoolProject]);
 
   const handleCwdChange = useCallback((cwd: string | null, projectRoot: string | null, hostId: string, project?: ManagedProject) => {
     setActivePoolProject(project?.poolId ? project : null);
@@ -1153,7 +1231,8 @@ export function AppShell({ appName }: { appName: string }) {
       if (selectedSession?.poolId === project.poolId && selectedSession.projectId === project.projectId) return;
       if (newSessionPoolProject?.poolId === project.poolId && newSessionPoolProject.projectId === project.projectId) return;
       setNewSessionPoolProject(project);
-      setNewSessionCreation({ id: crypto.randomUUID() });
+      const creationId = crypto.randomUUID();
+      setNewSessionCreation({ id: creationId });
       setNewSessionCwd(null);
       setNewSessionHostId(undefined);
       setSelectedSession(null);
@@ -1163,7 +1242,7 @@ export function AppShell({ appName }: { appName: string }) {
       setSystemPrompt(null);
       setSystemPromptLoading(false);
       setActiveTopPanel(null);
-      router.replace("/");
+      router.push(viewUrl({ poolId: project.poolId, projectId: project.projectId, creationId, sidebarOpen }));
       return;
     }
     // A standalone path is never a fallback for a pending pool placement.
@@ -1200,8 +1279,8 @@ export function AppShell({ appName }: { appName: string }) {
     setSystemPrompt(null);
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
-    router.replace("/");
-  }, [router, selectedSession, newSessionPoolProject]);
+    router.push(viewUrl({ cwd, hostId, sidebarOpen }));
+  }, [router, selectedSession, newSessionPoolProject, sidebarOpen]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     // Re-picking the already-open session (sidebar double-click, palette
@@ -1210,11 +1289,11 @@ export function AppShell({ appName }: { appName: string }) {
     setSettingsTab(null);
     // Re-picking the current conversation still closes/rearms the drawer,
     // without remounting the chat or disturbing its draft.
-    if (isMobile && !isRestore) {
-      setSidebarOpen(false);
-      requestAnimationFrame(() => chatInputRef.current?.focus());
+    if (isMobile && !isRestore) requestAnimationFrame(() => chatInputRef.current?.focus());
+    if (session.id === selectedSession?.id) {
+      if (isMobile && !isRestore) setSidebarOpen(false);
+      return;
     }
-    if (!isRestore && session.id === selectedSession?.id) return;
     setNewSessionCwd(null);
     setNewSessionPoolProject(null);
     setSelectedSession(session);
@@ -1230,17 +1309,16 @@ export function AppShell({ appName }: { appName: string }) {
       // genuine project switch.
       suppressCwdRef.current = session.cwd;
     }
-    // Skip router.replace when restoring from the URL: the param is already correct.
-    if (!isRestore) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`);
-    }
-  }, [router, isMobile, selectedSession?.id]);
+    if (!isRestore) router.push(viewUrl({ sessionId: session.id, sidebarOpen: isMobile ? false : sidebarOpen }));
+    setInitialCwdStatus("idle");
+  }, [router, isMobile, selectedSession?.id, sidebarOpen, setSidebarOpen]);
 
   const handleNewSession = useCallback((creationId: string, cwd: string | null, hostId?: string, project?: ManagedProject, initialization?: string) => {
     setSettingsTab(null);
     setSelectedSession(null);
     const target = project ?? (cwd === activeCwd ? activePoolProject : null);
-    setNewSessionCreation({ id: creationId || crypto.randomUUID(), initialization });
+    const nextCreationId = creationId || crypto.randomUUID();
+    setNewSessionCreation({ id: nextCreationId, initialization: initialization ?? readCreationInitialization(nextCreationId) });
     setNewSessionPoolProject(target?.poolId ? target : null);
     setNewSessionCwd(target?.poolId ? null : cwd);
     setNewSessionHostId(target?.poolId ? undefined : remoteHostId(hostId));
@@ -1250,99 +1328,13 @@ export function AppShell({ appName }: { appName: string }) {
     setSystemPrompt(null);
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
-    if (isMobile) {
-      setSidebarOpen(false);
-      requestAnimationFrame(() => chatInputRef.current?.focus());
-    }
-    router.replace("/");
-  }, [router, isMobile, activeCwd, activePoolProject]);
+    if (isMobile) requestAnimationFrame(() => chatInputRef.current?.focus());
+    router.push(viewUrl({ cwd: target?.poolId ? null : cwd, hostId: target?.poolId ? undefined : hostId, poolId: target?.poolId, projectId: target?.projectId, creationId: nextCreationId, sidebarOpen: isMobile ? false : sidebarOpen }));
+  }, [router, isMobile, activeCwd, activePoolProject, sidebarOpen]);
 
-  // ---- In-app Navigate back / forward over visited chat views ----
-  // Own stack, not the browser History API (that one belongs to the mobile
-  // back-gesture/exit-guard machinery — see lib/navigation-history.ts).
   const navigationHistory = useNavigationHistory();
-  const {
-    record: recordNavigationView,
-    peekBack: peekNavigationBack,
-    peekForward: peekNavigationForward,
-  } = navigationHistory;
-  // Bumped by the recording effect on every view change. navigateInHistory
-  // captures it across its await and bails if the user moved on meanwhile,
-  // so a slow session-list fetch can never yank the chat out from under a
-  // view the user just switched to.
-  const navViewVersionRef = useRef(0);
-  const navSessionId = selectedSession?.id ?? null;
-  const navSessionCwd = selectedSession?.cwd ?? null;
-  useEffect(() => {
-    navViewVersionRef.current += 1;
-    recordNavigationView({
-      sessionId: navSessionId,
-      cwd: navSessionId ? navSessionCwd : newSessionCwd,
-      ...(!navSessionId && newSessionHostId ? { hostId: newSessionHostId } : {}),
-      ...(!navSessionId && newSessionPoolProject ? { poolId: newSessionPoolProject.poolId, projectId: newSessionPoolProject.projectId } : {}),
-      ...(!navSessionId ? { creationId: newSessionCreationId } : {}),
-      ...(!navSessionId && newSessionPoolProject && newSessionCreation.initialization ? { initialization: newSessionCreation.initialization } : {}),
-    });
-  }, [navSessionId, navSessionCwd, newSessionCwd, newSessionHostId, newSessionPoolProject, newSessionCreation, newSessionCreationId, recordNavigationView]);
-
-  // Resolves a history entry's session id against the live list. `null`
-  // means the id is gone (entry should be dropped); "unavailable" means the
-  // list itself could not be fetched (keep the entry, abort this navigation).
-  const fetchSessionForNavigation = useCallback(async (sessionId: string): Promise<SessionInfo | null | "unavailable"> => {
-    try {
-      const res = await fetch(`/api/sessions?id=${encodeURIComponent(sessionId)}`);
-      if (!res.ok) return "unavailable";
-      const data = (await res.json()) as { sessions?: SessionInfo[] };
-      return data.sessions?.find((s) => s.id === sessionId) ?? null;
-    } catch {
-      return "unavailable";
-    }
-  }, []);
-
-  const navigateInHistory = useCallback(async (direction: -1 | 1): Promise<void> => {
-    // Dead entries (deleted sessions) are skipped, like browser history
-    // skipping a dead slot; bound the loop by the stack's own cap.
-    for (let attempt = 0; attempt <= NAVIGATION_HISTORY_MAX_ENTRIES; attempt++) {
-      const entry = direction === -1 ? peekNavigationBack() : peekNavigationForward();
-      // Nothing that way: stay put. An exhausted stack never falls through to
-      // the browser's own back/forward — the keystroke is swallowed by the
-      // keyboard layer, so the app can never be backed out of by accident.
-      if (!entry) return;
-      if (entry.sessionId === null) {
-        if (direction === -1) navigationHistory.commitBack();
-        else navigationHistory.commitForward();
-        const project = entry.poolId ? workspaceOptions.projects.find((candidate) => candidate.poolId === entry.poolId && candidate.projectId === entry.projectId) : undefined;
-        if (entry.poolId && !project) { toast.error(translate("errors.generic")); return; }
-        handleNewSession(entry.creationId ?? crypto.randomUUID(), entry.cwd, entry.hostId, project, entry.initialization);
-        return;
-      }
-      const versionAtPress = navViewVersionRef.current;
-      const session = await fetchSessionForNavigation(entry.sessionId);
-      if (navViewVersionRef.current !== versionAtPress) return; // user moved on: do nothing
-      if (session === "unavailable") return; // list fetch failed: keep the entry, try again next press
-      if (session) {
-        if (direction === -1) navigationHistory.commitBack();
-        else navigationHistory.commitForward();
-        handleSelectSession(session, false);
-        return;
-      }
-      if (direction === -1) navigationHistory.dropPeekedBack();
-      else navigationHistory.dropPeekedForward();
-    }
-  }, [navigationHistory, peekNavigationBack, peekNavigationForward, fetchSessionForNavigation, handleNewSession, handleSelectSession, workspaceOptions.projects]);
-
-  // Shared by the sidebar buttons and the global shortcuts. The keyboard
-  // layer always swallows the keystroke, so both directions stop dead at the
-  // ends of the stack instead of continuing into browser history.
-  const handleNavigateBack = useCallback(() => {
-    void navigateInHistory(-1);
-  }, [navigateInHistory]);
-  const handleNavigateForward = useCallback(() => {
-    void navigateInHistory(1);
-  }, [navigateInHistory]);
-
-  // Tooltip shortcut labels follow the platform (⌘[ vs Alt+←). Computed from
-  // navigator after mount state to keep SSR markup stable.
+  const handleNavigateBack = navigationHistory.back;
+  const handleNavigateForward = navigationHistory.forward;
   const [navIsMac] = useState(() => isMacPlatform());
   const sidebarNavigation = useMemo(() => ({
     canBack: navigationHistory.canBack,
@@ -1385,8 +1377,8 @@ export function AppShell({ appName }: { appName: string }) {
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
-    router.replace(`?session=${encodeURIComponent(session.id)}`);
-  }, [router, hydrateSelectedSession]);
+    router.replace(viewUrl({ sessionId: session.id, sidebarOpen }));
+  }, [router, hydrateSelectedSession, sidebarOpen]);
 
   const handleSessionMoved = useCallback((oldId: string, newId: string) => {
     if (activeSessionIdRef.current !== oldId) return;
@@ -1396,8 +1388,8 @@ export function AppShell({ appName }: { appName: string }) {
     hydrateSelectedSession(newId);
     // This is the same conversation. Preserve ChatWindow's run/edit fences
     // and its mounted composer, including unfinished attachments and audio.
-    router.replace(`?session=${encodeURIComponent(newId)}`);
-  }, [router, hydrateSelectedSession]);
+    router.replace(viewUrl({ sessionId: newId, sidebarOpen }));
+  }, [router, hydrateSelectedSession, sidebarOpen]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -1489,8 +1481,8 @@ export function AppShell({ appName }: { appName: string }) {
       path: "",
     }));
     hydrateSelectedSession(newSessionId);
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`);
-  }, [router, hydrateSelectedSession]);
+    router.push(viewUrl({ sessionId: newSessionId, sidebarOpen }));
+  }, [router, hydrateSelectedSession, sidebarOpen]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
     // The composer for this session can never be reopened, so its draft would
@@ -1501,7 +1493,8 @@ export function AppShell({ appName }: { appName: string }) {
       const cwd = selectedSession.cwd;
       setSelectedSession(null);
       setNewSessionCwd(selectedSession.poolId ? null : cwd ?? null);
-      setNewSessionCreation({ id: crypto.randomUUID() });
+      const creationId = crypto.randomUUID();
+      setNewSessionCreation({ id: creationId });
       setNewSessionPoolProject(selectedSession.poolId ? workspaceOptions.projects.find((project) => project.poolId === selectedSession.poolId && project.projectId === selectedSession.projectId) ?? null : null);
       setNewSessionHostId(remoteHostId(selectedSession.hostId));
       setSessionKey((k) => k + 1);
@@ -1509,10 +1502,13 @@ export function AppShell({ appName }: { appName: string }) {
       setBranchActiveLeafId(null);
       setSystemPrompt(null);
       setActiveTopPanel(null);
-      router.replace("/");
+      router.replace(viewUrl({ cwd: selectedSession.poolId ? null : cwd, hostId: selectedSession.hostId, poolId: selectedSession.poolId, projectId: selectedSession.projectId, creationId, sidebarOpen }));
     }
-  }, [selectedSession, router, workspaceOptions.projects]);
+  }, [selectedSession, router, workspaceOptions.projects, sidebarOpen]);
   const handleInitialRestoreDone = useCallback(() => {
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setInitialCwdStatus("idle");
     setInitialSessionRestored(true);
   }, []);
 
@@ -1546,12 +1542,12 @@ export function AppShell({ appName }: { appName: string }) {
       if (attemptsLeft > 0) {
         archiveRetryTimerRef.current = setTimeout(() => void selectRestoredSession(attemptsLeft - 1), 300);
       } else if (activeSessionIdRef.current === sessionAtRestoreStart) {
-        router.replace(`?session=${encodeURIComponent(sessionId)}`);
+        router.push(viewUrl({ sessionId, sidebarOpen: isMobile ? false : sidebarOpen }));
       }
     };
 
     void selectRestoredSession();
-  }, [handleSelectSession, router]);
+  }, [handleSelectSession, router, isMobile, sidebarOpen]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
     // Compute everything from the current list outside the updaters: no side
@@ -1582,7 +1578,7 @@ export function AppShell({ appName }: { appName: string }) {
     setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
+  }, [isMobile, setSidebarOpen]);
 
   // Agent open requests that wait for the user. URLs always ask unless the
   // user opted into opening links from the viewed session automatically; URLs
@@ -1850,13 +1846,7 @@ export function AppShell({ appName }: { appName: string }) {
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
 
-  const sidebarHistory = useSidebarHistory({
-    active: isMobile && (showChat || Boolean(initialSessionId)),
-    ready: mobileSidebarReady,
-    sidebarOpen,
-    setSidebarOpen,
-    url: searchParams.toString(),
-  });
+  const sidebarHistory = useSidebarHistory();
   useEffect(() => {
     if (sidebarHistory.exitNeedsNativeBack) {
       toast.info(t("appShell.exitNativeBackTitle"), t("appShell.exitNativeBackDescription"));
@@ -1899,7 +1889,7 @@ export function AppShell({ appName }: { appName: string }) {
       onSelectSession={handleSelectSession}
       onNewSession={handleNewSession}
       initialSessionId={initialSessionId}
-      skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
+      skipInitialProjectSelection={initialNavigation.requestedCwd !== null || Boolean(initialNavigation.poolId || initialNavigation.projectId)}
       onInitialRestoreDone={handleInitialRestoreDone}
       refreshKey={refreshKey}
       onSessionDeleted={handleSessionDeleted}

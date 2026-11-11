@@ -987,6 +987,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // progress, so a URL reopened in that window has no list entry yet. Retry
   // the list a few times before declaring the restore failed.
   const restoreRetryRef = useRef(0);
+  const restoreTargetRef = useRef(initialSessionId);
   const restoreRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (restoreRetryTimerRef.current) {
@@ -995,8 +996,15 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, []);
 
-  // Auto-select cwd and restore session from URL on first load
+  // Restore every requested URL, including browser Back/Forward.
   useEffect(() => {
+    if (restoreTargetRef.current !== initialSessionId) {
+      restoreTargetRef.current = initialSessionId;
+      restoredRef.current = false;
+      restoreRetryRef.current = 0;
+      clearTimeout(restoreRetryTimerRef.current ?? undefined);
+      restoreRetryTimerRef.current = null;
+    }
     if (skipInitialProjectSelection) return;
 
     // If restoring a session, set cwd to match that session
