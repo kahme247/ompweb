@@ -85,12 +85,16 @@ export async function GET(request: Request) {
     // /api/agent/[id]): an alive child is reused as-is below, never replaced —
     // listing servers must stay side-effect-free.
     const advisor = params.get("advisor") === "1";
+    // `attach=1`: live status from a process already running, never one started here. A cluster session on another
+    // member is read where it runs (spec K7); its file is not this machine's to start.
+    const attachOnly = params.get("attach") === "1";
     let liveServers: ReturnType<typeof parseMcpListOutput> | undefined;
     let liveError: string | undefined;
     if (includeLive && sessionId) {
       try {
         let session = getRpcSession(sessionId);
         if (!session?.isAlive()) {
+          if (attachOnly) throw new WebRpcError("The session is not running", "session_not_running");
           // MCP settings are this machine's only.
           const host = getHost(LOCAL_HOST_ID);
           const target = await sessionSpawnTarget(sessionId, host);

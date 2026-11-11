@@ -35,7 +35,9 @@ function serverSummary(config: Record<string, unknown>): { type: string; target:
   };
 }
 
-export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: string | null }) {
+/** `liveOnly`: the session runs on another cluster member. Its live status is read from its running process (never one
+ * started here); servers are changed in the master's configuration, so the switches stay off (spec K7). */
+export function McpConfig({ cwd, sessionId, liveOnly = false }: { cwd: string | null; sessionId?: string | null; liveOnly?: boolean }) {
   const { t } = useI18n();
   const [servers, setServers] = useState<McpServer[]>([]);
   const [userConfig, setUserConfig] = useState<McpUserConfig | null>(null);
@@ -62,13 +64,17 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       if (cwd) params.set("cwd", cwd);
       if (sessionId) {
         params.set("sessionId", sessionId);
-        // Fresh-spawn opinion for the MCP route (same localStorage key the
-        // chat-switch effect reads): without it a spawn here plants a
-        // non-advisor child that a concurrent prompt then reuses.
-        try {
-          if (localStorage.getItem(`omp-advisor-enabled:${sessionId}`) === "true") params.set("advisor", "1");
-        } catch {
-          // Private mode: omit the opinion, spawn defaults apply.
+        if (liveOnly) {
+          params.set("attach", "1");
+        } else {
+          // Fresh-spawn opinion for the MCP route (same localStorage key the
+          // chat-switch effect reads): without it a spawn here plants a
+          // non-advisor child that a concurrent prompt then reuses.
+          try {
+            if (localStorage.getItem(`omp-advisor-enabled:${sessionId}`) === "true") params.set("advisor", "1");
+          } catch {
+            // Private mode: omit the opinion, spawn defaults apply.
+          }
         }
       }
 
@@ -109,13 +115,13 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
     } finally {
       if (generation === loadGeneration.current) setLoading(false);
     }
-  }, [cwd, sessionId]);
+  }, [cwd, sessionId, liveOnly]);
 
   const invalidateLoad = useCallback(() => { loadGeneration.current++; }, []);
   useEffect(() => { void load(); return invalidateLoad; }, [load, invalidateLoad]);
 
   const change = async (action: "enable" | "disable" | "reload", name?: string) => {
-    if (!sessionId || changing) return;
+    if (!sessionId || liveOnly || changing) return;
     setChanging(name ?? "reload");
     setMessage(null);
     try {
@@ -235,7 +241,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
             </div>
             {manageable ? <div className="mcp-server-control">
               {changing === server.name && <LoaderCircle size={14} className="mcp-spin" aria-hidden="true" />}
-              <ToggleSwitch checked={server.status !== "disabled"} disabled={!sessionId || loading || !!changing || saving} aria-label={t("mcpConfig.serverToggle", { name: server.name })} onChange={(enabled) => void change(enabled ? "enable" : "disable", server.name)} />
+              <ToggleSwitch checked={server.status !== "disabled"} disabled={!sessionId || liveOnly || loading || !!changing || saving} aria-label={t("mcpConfig.serverToggle", { name: server.name })} onChange={(enabled) => void change(enabled ? "enable" : "disable", server.name)} />
             </div> : <span className="mcp-readonly">{t(shadowed ? "mcpConfig.shadowed" : "mcpConfig.readOnly")}</span>}
           </li>;
         })}
@@ -248,13 +254,13 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       <header className="mcp-management-header">
         <div className="mcp-management-title"><h3>{t("mcpConfig.configuredServers")}</h3><span className="mcp-chip">{managedCount}</span></div>
         <div className="mcp-toolbar">
-          <button className="mcp-toolbar-button ui-focus-ring" type="button" onClick={() => void change("reload")} disabled={!sessionId || loading || !!changing || saving}>
+          <button className="mcp-toolbar-button ui-focus-ring" type="button" onClick={() => void change("reload")} disabled={!sessionId || liveOnly || loading || !!changing || saving}>
             {changing === "reload" ? <LoaderCircle size={15} className="mcp-spin" aria-hidden="true" /> : <RotateCw size={15} aria-hidden="true" />}{t(changing === "reload" ? "mcpConfig.applying" : "mcpConfig.reload")}
           </button>
           <button className="mcp-toolbar-button mcp-icon-button ui-focus-ring" type="button" title={t("mcpConfig.refreshLiveStatus")} aria-label={t("mcpConfig.refreshLiveStatus")} onClick={() => void load()} disabled={loading || !!changing || saving}><RefreshCw size={15} className={loading ? "mcp-spin" : undefined} aria-hidden="true" /></button>
         </div>
       </header>
-      <p className="mcp-management-description">{t(sessionId ? "mcpConfig.applyHint" : "mcpConfig.selectSessionHint")}</p>
+      <p className="mcp-management-description">{t(liveOnly ? "mcpConfig.clusterLiveHint" : sessionId ? "mcpConfig.applyHint" : "mcpConfig.selectSessionHint")}</p>
       <div className="mcp-management-note"><Info size={14} aria-hidden="true" /><span>{t("mcpConfig.connectionHint")}</span></div>
       {liveError && <Alert description={t("mcpConfig.liveStatusUnavailable", { error: liveError })} />}
       {userConfig?.error && <Alert variant="error" description={userConfig.error} />}

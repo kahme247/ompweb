@@ -861,6 +861,10 @@ function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly C
   );
 }
 
+/** Tabs that edit the mirrored configuration (spec K1): `config.yml`, `models.yml`, MCP servers, skills, plugins and
+ * agents. Interface, System, usage, hosts and notifications belong to this browser or this server only. */
+const CLUSTER_CONFIG_TABS: readonly SettingsTab[] = ["safety", "models", "providers", "intelligence", "agents", "mcp", "skills", "plugins"];
+
 export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, neverFoldActivity, onNeverFoldActivityChange, showToolCallsUnfolded, onShowToolCallsUnfoldedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, remoteHost, cluster, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, onRefreshAppUpdate, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
@@ -900,7 +904,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   // Workspace-scoped panels read this machine's disk: not for a remote workspace yet.
   const remoteUnavailable = <p role="status" style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("hosts.notAvailableRemote")}</p>;
   // On another member the panels act on this machine's user level, which every member runs; that member's workspace
-  // and session are not this machine's, so they are left out with the project-level parts they would show.
+  // and session are not this machine's, so they are left out with the project-level parts they would show. MCP alone
+  // keeps the session, to read its live status from the process running there (spec K7).
   const panelsUnavailable = remoteHost && !cluster;
   const panelCwd = remoteHost ? null : cwd;
   const panelSessionId = remoteHost ? null : sessionId;
@@ -1250,7 +1255,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             <SettingsTabs active={currentTab} onSelect={handleSelectTab} workspaceReady={workspaceReady} layout={isMobile ? "horizontal" : "vertical"} attentionTabs={attentionTabs} />
 
             <div className="settings-content" style={contentStyle}>
-            {cluster && !["hosts", "usage", "notifications"].includes(currentTab) && (
+            {cluster && CLUSTER_CONFIG_TABS.includes(currentTab) && (
               <p style={{ flexShrink: 0, margin: isMobile ? "16px 14px 0" : "16px 24px 0", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settings.clusterConfigNotice")}</p>
             )}
             {nativeSettingsRequired && nativeSettingsLoading ? (
@@ -1743,7 +1748,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.extensionsToolsDesc")}</p>
                   {cwd && (!remoteHost || cluster) && <button type="button" className="settings-back ui-focus-ring" onClick={() => handleSelectTab("skills")}>{t("skillsConfig.title")}</button>}
                 </div>
-                {cwd && !remoteHost && (
+                {cwd && (!remoteHost || cluster) && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                     <NativeSetting searchId="load-project-mcp-servers" label={t("settingsConfig.loadProjectMcp")} description={t("settingsConfig.loadProjectMcpDesc")} scope="Native OMP">
                       <ToggleSwitch
@@ -1765,7 +1770,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </NativeSetting>
                   </div>
                 )}
-                {panelsUnavailable ? remoteUnavailable : <McpConfig cwd={panelCwd} sessionId={panelSessionId} />}
+                {panelsUnavailable ? remoteUnavailable : <McpConfig cwd={panelCwd} sessionId={sessionId} liveOnly={remoteHost} />}
                 {!cwd && <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>}
               </div>
             )}
@@ -1810,7 +1815,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     {t("settingsConfig.agentsDesc")}
                   </p>
                 </div>
-                {panelsUnavailable ? remoteUnavailable : <AgentsConfig cwd={panelCwd} />}
+                {panelsUnavailable ? remoteUnavailable : <AgentsConfig cwd={panelCwd} userOnly={remoteHost} />}
               </div>
             )}
 

@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
-import { CLUSTER_PROJECTS_DIR, clusterJoinBlock, isClusterMember } from "@/lib/hosts/cluster";
+import { CLUSTER_PROJECTS_DIR, clusterJoinBlock, clusterOf, isClusterMember } from "@/lib/hosts/cluster";
 import type { HostRow } from "@/lib/hosts/hub";
 import type { HostPool } from "@/lib/hosts/pools";
 import { useI18n } from "@/lib/i18n";
@@ -200,13 +200,17 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
     host.hostVersion !== null && host.status !== "needs-upgrade" && t("hostsConfig.protocol", { version: host.hostVersion }),
     linked && (host.lastSeenAt ? t("hostsConfig.lastSeen", { time: new Date(host.lastSeenAt).toLocaleString() }) : t("hostsConfig.neverSeen")),
   ].filter(Boolean).join(" · ");
-  // A member's configuration (spec K4); a member without a report yet is still being brought up to date.
-  const config = member ? linked?.clusterConfig : undefined;
-  const configLine = !member || !linked ? null
-    : !config ? t("hostsConfig.configUpdating")
-      : config.version !== null && !config.owned ? t("hostsConfig.configHeldElsewhere")
-        : config.error ? t("hostsConfig.configFailed", { reason: config.error })
-          : t(config.current ? "hostsConfig.configCurrent" : "hostsConfig.configUpdating");
+  // A member's configuration (spec K4): no line while it is offline; a daemon below link protocol 10 never applies it,
+  // so it needs an update; a member without a report yet is still being brought up to date.
+  const memberBlock = member && linked ? joinBlock(host) : null;
+  const outdated = memberBlock === "upgrade" || memberBlock === "needs-upgrade";
+  const config = member && !outdated ? linked?.clusterConfig : undefined;
+  const configLine = !member || !linked || host.status === "offline" ? null
+    : outdated ? t("hostsConfig.joinUpgrade")
+      : !config ? t("hostsConfig.configUpdating")
+        : config.version !== null && !config.owned ? t("hostsConfig.configHeldElsewhere")
+          : config.error ? t("hostsConfig.configFailed", { reason: config.error })
+            : t(config.current ? "hostsConfig.configCurrent" : "hostsConfig.configUpdating");
 
   return (
     <li className="settings-card" style={{ flexWrap: "wrap", listStyle: "none" }}>
@@ -282,7 +286,7 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
 
 export function HostsConfig() {
   const { t } = useI18n();
-  const { hosts, pools, poolsLoaded, poolsFailed, failed: loadFailed } = useHostRows();
+  const { hosts, pools, poolsLoaded, poolsFailed, failed: loadFailed, masterConfigError } = useHostRows();
   const [dialog, setDialog] = useState<Dialogs>(null);
   const [revoking, setRevoking] = useState<HostRow | null>(null);
   const [sharing, setSharing] = useState<HostRow | null>(null);
@@ -292,6 +296,7 @@ export function HostsConfig() {
   const local = hosts?.find(isLocalRow);
   const localJoins = !isClusterMember(pools, LOCAL_HOST_ID);
   const localBlocked = poolsLoaded && localJoins && local !== undefined && joinBlock(local) !== null;
+  const linkedMembers = clusterOf(pools)?.members.some((member) => member.hostId !== LOCAL_HOST_ID) ?? false;
 
   const share = async () => {
     if (!sharing) return;
@@ -347,6 +352,8 @@ export function HostsConfig() {
         </button>
       </div>
       {loadFailed && <div role="alert" style={{ fontSize: 12, color: "var(--status-error)" }}>{t("hostsConfig.loadFailed")}</div>}
+      {/* Once for every member: none of them can get this machine's configuration (spec K1). */}
+      {masterConfigError && linkedMembers && <div role="alert" style={{ fontSize: 12, color: "var(--status-error)", overflowWrap: "anywhere" }}>{t("hostsConfig.masterConfigFailed", { reason: masterConfigError.message })}</div>}
       {hosts === null ? (
         !loadFailed && <div role="status" style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("hostsConfig.loading")}</div>
       ) : (

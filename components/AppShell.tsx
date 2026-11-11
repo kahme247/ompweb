@@ -40,7 +40,7 @@ import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText }
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { foldedHostProjectKey, hostProjectKey, LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
-import { isClusterMember } from "@/lib/hosts/cluster";
+import { isClusterTarget } from "@/lib/hosts/cluster";
 import { useHostRows } from "@/hooks/useHostRows";
 import { LocalDaemonBanner } from "./LocalDaemonBanner";
 import { hostName } from "./host-status";
@@ -1786,11 +1786,9 @@ export function AppShell({ appName }: { appName: string }) {
   const creationTargets = [...(hosts ?? []).filter((host) => !memberIds.has(host.id) && (poolsLoaded || host.id === LOCAL_HOST_ID)).map((host) => ({ id: host.id, label: hostName(t, host) })), ...pools.map((pool) => ({ id: `pool:${pool.id}`, label: pool.label }))];
   const chatHost = remoteHost ? hosts?.find((host) => host.id === currentHostId) : undefined;
   const settingsHostId = activeCwd ? activeHostId : currentHostId;
-  // What Settings act for, as settingsHostId picks it; a session or project of the cluster (its pool's, or one on a
-  // member's node) runs the master's configuration, this machine's (spec K7), unless its host has left the cluster.
+  // What Settings act for, as settingsHostId picks it: the sidebar's project, else the open session, the new chat, the pool project.
   const settingsTarget = activeCwd ? { hostId: activeHostId } : selectedSession ?? (newSessionCwd !== null ? { hostId: newSessionHostId } : effectivePoolProject);
-  const clusterSettings = settingsTarget !== null && pools[0] !== undefined && projectTargetId(settingsTarget, pools) === `pool:${pools[0].id}`
-    && (settingsHostId === undefined || isClusterMember(pools, settingsHostId));
+  const clusterSettings = isClusterTarget(settingsTarget, settingsHostId, pools);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null || effectivePoolProject !== null;
   const currentRate = generationSpeed?.current;
   const rate = currentRate ?? generationSpeed?.average;

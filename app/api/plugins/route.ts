@@ -3,7 +3,7 @@ import { existsSync, promises as fs } from "fs";
 import { basename, extname, join } from "path";
 import { ANSI_RE, parseJsonLoose } from "@/lib/omp/plugins-cli";
 import { resolveOmpBin } from "@/lib/omp/omp-cli";
-import { getAgentDir } from "@/lib/omp/paths";
+import { ensureAgentDir } from "@/lib/omp/paths";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import type {
@@ -208,7 +208,7 @@ async function readPlugins(cwd: string | null): Promise<PluginsResponse> {
   const totals = emptyCounts();
 
   try {
-    const { stdout } = await runOmp(["plugin", "list", "--json"], { cwd: cwd ?? getAgentDir(), timeout: 60_000 });
+    const { stdout } = await runOmp(["plugin", "list", "--json"], { cwd: cwd ?? ensureAgentDir(), timeout: 60_000 });
     const list = parseJsonLoose<OmpPluginList>(stdout);
     if (!list) {
       diagnostics.push({
@@ -295,7 +295,7 @@ export async function POST(req: Request) {
 
     const source = body.source?.trim();
     const scopeArgs = scope === "project" ? ["--scope", "project"] : [];
-    const dir = cwd ?? getAgentDir();
+    const dir = cwd ?? ensureAgentDir();
 
     if (body.action === "install") {
       if (!source) return Response.json({ error: "source required", code: "source_required" }, { status: 400 });

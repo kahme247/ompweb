@@ -42,6 +42,18 @@ export function isClusterMember(pools: readonly HostPool[], hostId: string): boo
   return clusterOf(pools)?.members.some((member) => member.hostId === hostId) ?? false;
 }
 
+/**
+ * Whether Settings act for the cluster, on the master's configuration (spec K7): `target`, the session or project they
+ * are opened for, is the cluster's (its pool's, or one on a member's node), and `hostId`, where it runs (undefined: this
+ * machine), is still a member. A session of a host that has left runs on that host's own configuration.
+ */
+export function isClusterTarget(target: { poolId?: string; hostId?: string } | null, hostId: string | undefined, pools: readonly HostPool[]): boolean {
+  const cluster = clusterOf(pools);
+  if (!target || !cluster) return false;
+  const ofCluster = target.poolId ? target.poolId === cluster.id : isClusterMember(pools, target.hostId ?? LOCAL_HOST_ID);
+  return ofCluster && (hostId === undefined || isClusterMember(pools, hostId));
+}
+
 /** Whether sessions on this host run on the server's provider logins: members always, other hosts by their own flag, `local` never. */
 export function sharesCredentials(record: { id: string; shareCredentials: boolean }, pools: readonly HostPool[]): boolean {
   return record.id !== LOCAL_HOST_ID && (record.shareCredentials || isClusterMember(pools, record.id));

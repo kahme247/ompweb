@@ -206,8 +206,8 @@ interface HubState {
   /** lib/uploads.ts: each host's `upload_ack`, and null when its socket ended (upload bytes in flight are lost). */
   uploadListeners: Set<(hostId: string, ack: UploadAck | null) => void>;
   fileListeners: Map<string, (event: WorkspaceFileEvent) => void>;
-  /** The master's configuration version as last computed (null after a failure), and the failure last logged. */
-  masterConfig: { version: string | null; logged: string | null };
+  /** The master's configuration version as last computed (null after a failure), and that failure. */
+  masterConfig: { version: string | null; error: MasterConfigError | null };
   /** startClusterConfigSync's 30 s timer. */
   configSync: NodeJS.Timeout | undefined;
 }
@@ -227,7 +227,7 @@ function hub(): HubState {
     linkSamples: { samples: [], file: "", timer: undefined },
     uploadListeners: new Set(),
     fileListeners: new Map(),
-    masterConfig: { version: null, logged: null },
+    masterConfig: { version: null, error: null },
     configSync: undefined,
   };
   // A state kept from before a field existed (`bun --hot`) lacks it.
@@ -235,7 +235,7 @@ function hub(): HubState {
   globalThis.__ompHostHub.uploadListeners ??= new Set();
   globalThis.__ompHostHub.fileListeners ??= new Map();
   globalThis.__ompHostHub.sessionChangeListeners ??= new Set();
-  globalThis.__ompHostHub.masterConfig ??= { version: null, logged: null };
+  globalThis.__ompHostHub.masterConfig ??= { version: null, error: null };
   return globalThis.__ompHostHub;
 }
 
@@ -1736,23 +1736,29 @@ export function listHosts(): LinkedHostRow[] {
   });
 }
 
+/** Why the members cannot get this machine's configuration (spec K1, shown in Settings → Hosts): a ClusterConfigError's
+ * code and message, which name a file and never its content; any other error only by its name. */
+export interface MasterConfigError { code: string; message: string }
+
 /** The master's configuration version (lib/hosts/cluster-config-server.ts), kept for the rows' `current`. Throws its
- * error; a failure is logged once until it changes or the configuration works again (paths only, never content). */
+ * error, which the hosts snapshot carries until the configuration works again and is logged once per change. */
 export async function masterConfigVersion(): Promise<string> {
   const master = hub().masterConfig;
   let version: string | null = null;
+  let failure: MasterConfigError | null = null;
   try {
     version = await clusterConfigVersion();
-    master.logged = null;
     return version;
   } catch (error) {
-    const reason = error instanceof ClusterConfigError ? `${error.code}: ${error.message}` : error instanceof Error ? error.name : "unknown error";
-    if (master.logged !== reason) console.warn(`[omp-web] cluster members cannot get this machine's configuration (${reason})`);
-    master.logged = reason;
+    failure = error instanceof ClusterConfigError ? { code: error.code, message: error.message } : { code: "unknown", message: error instanceof Error ? error.name : "unknown error" };
     throw error;
   } finally {
-    if (master.version !== version) {
+    // A state kept from before `error` existed (`bun --hot`) lacks it.
+    const errorChanged = JSON.stringify(master.error ?? null) !== JSON.stringify(failure);
+    if (failure && errorChanged) console.warn(`[omp-web] cluster members cannot get this machine's configuration (${failure.code}: ${failure.message})`);
+    if (master.version !== version || errorChanged) {
       master.version = version;
+      master.error = failure;
       notifyHostsChange();
     }
   }
@@ -1844,8 +1850,9 @@ export interface LocalHostRow {
 export type HostRow = LocalHostRow | LinkedHostRow;
 
 /** Settings → Hosts payload (`GET /api/hosts` and the `hosts` channel): this machine first, then linked hosts. This machine's status is its daemon link's.
- * `pools` is left out while pools.json cannot be read: a client keeps the last it had. */
-export function hostsSnapshot(): { hosts: HostRow[]; pools?: HostPool[] } {
+ * `pools` is left out while pools.json cannot be read: a client keeps the last it had. `masterConfigError`: only while
+ * the members cannot get this machine's configuration. */
+export function hostsSnapshot(): { hosts: HostRow[]; pools?: HostPool[]; masterConfigError?: MasterConfigError } {
   const link = hub().links.get(LOCAL_HOST_ID);
   const local: LocalHostRow = {
     id: "local",
@@ -1867,7 +1874,8 @@ export function hostsSnapshot(): { hosts: HostRow[]; pools?: HostPool[] } {
   } catch {
     // Left out; see above.
   }
-  return { hosts: [local, ...listHosts()], ...(pools && { pools }) };
+  const { error } = hub().masterConfig;
+  return { hosts: [local, ...listHosts()], ...(pools && { pools }), ...(error && { masterConfigError: error }) };
 }
 
 /** Tell `hosts` subscribers the registry changed (rename, toggle, revoke); link changes notify on their own. */

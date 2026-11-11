@@ -250,21 +250,46 @@ test("a leave whose own configuration could not be put back says so and why", as
 });
 
 const configState = (fields = {}) => ({ version: "a".repeat(64), files: "current", plugins: "current", error: null, missingCommands: [], owned: true, current: true, ...fields });
-const configLines = (name) => within(rowOf(name)).queryAllByText(/^(Configuration:|Not installed on this host:)/).map((line) => line.textContent);
+const configLines = (name) => within(rowOf(name)).queryAllByText(/^(Configuration:|Not installed on this host:|Update ompweb on this host first)/).map((line) => line.textContent);
 
-for (const [label, clusterConfig, lines] of [
-  ["current", configState(), ["Configuration: same as the master"]],
-  ["updating", configState({ plugins: "pending", current: false }), ["Configuration: updating…"]],
-  ["not reported yet", undefined, ["Configuration: updating…"]],
-  ["failed", configState({ files: "failed", error: "the master answered 500 for the manifest", current: false }), ["Configuration: failed — the master answered 500 for the manifest"]],
-  ["held by another server", configState({ owned: false, current: false }), ["Configuration: held by another ompweb server; remove it from that server's cluster first"]],
-  ["current, with commands it lacks", configState({ missingCommands: ["uvx", "docker"] }), ["Configuration: same as the master", "Not installed on this host: uvx, docker"]],
+for (const [label, overrides, lines] of [
+  ["current", { clusterConfig: configState() }, ["Configuration: same as the master"]],
+  ["updating", { clusterConfig: configState({ plugins: "pending", current: false }) }, ["Configuration: updating…"]],
+  ["not reported yet", {}, ["Configuration: updating…"]],
+  ["failed", { clusterConfig: configState({ files: "failed", error: "the master answered 500 for the manifest", current: false }) }, ["Configuration: failed — the master answered 500 for the manifest"]],
+  ["held by another server", { clusterConfig: configState({ owned: false, current: false }) }, ["Configuration: held by another ompweb server; remove it from that server's cluster first"]],
+  ["current, with commands it lacks", { clusterConfig: configState({ missingCommands: ["uvx", "docker"] }) }, ["Configuration: same as the master", "Not installed on this host: uvx, docker"]],
+  ["below link protocol 10, never reporting", { hostVersion: 9 }, ["Update ompweb on this host first"]],
+  ["offline, with its last report", { status: "offline", clusterConfig: configState({ missingCommands: ["uvx"] }) }, []],
+  ["offline, never reported", { status: "offline" }, []],
 ]) {
   test(`a member's row states its configuration: ${label}`, async (t) => {
-    await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop", clusterConfig ? { clusterConfig } : {})], pools: cluster("local", "h1") });
+    await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop", overrides)], pools: cluster("local", "h1") });
     assert.deepEqual(configLines("Laptop"), lines);
   });
 }
+
+const MASTER_ERROR = { code: "file_too_large", message: "rules/big.md is 6000000 bytes, over the 5242880 byte limit" };
+const masterErrors = () => screen.queryAllByText(/^Members cannot get this machine's configuration/).map((line) => line.textContent);
+
+test("a master configuration the members cannot get is said once, above the member rows, until it works again", async (t) => {
+  const hosts = [hostRow(), linked("h1", "Laptop"), linked("h2", "Desk")];
+  const { frame } = await showHosts(t, { hosts, pools: cluster("local", "h1", "h2") });
+  assert.deepEqual(masterErrors(), []);
+  frame({ hosts, masterConfigError: MASTER_ERROR });
+  assert.deepEqual(masterErrors(), [`Members cannot get this machine's configuration: ${MASTER_ERROR.message}`]);
+  const [line] = screen.getAllByText(/^Members cannot get/);
+  assert.ok(line.compareDocumentPosition(rowOf("Laptop")) & 4, "before the rows");
+  frame({ hosts });
+  assert.deepEqual(masterErrors(), []);
+});
+
+test("without linked members the master configuration error is not shown", async (t) => {
+  const hosts = [hostRow(), linked("h1", "Laptop")];
+  const { frame } = await showHosts(t, { hosts, pools: cluster("local") });
+  frame({ hosts, masterConfigError: MASTER_ERROR });
+  assert.deepEqual(masterErrors(), []);
+});
 
 test("a standalone host shows no configuration line, even with a report", async (t) => {
   await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop", { clusterConfig: configState({ owned: false, missingCommands: ["uvx"] }) })], pools: cluster("local") });

@@ -6,7 +6,7 @@ import { promisify } from "util";
 import { parse as parseYaml } from "yaml";
 import { existingPathWithinRootsChecker, getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { resolveOmpBin, versionFingerprint, wrapWindowsScript } from "@/lib/omp/omp-cli";
-import { getAgentDir } from "@/lib/omp/paths";
+import { ensureAgentDir, getAgentDir } from "@/lib/omp/paths";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import { isRecord } from "@/lib/type-guards";
 import type { SkillInfo } from "@/lib/api-types";
@@ -393,6 +393,6 @@ export async function loadSkillsWithInstallInfo(cwd: string, ompBin: string | nu
 /** The user level only, for a request without a cwd (a cluster member's settings act on this machine's, spec K7): omp
  * runs in its agent directory, where no project lies, and a project-scope entry is left out all the same. */
 export async function loadUserSkillsWithInstallInfo() {
-  const listed = await loadSkillsWithInstallInfo(getAgentDir());
+  const listed = await loadSkillsWithInstallInfo(ensureAgentDir());
   return { ...listed, skills: listed.skills.filter((skill) => skill.sourceInfo?.scope !== "project") };
 }
