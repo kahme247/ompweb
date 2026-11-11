@@ -1,6 +1,7 @@
 import { execFile } from "child_process";
 import { existsSync, promises as fs } from "fs";
 import { basename, extname, join } from "path";
+import { ANSI_RE, parseJsonLoose } from "@/lib/omp/plugins-cli";
 import { resolveOmpBin } from "@/lib/omp/omp-cli";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
@@ -58,8 +59,6 @@ interface OmpPluginList {
   marketplace?: OmpMarketplacePlugin[];
 }
 
-const ANSI_RE = /\x1B\[[0-9;]*m/g;
-
 function emptyCounts(): PluginResourceCounts {
   return { extensions: 0, skills: 0, prompts: 0, themes: 0 };
 }
@@ -93,18 +92,6 @@ function runOmp(
       },
     );
   });
-}
-
-/** Parse `--json` stdout, tolerating stray non-JSON lines before the payload. */
-function parseJsonLoose<T>(stdout: string): T | null {
-  const cleaned = stdout.replace(ANSI_RE, "");
-  const start = cleaned.search(/[{[]/);
-  if (start < 0) return null;
-  try {
-    return JSON.parse(cleaned.slice(start)) as T;
-  } catch {
-    return null;
-  }
 }
 
 /** Best-effort scan of a plugin's skills/ directory (omp discovers plugin-root

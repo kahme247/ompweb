@@ -1,7 +1,8 @@
 import { readBodyWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sharesCredentials } from "@/lib/hosts/cluster";
 import { loadPools } from "@/lib/hosts/pools";
-import { hostForToken, HostRegistryUnreadableError, LOCAL_HOST_ID, type HostRecord } from "@/lib/hosts/registry";
+import { hostFromBearer } from "@/lib/hosts/host-bearer";
+import { LOCAL_HOST_ID, type HostRecord } from "@/lib/hosts/registry";
 import { AuthBrokerUnavailableError, brokerFetch } from "@/lib/omp/auth-broker";
 
 // A linked host's daemon forwards omp's auth-broker calls here (lib/omp/auth-broker.ts runs the broker). proxy.ts does
@@ -39,17 +40,8 @@ function only(source: Headers, names: readonly string[]): Headers {
 
 /** The sharing host (own flag or cluster member) the bearer token names, or the refusal to answer with (a 403 and a pool 503 are logged; a 401 has no host to name). */
 function admit(request: Request, path: string): HostRecord | Response {
-  const header = request.headers.get("authorization");
-  const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
-  let host: HostRecord | null;
-  try {
-    host = token ? hostForToken(token) : null;
-  } catch (error) {
-    if (!(error instanceof HostRegistryUnreadableError)) throw error;
-    // Never 401: a daemon told its token is unknown stops every omp child.
-    return fail("The host registry cannot be read", 503);
-  }
-  if (!host) return fail("Unknown host token", 401);
+  const host = hostFromBearer(request);
+  if (host instanceof Response) return host;
   // `local` is refused by id: a hand-edited hosts.json can give its record the flag.
   let shares: boolean;
   try {

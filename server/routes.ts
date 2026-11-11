@@ -23,6 +23,8 @@ import * as gitStatus from "@/app/api/git/status/route";
 import * as githubRepo from "@/app/api/github-repo/route";
 import * as home from "@/app/api/home/route";
 import * as hostsBrokerPath from "@/app/api/hosts/broker/[...path]/route";
+import * as hostsClusterConfigFileHash from "@/app/api/hosts/cluster-config/file/[hash]/route";
+import * as hostsClusterConfigManifest from "@/app/api/hosts/cluster-config/manifest/route";
 import * as hostsLink from "@/app/api/hosts/link/route";
 import * as hosts from "@/app/api/hosts/route";
 import * as hostsIdCluster from "@/app/api/hosts/[id]/cluster/route";
@@ -121,6 +123,8 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "github-repo": githubRepo,
   "home": home,
   "hosts/broker/[...path]": hostsBrokerPath,
+  "hosts/cluster-config/file/[hash]": hostsClusterConfigFileHash,
+  "hosts/cluster-config/manifest": hostsClusterConfigManifest,
   "hosts/link": hostsLink,
   "hosts": hosts,
   "hosts/[id]/cluster": hostsIdCluster,
