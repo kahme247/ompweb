@@ -61,13 +61,19 @@ function getState(): AuthBrokerState {
 }
 
 function terminate(child: BrokerChild): void {
+  if (process.platform === "win32") {
+    // A .cmd launcher runs as cmd.exe, which dies alone: kill the tree. Forced, as child.kill() is there anyway
+    // (a graceful taskkill cannot stop a windowless console process).
+    if (child.pid) spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true }).once("error", () => child.kill());
+    return;
+  }
   child.kill("SIGTERM");
   const killTimer = setTimeout(() => child.kill("SIGKILL"), AUTH_BROKER_TIMINGS.killMs);
   killTimer.unref?.();
   child.once("exit", () => clearTimeout(killTimer));
 }
 
-/** Stop the broker child now (SIGTERM, then SIGKILL). Safe to call any time. */
+/** Stop the broker child now (SIGTERM, then SIGKILL; its whole tree at once on Windows). Safe to call any time. */
 export function disposeAuthBroker(): void {
   const state = globalThis.__ompAuthBrokerState;
   if (!state) return;
