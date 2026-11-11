@@ -177,9 +177,8 @@ async function prepare(input: {
       throw error;
     }
     // At the toplevel of a worktree (a bare repository has none), with no comparison between Git's and the
-    // caller's path spelling (8.3 names, separators); and Git must use this clone's own .git directory.
-    if (!gitStat.isDirectory() || gitStat.isSymbolicLink() || !await atWorktreeTop(cloneRoot)
-      || await realpath(await git(cloneRoot, "rev-parse", "--path-format=absolute", "--git-dir")) !== await realpath(gitDirectory)) {
+    // caller's path spelling (8.3 names, separators).
+    if (!gitStat.isDirectory() || gitStat.isSymbolicLink() || !await atWorktreeTop(cloneRoot)) {
       throw new PreparationError("pool_clone_conflict", "Clone root must be an independent repository");
     }
     // Reject multiple literal URLs: Git fetches the first, whereas config --get returns the last.

@@ -86,14 +86,18 @@ export function createChildProcessEnvironment(
 }
 
 /**
- * Variables that make Git use another repository or index than the one at its
- * `-C` directory. A daemon started from a hook or a checkout can inherit them,
- * and Git would then read or write that repository instead.
+ * Variables that make Git use another repository, index or worktree than the one at its
+ * `-C` directory. A daemon started from a hook or a checkout can inherit them, and Git
+ * would then read or write that repository instead. The command-line config variables
+ * (`git -c` passes them on as GIT_CONFIG_PARAMETERS) can set `core.worktree` the same way.
+ * GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM stay: they select config files, not a repository.
  */
 const GIT_REPOSITORY_NAMES: readonly string[] = [
   "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
   "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX",
+  "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
 ];
+const GIT_CONFIG_ENTRY = /^GIT_CONFIG_(KEY|VALUE)_\d+$/i;
 
 /** Environment for a `git -C <dir>` child: like createChildProcessEnvironment, and Git resolves the repository from `<dir>` alone. */
 export function createGitEnvironment(
@@ -103,7 +107,7 @@ export function createGitEnvironment(
 ): NodeJS.ProcessEnv {
   const environment = createChildProcessEnvironment(additions, baseEnvironment, platform);
   for (const name of Object.keys(environment)) {
-    if (matches(name, GIT_REPOSITORY_NAMES, platform)) delete environment[name];
+    if (matches(name, GIT_REPOSITORY_NAMES, platform) || GIT_CONFIG_ENTRY.test(name)) delete environment[name];
   }
   return environment;
 }
