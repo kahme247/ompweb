@@ -109,7 +109,11 @@ export class ChannelTable {
       }
       channel = advertised;
     } else {
-      channel = await this.ensure(args.sessionId, args.launch as unknown as SpawnRequest, null, undefined, args.preparing ? link.id : undefined);
+      // The wire never names the credentials server: it is this link's own server, and only when the hub asks.
+      const launch = { ...args.launch };
+      delete launch.shareCredentials; delete launch.credentialsServer;
+      if (args.launch.shareCredentials === true) launch.credentialsServer = link.login.url;
+      channel = await this.ensure(args.sessionId, launch, null, undefined, args.preparing ? link.id : undefined);
     }
     if (this.goneLinks.has(link.id)) {
       channel.lifecycle?.linkGone(link.id);
@@ -186,7 +190,9 @@ export class ChannelTable {
         && (typeof args.creationId !== "string" || !this.creations.has(args.creationId)))) throw invalid("Invalid channel id");
     this.reservedChannels.add(args.ch);
     let channel: Channel;
-    try { channel = await this.ensure(null, args, link.id, args.ch); }
+    const launch = { ...args };
+    delete launch.shareCredentials; delete launch.credentialsServer;
+    try { channel = await this.ensure(null, launch, link.id, args.ch); }
     finally { this.reservedChannels.delete(args.ch); }
     if (this.goneLinks.has(link.id)) {
       this.stopChannel(channel);
