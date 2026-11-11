@@ -183,6 +183,8 @@ restart, without signing out of Windows.
 
 Forward WebSocket upgrades on `/api/events/link` (browsers) and `/api/hosts/link` (hosts); without the upgrade, a browser falls back to server-sent events after a few seconds. In nginx that means `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`, and a `proxy_read_timeout` well above 30 s.
 
+Hosts that [use the server's provider logins](#use-the-servers-provider-logins-on-a-host) also call `/api/hosts/broker/`, authenticated by their host token. That path must reach ompweb without the proxy's own authentication (a proxy login page or `auth_request` would block the daemon), without response buffering (it carries a long-lived event stream; in nginx, `proxy_buffering off;`) and without redirects.
+
 ### Two services: the web server and the local daemon
 
 ompweb runs this machine's `omp` sessions through a small daemon, `ompweb host`,
@@ -216,17 +218,75 @@ the daemon's link when it starts, so start the web server first.
 
 ### Transparent host pools
 
-A configured host pool appears as one target with one entry per registered repository.
-Choose the pool rather than a worker; new independent sessions are placed on an eligible
-worker and receive an isolated local worktree. Adding a pool project registers its Git
-origin, not a central clone. The selected worker prepares its checkout when the session
-starts and reports authentication, preparation, or repository conflicts explicitly.
-Standalone hosts, including the Mac, retain typed paths and local clone progress/cancellation.
-Existing non-pooled workspaces on member hosts remain accessible in the sidebar; those
-hosts are not offered as ordinary pool-creation targets. Resolving the owner for a new
-chat's attachment does not replace its live composer or discard its draft and uploads.
-Placement and preparation failures are also shown when command discovery or system-prompt
-inspection starts a session lazily; retrying remains an explicit user action.
+ompweb has at most one cluster: the first pool in `pools.json`. This machine is its master.
+Creating the cluster adds this machine; an existing first pool that lacks it gains it on the
+next join. The cluster appears in the sidebar as one group with one entry per Git repository.
+Choose the cluster rather than a member; new independent sessions are placed on an eligible
+member and receive an isolated local worktree. Adding a cluster project registers
+its Git origin, not a central clone; adding another URL form of a repository the cluster
+already has returns that project, unhidden, and keeps its stored origin. The selected member
+prepares its checkout when the session starts and reports authentication, preparation, or
+repository conflicts explicitly.
+Standalone hosts, including the Mac, keep their own groups with typed paths and local clone
+progress/cancellation. Resolving the owner for a new chat's attachment does not replace its
+live composer or discard its draft and uploads. Placement and preparation failures are also
+shown when command discovery or system-prompt inspection starts a session lazily; retrying
+remains an explicit user action.
+
+**Joining and leaving.** Each linked host has an **In the cluster** switch in **Settings →
+Hosts**. Turning it on asks for a folder on that host for the checkouts the cluster creates
+(default `<home>/ompweb-cluster`) and shows what changes. It needs the host online, its daemon
+on link protocol 9 and the `gitOrigins` operation; otherwise the disabled switch asks for an
+update or shows the host's unavailable status. While this machine is not a member yet, its own
+daemon needs the same, and the switch asks to restart the host service on this machine.
+
+- **Joining:** the host's Git projects are matched by repository: the same repository on
+  several members is one cluster project, and its sessions are listed together. `git@github.com:a/b.git`
+  and `https://github.com/a/b` are the same repository. Projects without a single Git `origin`,
+  subfolders and linked worktrees stay on their node; the cluster shows them with the node's
+  name, and a new session there starts on that node. Nothing on the host's disk changes. A
+  cluster project created from a host project keeps the name and alias it showed (the folder
+  name when it had no name of its own). A visible checkout that matches a hidden cluster project
+  makes that project visible again. This machine joins with the first host added while it is
+  not a member (when the cluster is created, or on the next join of an older first pool without
+  it): its Git projects then become cluster projects too, and new sessions in them start on any
+  member with capacity, not in its own checkout.
+  A second checkout of a repository already bound on that host also stays on its node.
+  Projects inside, or containing, the chosen checkout folder stay on their node too; pick an
+  empty folder that is not a parent of existing projects.
+- **Leaving:** the host takes no new cluster sessions. Its matched projects are listed under
+  the host again. Checkouts the cluster created inside the host's folder stay bound, so
+  sessions the cluster started there stay under the cluster's projects. The cluster keeps the
+  projects it gained from the host, so they may now be listed twice; hide any you do not want.
+  This machine cannot leave, and the cluster stays when the last linked host does.
+- **Provider logins:** a member always uses this machine's provider logins, whatever its own
+  [**Use this server's provider logins**](#use-the-servers-provider-logins-on-a-host) setting
+  says; Settings shows it on and disabled. This is computed from membership, so leaving brings
+  the host's own setting back. A member can read this machine's access tokens and stored API
+  keys. Cluster placement skips a member that cannot take these logins (daemon below link
+  protocol 9, or a link that does not share) before preparing a checkout there. Only provider
+  logins are shared: `models.yml` custom providers, environment-variable API keys and omp
+  settings are not mirrored to members yet, so the models a cluster session can use depend on
+  the member it runs on.
+- **Limits:** a host that is too slow to report its Git remotes within the time limit keeps
+  the remaining projects on its node; leaving and joining again retries them. Only Linux hosts
+  report capacity, so a macOS or Windows master never runs cluster sessions itself: its Git
+  projects start only on other members, and a start fails with "No pool worker currently has
+  eligible capacity" when none has capacity. A pool disabled through the API takes no new
+  sessions, including this machine's Git projects moved into it, which then cannot start
+  anywhere; its members still use this machine's provider logins. Settings cannot enable it
+  again.
+
+**Upgrade note.** After this update, every linked host already in the first pool uses this
+machine's provider logins (it can read their access tokens and stored API keys), without a
+confirmation having been shown. This includes a first pool disabled through the API, and a
+host added to the first pool later through `PUT /api/hosts` or by editing `pools.json`:
+membership, not scheduling, grants the logins. Each linked member needs an updated ompweb host
+daemon (link protocol 9) and omp 15.13.1 or newer; until the daemon is updated, cluster
+placement skips that member, and a start fails when no other member is eligible. Before
+updating, remove a host that should not receive the logins from the first pool using
+`PUT /api/hosts` or editing `~/.omp/agent/omp-web/pools.json`; the old version has no
+membership switch.
 
 Creation retries reuse the same intent and creation identity. Once a real session is known,
 its owner remains authoritative for resume, files, terminal, uploads, artifacts, rename, and
@@ -476,7 +536,8 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 ## Run sessions on another machine
 
 One ompweb can start and watch omp sessions on other machines. Each machine keeps
-its own `omp` install, `~/.omp/agent` directory, sessions, and credentials;
+its own `omp` install, `~/.omp/agent` directory, sessions, and credentials (unless you
+[share the server's provider logins](#use-the-servers-provider-logins-on-a-host));
 ompweb only routes. The remote machine needs `omp` and either Node 24 (for `npx`) or
 the [single binary](#single-binary), and must be able to reach the ompweb server over
 HTTP(S). It dials out, so it can sit behind NAT.
@@ -546,7 +607,7 @@ everything else on it: they resume when it wakes, and the link returns then. A
 docked or no-sleep setup keeps running with the lid closed. Revoking a host in
 Settings closes its link and the daemon stops its omp processes.
 
-A reverse proxy must forward the upgrade on `/api/hosts/link`; see [Behind a reverse proxy](#behind-a-reverse-proxy).
+A reverse proxy must forward the upgrade on `/api/hosts/link`. For hosts that share the server's logins it must also pass `/api/hosts/broker/` without the proxy's own authentication and without response buffering; see [Behind a reverse proxy](#behind-a-reverse-proxy).
 
 Update ompweb on the server before its hosts: a host from before this version shows **needs upgrade** until it is updated.
 
@@ -597,6 +658,21 @@ Notes:
   confirmation each time unless **Agents can start sessions here without asking**
   is switched on for it in Settings → Hosts. An agent running on a remote host
   always asks before it starts or messages a session on this machine.
+
+### Use the server's provider logins on a host
+
+By default a host uses its own omp logins. Turn on **Use this server's provider logins** for a host in **Settings → Hosts** and the sessions started there use the logins stored on the ompweb server instead, so you log in to a provider once. The setting is per host and off by default; turning it on asks for confirmation. This machine does not have it, because it already uses the server's logins.
+
+- **What is shared:** the provider logins stored on the server (OAuth logins and stored API keys). The server runs `omp auth-broker serve` for this and starts it on the first request; it stops after 5 minutes without one.
+- **When a change reaches a host:** every omp process started after a login or logout on the server uses it. A running process picks it up the next time it is used, because omp stops listening for updates after 20 seconds without activity and resumes on its next use. A running process keeps the access tokens and API keys it has already loaded until it ends.
+- **What is not shared:** custom providers in `models.yml`, API keys set through environment variables (a host's own environment keys still apply there), and omp settings.
+- **Requirements:** the server's own `omp` must provide `omp auth-broker`. The host's daemon must speak link protocol 9 and its `omp` must be 15.13.1 or newer; otherwise starting a session on that host is refused with a message naming what to update. It never falls back to the host's own stored logins. Joining a session that is already running is not refused. The setting applies to omp processes started after you change it.
+- **What the host can read:** the current access token of every OAuth login and every stored API key, in full. A process running as the daemon's user can do the same. OAuth refresh tokens never leave the server machine, and the host cannot add or replace a login. It can mark a login disabled or rate-limited for every machine.
+- **Turning it off:** turning sharing off, or revoking the host, aborts the host's open requests to the server and refuses later ones. Access tokens the host already read stay valid until they expire, and API keys until you rotate them at the provider.
+- **Dependence on the server:** a running session asks the server whenever an access token needs a refresh, so it fails to authenticate once its token expires while the server is unreachable. An `omp` you run yourself in the host's terminal is unaffected.
+- **Troubleshooting:** when sessions on a sharing host fail at startup, check the server log for `[omp-web] broker` lines and that the reverse proxy lets `/api/hosts/broker/` through.
+
+The host token is not put in an omp process's environment. The daemon listens on a loopback port with a secret it generates at each start, gives omp that address and secret, and forwards the requests to the server with the host token.
 
 ### Keep a host running as a service
 

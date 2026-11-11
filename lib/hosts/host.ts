@@ -13,6 +13,10 @@ export function isLinkUp(status: HostStatus): boolean {
 export interface SpawnRequest {
   /** Stable identity of one independent start; retries must preserve its spawn arguments. */
   creationId?: string;
+  /** Hub → daemon (v9): run this process with the opening server's provider logins. */
+  shareCredentials?: true;
+  /** Daemon only: the server URL whose link supplies the credentials. Never trusted from the wire. */
+  credentialsServer?: string;
   cwd: string;
   recordedCwd: string | null;
   sessionFile: string;
@@ -42,7 +46,8 @@ export interface Host {
   readonly label: string;
   status(): HostStatus;
   onStatus(listener: (status: HostStatus) => void): () => void;
-  spawnRpc(request: SpawnRequest, sessionId?: string | null, options?: { replaceAdvisor?: boolean; preparing?: boolean; expectedChannel?: string }): Promise<SpawnResult>;
+  /** `env`: extra child environment, over the agentEnv setting; only this machine's host honours it. */
+  spawnRpc(request: SpawnRequest, sessionId?: string | null, options?: { replaceAdvisor?: boolean; preparing?: boolean; expectedChannel?: string; env?: Record<string, string> }): Promise<SpawnResult>;
   sessionFileExists(path: string): Promise<boolean>;
   invalidateSessionLists(sessionFile?: string): void;
   autoApproveExtension(): boolean;

@@ -99,8 +99,11 @@ with their open blocking requests replayed. A direct spawn path would tie
 every run to the web server's lifetime, which is why none exists.
 
 The CLI boundary above holds on every machine: a remote machine runs its own
-installed `omp`, its own `~/.omp/agent` and its own credentials. ompweb only
-routes. `RpcProcess` takes its byte pipe (`RpcTransport`) from the host, so the
+installed `omp`, its own `~/.omp/agent` and its own credentials, unless sharing is
+turned on for that host (Settings → Hosts): then its sessions use the server's
+provider logins through `omp auth-broker serve`, and the host never gets a
+refresh token. ompweb only routes. `RpcProcess` takes its byte pipe
+(`RpcTransport`) from the host, so the
 session wrapper, event streams, notifications and queue handle frames without
 knowing where omp runs. Session routes address a session by id; the owning
 host resolves the file path, so a remote path never reaches the serving

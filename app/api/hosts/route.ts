@@ -1,6 +1,7 @@
+import { sharesCredentials } from "@/lib/hosts/cluster";
 import { closeHostLink, hostsSnapshot, listHosts, notifyHostsChange } from "@/lib/hosts/hub";
 import { loadPools, savePools, type HostPool } from "@/lib/hosts/pools";
-import { createHost, HostRegistryUnreadableError, readHosts, revokeHost, UnknownHostError, updateHost } from "@/lib/hosts/registry";
+import { createHost, HostRegistryUnreadableError, readHosts, revokeHost, UnknownHostError, updateHost, type HostRecord } from "@/lib/hosts/registry";
 import { abortBrokerRequests } from "@/lib/omp/auth-broker";
 import { isRecord } from "@/lib/type-guards";
 
@@ -20,6 +21,15 @@ function failFor(error: unknown) {
   }
   if (error instanceof UnknownHostError) return fail("Unknown host", 404);
   throw error;
+}
+
+/** A member keeps sharing when its own flag goes off; pools that cannot be read leave that unknown, so its requests are cut. */
+function stillShares(record: HostRecord): boolean {
+  try {
+    return sharesCredentials(record, loadPools());
+  } catch {
+    return false;
+  }
 }
 
 async function readBody(req: Request): Promise<Record<string, unknown> | null> {
@@ -66,12 +76,13 @@ export function GET() {
 export async function PUT(req: Request) {
   const body = await readBody(req);
   if (!hasOnlyKeys(body, ["pools"]) || !Array.isArray(body.pools)) return fail("pools must be an array", 400);
-  const knownHosts = new Set(["local"]);
+  let hosts: HostRecord[];
   try {
-    for (const host of readHosts()) knownHosts.add(host.id);
+    hosts = readHosts();
   } catch (error) {
     return failFor(error);
   }
+  const knownHosts = new Set(["local", ...hosts.map((host) => host.id)]);
   for (const pool of body.pools) {
     if (!hasOnlyKeys(pool, ["id", "label", "enabled", "members", "projects"])
       || !Array.isArray(pool.members) || !Array.isArray(pool.projects)) return fail("Invalid pool configuration", 400);
@@ -86,19 +97,25 @@ export async function PUT(req: Request) {
       }
     }
   }
+  let before: HostPool[];
   try {
-    loadPools();
+    before = loadPools();
   } catch {
     return poolStorageFailure();
   }
+  const after = body.pools as HostPool[];
   try {
-    savePools(body.pools as HostPool[]);
+    savePools(after);
   } catch (error) {
     // Core validation precedes persistence; filesystem errors carry an errno code.
     if (isRecord(error) && typeof error.code === "string") return poolStorageFailure();
     return fail("Invalid pool configuration", 400);
   }
-  return Response.json({ pools: body.pools }, { headers: noStore });
+  // Leaving the first pool, or no longer being in it, can end a host's sharing: cut off what it already has open.
+  for (const host of hosts) {
+    if (sharesCredentials(host, before) && !sharesCredentials(host, after)) abortBrokerRequests(host.id);
+  }
+  return Response.json({ pools: after }, { headers: noStore });
 }
 
 export async function POST(req: Request) {
@@ -135,8 +152,8 @@ export async function PATCH(req: Request) {
   if (shareCredentials !== undefined && typeof shareCredentials !== "boolean") return fail("shareCredentials must be a boolean", 400);
   if (label === undefined && allowAgentStart === undefined && shareCredentials === undefined) return fail("Nothing to update", 400);
   try {
-    updateHost(body.id, { label, allowAgentStart, shareCredentials });
-    if (shareCredentials === false) abortBrokerRequests(body.id);
+    const updated = updateHost(body.id, { label, allowAgentStart, shareCredentials });
+    if (shareCredentials === false && !stillShares(updated)) abortBrokerRequests(body.id);
     notifyHostsChange();
     return Response.json({ host: hostsSnapshot().hosts.find((h) => h.id === body.id) }, { headers: noStore });
   } catch (error) {

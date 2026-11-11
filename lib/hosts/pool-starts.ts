@@ -1,16 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, posix, win32 } from "node:path";
+import { dirname, join } from "node:path";
 import { getAgentDir } from "../omp/paths";
 import { RpcCommandError } from "../omp/rpc-process";
 import type { PreparedPoolProject } from "../pooled-projects";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import type { ProjectLaunchConfig } from "../types";
+import { sharesCredentials } from "./cluster";
 import type { Host } from "./host";
-import { adoptedChild, getHost, getHostCapacity, getHostLinkProtocol, reconcilePooledChild } from "./hub";
-import { CREATION_ID_RE, HostOpError, type HelloChannel } from "./link-protocol";
-import { loadPools, selectPoolHost, type PoolHostSnapshot } from "./pools";
+import { adoptedChild, getHost, getHostCapacity, getHostLinkProtocol, hostOwnsLifecycle, reconcilePooledChild } from "./hub";
+import { CREATION_ID_RE, HostOpError, SHARED_CREDENTIALS_SINCE_VERSION, type HelloChannel } from "./link-protocol";
+import { loadPools, pathApi, selectPoolHost, type PoolHostSnapshot } from "./pools";
 
 export interface PoolCreateInput {
   creationId: string;
@@ -88,7 +89,6 @@ function canonical(value: unknown): string {
   throw new PoolStartError(400, "invalid_creation_intent", "Creation intent must contain only JSON values");
 }
 function fingerprint(value: unknown): string { return createHash("sha256").update("ompweb:pool-creation:v1:").update(canonical(value)).digest("hex"); }
-function pathApi(path: string): typeof posix { return win32.isAbsolute(path) && !posix.isAbsolute(path) ? win32 : posix; }
 function absolute(path: unknown): path is string { return typeof path === "string" && !path.includes("\0") && pathApi(path).isAbsolute(path) && pathApi(path).normalize(path) === path; }
 function creationCwd(cloneRoot: string, creationId: string): string {
   const path = pathApi(cloneRoot);
@@ -139,8 +139,11 @@ function writeJournal(journal: Journal): void {
     fsyncSync(fd);
     closeSync(fd); fd = undefined;
     renameSync(temporary, file);
-    fd = openSync(dirname(file), "r");
-    fsyncSync(fd);
+    // Windows cannot open directories for fsync; the synced file is already committed by rename.
+    if (process.platform !== "win32") {
+      fd = openSync(dirname(file), "r");
+      fsyncSync(fd);
+    }
   } catch { throw unavailable(); }
   finally {
     if (fd !== undefined) closeSync(fd);
@@ -311,13 +314,18 @@ export function startPooledSession(input: PoolCreateInput, start: Start, authori
         throw new PoolStartError(failed.status, failed.code, failed.message, entry);
       }
     } else {
-      const pool = loadPools().find((candidate) => candidate.id === input.poolId);
+      const pools = loadPools();
+      const pool = pools.find((candidate) => candidate.id === input.poolId);
       const project = pool?.projects.find((candidate) => candidate.id === input.projectId);
       if (!pool || !project) throw new PoolStartError(404, "pool_project_not_found", "Pool project not found");
       const snapshots = new Map<string, PoolHostSnapshot>();
       for (const member of pool.members) {
         const host = getHost(member.hostId);
-        if (host) snapshots.set(member.hostId, { status: host.status(), linkProtocol: getHostLinkProtocol(member.hostId) ?? 0, capacity: getHostCapacity(member.hostId) });
+        const linkProtocol = getHostLinkProtocol(member.hostId) ?? 0;
+        // A cluster member always runs on the server's logins; without a link that honours that, spawnRpc would refuse it after preparation.
+        if (sharesCredentials({ id: member.hostId, shareCredentials: false }, pools)
+          && (!hostOwnsLifecycle(member.hostId) || linkProtocol < SHARED_CREDENTIALS_SINCE_VERSION)) continue;
+        if (host) snapshots.set(member.hostId, { status: host.status(), linkProtocol, capacity: getHostCapacity(member.hostId) });
       }
       const pending = new Map<string, number>();
       for (const current of journal.starts) {

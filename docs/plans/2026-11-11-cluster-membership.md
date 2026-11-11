@@ -111,8 +111,8 @@ export function leaveCluster(pools: readonly HostPool[], hostId: string): HostPo
 
 Rules the signatures do not fix:
 - `joinCluster` with no pool creates the cluster first. Only `pools[0]` changes; other pools are returned as the same objects.
-- A project moves when `mainCheckout`, `isValidPoolOrigin(origin)` and `repositoryKey(origin)` is not null. It binds to the cluster project with the same `repositoryKey`, unless that project already has a `clonePaths` entry for this host; then, and in every other case, the project is left alone (pinned).
-- A created project: `id: newId()`, `name: cloneDirectoryName(origin)`, `origin`, `addedAt: project.addedAt ?? now`, and the host project's `hidden` (default `false`), `alias`, `sortOrder`, `pinOrder`, `launchConfig`.
+- A project moves when `mainCheckout`, `isValidPoolOrigin(origin)` and `repositoryKey(origin)` is not null. It binds to the cluster project with the same `repositoryKey`, unless that project already has a `clonePaths` entry for this host; then, and in every other case, the project is left alone (pinned). A bound project stays hidden only when the cluster project and the host project are both hidden (final review I1).
+- A created project: `id: newId()`, `name`: the host project's `name`, else its folder name (last path segment, split on `/` and `\`), else `cloneDirectoryName(origin)` (spec M3; corrected by final review I2, the origin's name renamed projects), `origin`, `addedAt: project.addedAt ?? now`, and the host project's `hidden` (default `false`), `alias`, `sortOrder`, `pinOrder`, `launchConfig`.
 - After binding, every member gets `clonePaths[member] ??= join(member.projectsRoot, project.id)` for every cluster project.
 - `leaveCluster` removes the member and deletes its `clonePaths` entry from each project unless that path is `projectsRoot` or below it.
 - Both results pass `validatePools`.
@@ -120,7 +120,7 @@ Rules the signatures do not fix:
 - [ ] **Step 1: Write the failing tests**, one per rule:
   - no pool → a cluster with the three constants and the member;
   - bind to an existing project by another URL form;
-  - create, with each presentation field carried over and `name` from the origin;
+  - create, with each presentation field carried over and `name` from the host project, else its folder;
   - pinned for: `origin: null`, an invalid origin (`/srv/x`), `mainCheckout: false`;
   - two checkouts of one repository on the host → the first is bound, `clonePaths` holds only it;
   - seeding: an earlier member gets `<its projectsRoot>/<new id>` for a created project, and the joining host gets `<its projectsRoot>/<id>` for a project it has no checkout of;

@@ -10,14 +10,16 @@ import type { SpawnRequest } from "./host";
 import { isWorkspaceOp, WORKSPACE_OP_PARAMS } from "../workspace-types";
 import type { WorkspaceFileEvent } from "../workspace-types";
 
-/** 8: pool capacity reports, creation identity and project preparation. 7: shared host-owned channels, lifecycle,
+/** 9: `open.launch.shareCredentials`. 8: pool capacity reports, creation identity and project preparation. 7: shared host-owned channels, lifecycle,
  * dialogs and callbacks. 6: composer uploads
  * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
  * `part` messages and a large result as several binary frames, both sent fair across channels
  * (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry the messages,
  * binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
-export const LINK_PROTOCOL_VERSION = 8;
+export const LINK_PROTOCOL_VERSION = 9;
+/** The first daemon link version that honours `open.launch.shareCredentials`: main answers 426 below it for a sharing host. */
+export const SHARED_CREDENTIALS_SINCE_VERSION = 9;
 /** The first daemon link version that takes uploads: main answers 426 below it (host_upgrade_required, or
  * host_restart_required on this machine, whose daemon an in-place upgrade leaves running). */
 export const UPLOADS_SINCE_VERSION = 6;

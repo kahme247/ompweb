@@ -139,6 +139,29 @@ test("a path that leaves its route after `..` resolution never reaches that rout
   assert.equal((await rawRequest("POST", "/api/files/../hosts", evil)).status, 403);
 });
 
+test("only /api/hosts/broker/v1/ passes the gate to the broker route", async (t) => {
+  process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD_HASH;
+  });
+  // The route's own refusal: no bearer token.
+  const healthz = await rawRequest("GET", "/api/hosts/broker/v1/healthz");
+  assert.equal(healthz.status, 401);
+  assert.match(healthz.body, /"error":"Unknown host token"/);
+  for (const target of [
+    "/api/hosts/broker/updates",
+    "/api/hosts/broker/",
+    "/api/hosts/broker/v2/x",
+    "/api/hosts/broker/v1/../../sessions",
+    "/api/hosts/broker/%2e%2e/sessions",
+  ]) {
+    const { status, body } = await rawRequest("GET", target);
+    // The gate's 401 or the fallback 404: never a 200, a redirect or another route's answer.
+    if (status === 401) assert.match(body, /"code":"password_required"/, target);
+    else assert.equal(status, 404, target);
+  }
+});
+
 test("an ungated path is the file itself, and an ungated miss never gets the app shell", async (t) => {
   process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
   t.after(() => {

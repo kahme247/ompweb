@@ -18,10 +18,10 @@ import {
 // hashed build output. The icon and sw.js names are exact (anchored), so no path
 // below or beside them skips the gate. /api/hosts/link (exactly, no subpath)
 // authenticates the host's bearer token itself before it upgrades or reads any
-// body (lib/hosts/hub.ts); /api/hosts/broker/ (a prefix, so /api/hosts/broker and
-// /api/hosts/brokerx stay gated) does the same before it forwards to the auth
-// broker (app/api/hosts/broker/[...path]/route.ts).
-export const UNGATED = /^\/(?:assets\/|(?:favicon\.ico|icon\.svg|icon\.png|icon-192\.png|badge-96\.png|sw\.js)$|api\/hosts\/link$|api\/hosts\/broker\/)/;
+// body (lib/hosts/hub.ts); /api/hosts/broker/v1/ (a prefix, so /api/hosts/broker,
+// /api/hosts/broker/updates and any other version stay gated) does the same before
+// it forwards to the auth broker (app/api/hosts/broker/[...path]/route.ts).
+export const UNGATED = /^\/(?:assets\/|(?:favicon\.ico|icon\.svg|icon\.png|icon-192\.png|badge-96\.png|sw\.js)$|api\/hosts\/link$|api\/hosts\/broker\/v1\/)/;
 
 // Relative: request.url is always http:// under Bun, so an absolute Location would leave https behind a TLS proxy.
 const redirect = (location: string) => new Response(null, { status: 307, headers: { location } });
