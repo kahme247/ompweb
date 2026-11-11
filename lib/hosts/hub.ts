@@ -14,7 +14,9 @@ import type { HostCapacity } from "./capacity";
 import type { ArchivedSessionInfo, SessionInfo } from "../types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
 import {
+  CLUSTER_CONFIG_SINCE_VERSION,
   CREATION_ID_RE,
+  decodeConfigState,
   decodeBlobFrame,
   decodeUp,
   encodeLine,
@@ -44,7 +46,10 @@ import {
   type UpMessage,
   withSeq,
 } from "./link-protocol";
-import { sharesCredentials } from "./cluster";
+import { clusterOf, isClusterMember, sharesCredentials } from "./cluster";
+import { ClusterConfigError } from "./cluster-config";
+import { clusterConfigVersion } from "./cluster-config-server";
+import type { ConfigState } from "./daemon-cluster-config";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, readHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
 import { confirmPooledChild, pooledStartForChild } from "./pool-starts";
@@ -134,6 +139,8 @@ interface Link {
   /** Shared lifecycle (v7) is advertised independently of the v8 pool extensions. */
   shared: boolean;
   capacity: CapacitySnapshot | null;
+  /** v10: the daemon's last cluster configuration report (`config_state`, or a `clusterConfig` answer); null until one. */
+  configState: ConfigState | null;
   ompVersion: string | null;
   ompwebVersion: string | null;
   workspaceOps: Set<string>;
@@ -195,6 +202,10 @@ interface HubState {
   /** lib/uploads.ts: each host's `upload_ack`, and null when its socket ended (upload bytes in flight are lost). */
   uploadListeners: Set<(hostId: string, ack: UploadAck | null) => void>;
   fileListeners: Map<string, (event: WorkspaceFileEvent) => void>;
+  /** The master's configuration version as last computed (null after a failure), and the failure last logged. */
+  masterConfig: { version: string | null; logged: string | null };
+  /** startClusterConfigSync's 30 s timer. */
+  configSync: NodeJS.Timeout | undefined;
 }
 
 declare global {
@@ -212,12 +223,15 @@ function hub(): HubState {
     linkSamples: { samples: [], file: "", timer: undefined },
     uploadListeners: new Set(),
     fileListeners: new Map(),
+    masterConfig: { version: null, logged: null },
+    configSync: undefined,
   };
   // A state kept from before a field existed (`bun --hot`) lacks it.
   globalThis.__ompHostHub.linkSamples ??= { samples: [], file: "", timer: undefined };
   globalThis.__ompHostHub.uploadListeners ??= new Set();
   globalThis.__ompHostHub.fileListeners ??= new Map();
   globalThis.__ompHostHub.sessionChangeListeners ??= new Set();
+  globalThis.__ompHostHub.masterConfig ??= { version: null, logged: null };
   return globalThis.__ompHostHub;
 }
 
@@ -255,6 +269,7 @@ function linkFor(id: string): Link {
       hostVersion: null,
       shared: false,
       capacity: null,
+      configState: null,
       ompVersion: null,
       ompwebVersion: null,
       workspaceOps: new Set(),
@@ -697,6 +712,7 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   const previous = link.socket;
   link.socket = ws;
   link.capacity = null;
+  link.configState = null;
   previous?.close(LINK_CLOSE.replaced, "replaced by a newer link");
   if (previous) {
     // Upload bytes the old socket may have lost must not be followed by later ones on this socket: they resume instead.
@@ -910,6 +926,13 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
   }
 }
 
+/** A member's configuration report: a change reaches Settings (`hosts` subscribers). */
+function noteConfigState(link: Link, state: ConfigState): void {
+  if (JSON.stringify(link.configState) === JSON.stringify(state)) return;
+  link.configState = state;
+  notifyHostsChange();
+}
+
 /** `whole`: for a `part` that completes a line, that line decoded. `joined`: that line itself, which gets no dedup of
  * its own (its parts were deduped). */
 function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMessage | UnknownMessage, joined = false): void {
@@ -917,6 +940,10 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
   if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
   if (message.type === "capacity") {
     if ((link.hostVersion ?? 0) >= 8) link.capacity = { sample: message.sample, receivedAt: performance.now() };
+    return;
+  }
+  if (message.type === "config_state") {
+    if ((link.hostVersion ?? 0) >= CLUSTER_CONFIG_SINCE_VERSION) noteConfigState(link, message.state);
     return;
   }
   if (message.type === "unknown") {
@@ -1494,6 +1521,7 @@ export class RemoteHost implements Host {
     // A pure join (expectedChannel) starts nothing, so it is neither refused nor flagged. An unreadable registry or pool
     // file refuses the start: a host that may be sharing must never run a session with its own stored logins.
     let sharing = false;
+    let configVersion: string | undefined;
     if (options?.expectedChannel === undefined && this.id !== LOCAL_HOST_ID) {
       let record: HostRecord | undefined;
       try {
@@ -1502,11 +1530,25 @@ export class RemoteHost implements Host {
         if (!(error instanceof HostRegistryUnreadableError)) throw error;
         throw new HostOpError(503, "host_registry_unreadable", "The linked-hosts registry cannot be read; no session was started");
       }
-      let pools: HostPool[];
-      try {
-        pools = loadPools();
-      } catch {
-        throw new HostOpError(503, "pool_storage_unavailable", "The host pool configuration cannot be read; no session was started");
+      const readPools = (): HostPool[] => {
+        try {
+          return loadPools();
+        } catch {
+          throw new HostOpError(503, "pool_storage_unavailable", "The host pool configuration cannot be read; no session was started");
+        }
+      };
+      let pools = readPools();
+      // A member runs only on the master's configuration, which its daemon applies before omp starts (spec K4).
+      if (isClusterMember(pools, this.id)) {
+        if ((link.hostVersion ?? 0) < CLUSTER_CONFIG_SINCE_VERSION) throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to use it in the cluster`);
+        try {
+          configVersion = await masterConfigVersion();
+        } catch (error) {
+          throw new HostOpError(409, "cluster_config_invalid", error instanceof Error ? error.message : String(error));
+        }
+        // Read again after the wait, with none until the open is sent: a host that left meanwhile gets no version, so no apply follows its restore.
+        pools = readPools();
+        if (!isClusterMember(pools, this.id)) configVersion = undefined;
       }
       sharing = record !== undefined && sharesCredentials(record, pools);
     }
@@ -1514,7 +1556,8 @@ export class RemoteHost implements Host {
       throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to share credentials with it`);
     }
     if (link.shared) {
-      const opening: OpenChannelRequest = { sessionId, launch: sharing ? { ...spawnRequest, shareCredentials: true } : spawnRequest, ...options };
+      const launch = { ...spawnRequest, ...(sharing ? { shareCredentials: true as const } : {}), ...(configVersion === undefined ? {} : { configVersion }) };
+      const opening: OpenChannelRequest = { sessionId, launch, ...options };
       // An open may wait for a cold child's `ready`, which sends nothing meanwhile.
       return await request(this.id, "open", opening, LINK_LIMITS.channelReadyMs + linkTimings.opTimeoutMs, (value) => {
         if (!isOpenResult(value) || (options?.expectedChannel !== undefined && value.ch !== options.expectedChannel)) {
@@ -1653,6 +1696,8 @@ export interface LinkedHostRow {
   hostVersion: number | null;
   serverVersion: number;
   workspaceOps: string[];
+  /** v10: the daemon's last cluster configuration report; `current` when it runs the master's version with its plugins in line. */
+  clusterConfig?: ConfigState & { current: boolean };
 }
 
 export function listHosts(): LinkedHostRow[] {
@@ -1671,8 +1716,80 @@ export function listHosts(): LinkedHostRow[] {
       hostVersion: link?.hostVersion ?? null,
       serverVersion: LINK_PROTOCOL_VERSION,
       workspaceOps: [...(link?.workspaceOps ?? [])],
+      ...(link?.configState ? { clusterConfig: { ...link.configState, current: link.configState.version !== null && link.configState.version === hub().masterConfig.version
+        && link.configState.files === "current" && link.configState.plugins === "current" } } : {}),
     };
   });
+}
+
+/** The master's configuration version (lib/hosts/cluster-config-server.ts), kept for the rows' `current`. Throws its
+ * error; a failure is logged once until it changes or the configuration works again (paths only, never content). */
+export async function masterConfigVersion(): Promise<string> {
+  const master = hub().masterConfig;
+  let version: string | null = null;
+  try {
+    version = await clusterConfigVersion();
+    master.logged = null;
+    return version;
+  } catch (error) {
+    const reason = error instanceof ClusterConfigError ? `${error.code}: ${error.message}` : error instanceof Error ? error.name : "unknown error";
+    if (master.logged !== reason) console.warn(`[omp-web] cluster members cannot get this machine's configuration (${reason})`);
+    master.logged = reason;
+    throw error;
+  } finally {
+    if (master.version !== version) {
+      master.version = version;
+      notifyHostsChange();
+    }
+  }
+}
+
+const CLUSTER_CONFIG_OP_MS = 60_000;
+
+/** `clusterConfig` on a member's daemon (v10), waiting at most 60 s; the state it answers is kept like a `config_state` report. */
+export async function clusterConfigOp(hostId: string, args: { action: "apply"; version: string } | { action: "restore" }): Promise<ConfigState> {
+  const result = await request(hostId, "clusterConfig", args, CLUSTER_CONFIG_OP_MS);
+  let state: ConfigState;
+  try {
+    state = decodeConfigState(isRecord(result) ? result.state : null);
+  } catch {
+    throw new HostOpError(502, "host_bad_result", `${labelOf(hostId)} sent an invalid clusterConfig result`);
+  }
+  const link = hub().links.get(hostId);
+  if (link) noteConfigState(link, state);
+  return state;
+}
+
+/** One round of startClusterConfigSync: each online v10 member whose reported version is not the master's gets `apply`. */
+export async function syncClusterConfig(): Promise<void> {
+  const members = () => {
+    try {
+      return (clusterOf(loadPools())?.members ?? []).map((member) => member.hostId).filter((id) => id !== LOCAL_HOST_ID);
+    } catch {
+      return [];
+    }
+  };
+  if (members().length === 0) return;
+  let version: string;
+  try {
+    version = await masterConfigVersion();
+  } catch {
+    return; // logged by masterConfigVersion
+  }
+  // The pools again, and nothing awaited before the sends: a host that left meanwhile never gets an apply after its restore.
+  for (const hostId of members()) {
+    const link = hub().links.get(hostId);
+    if (!link || link.status !== "online" || (link.hostVersion ?? 0) < CLUSTER_CONFIG_SINCE_VERSION || link.configState?.version === version) continue;
+    clusterConfigOp(hostId, { action: "apply", version }).catch(() => {}); // the daemon reports a failure in its state
+  }
+}
+
+/** instrumentation.node.ts: every 30 s while a cluster exists, members that are behind catch up (spec K3). */
+export function startClusterConfigSync(): void {
+  const state = hub();
+  if (state.configSync) return;
+  state.configSync = setInterval(() => void syncClusterConfig(), 30_000);
+  state.configSync.unref?.();
 }
 
 export interface LocalHostRow {

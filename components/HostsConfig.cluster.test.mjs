@@ -26,7 +26,7 @@ const member = (hostId) => ({ hostId, projectsRoot: `/srv/${hostId}/ompweb-clust
 const cluster = (...hostIds) => [{ id: "cluster", label: "Cluster", enabled: true, members: hostIds.map(member), projects: [] }];
 const hostRow = (overrides = {}) => ({
   id: "local", label: "", status: "online", ompVersion: "1.0.0", platform: "linux",
-  hostVersion: 9, serverVersion: 9, lastSeenAt: null, workspaceOps: ["gitOrigins"], ...overrides,
+  hostVersion: 10, serverVersion: 10, lastSeenAt: null, workspaceOps: ["gitOrigins"], ...overrides,
 });
 const linked = (id, label, overrides = {}) => hostRow({ id, label, allowAgentStart: false, shareCredentials: false, ...overrides });
 

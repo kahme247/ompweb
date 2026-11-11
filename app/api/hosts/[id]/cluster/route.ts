@@ -3,8 +3,8 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, ClusterError, clusterJoinBlock, isClusterMember, joinCluster, leaveCluster, type HostProjectFacts } from "@/lib/hosts/cluster";
 import type { Host } from "@/lib/hosts/host";
-import { getHost, getHostLinkProtocol, notifyHostsChange } from "@/lib/hosts/hub";
-import { HostOpError } from "@/lib/hosts/link-protocol";
+import { clusterConfigOp, getHost, getHostLinkProtocol, masterConfigVersion, notifyHostsChange } from "@/lib/hosts/hub";
+import { CLUSTER_CONFIG_SINCE_VERSION, HostOpError } from "@/lib/hosts/link-protocol";
 import { loadPools, poolProjectBindings, savePools, validatePools, type HostPool, type PoolMember, type PoolProject } from "@/lib/hosts/pools";
 import { LOCAL_HOST_ID, loadHosts } from "@/lib/hosts/registry";
 import type { OpResult } from "@/lib/hosts/session-ops";
@@ -114,6 +114,9 @@ export async function PUT(request: Request, { params }: Context) {
       const root = target === host ? projectsRoot : await localProjectsRoot(target);
       gathered.push({ member: { hostId: target.id, projectsRoot: root }, facts: await hostFacts(target) });
     }
+    // The master's version comes first: nothing may wait between the save and the apply, so a leave cannot come before it.
+    // A master configuration that cannot be served sends none now; the 30 s sync sends it once it can.
+    const version = await masterConfigVersion().catch(() => null);
     try {
       pools = loadPools();
     } catch {
@@ -132,6 +135,8 @@ export async function PUT(request: Request, { params }: Context) {
     }
     savePools(pools);
     notifyHostsChange();
+    // The joined host only: this machine is the master. A failure shows in the state the host reports; the join stands.
+    if (version !== null) await clusterConfigOp(host.id, { action: "apply", version }).catch(() => undefined);
     return Response.json({ pools }, { headers: noStore });
   } catch (error) {
     return errorResponse(error);
@@ -152,7 +157,16 @@ export async function DELETE(request: Request, { params }: Context) {
     savePools(pools);
     if (loadHosts().find((record) => record.id === id)?.shareCredentials !== true) abortBrokerRequests(id);
     notifyHostsChange();
-    return Response.json({ pools }, { headers: noStore });
+    // After the save, so no apply follows it (spec K6). A daemon before protocol 10 never applied anything.
+    let restoreError: string | undefined;
+    if ((getHostLinkProtocol(id) ?? CLUSTER_CONFIG_SINCE_VERSION) >= CLUSTER_CONFIG_SINCE_VERSION) {
+      try {
+        await clusterConfigOp(id, { action: "restore" });
+      } catch (error) {
+        restoreError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    return Response.json({ pools, ...(restoreError === undefined ? {} : { restoreError }) }, { headers: noStore });
   } catch (error) {
     return errorResponse(error);
   }

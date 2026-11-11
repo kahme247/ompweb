@@ -17,6 +17,8 @@ export interface SpawnRequest {
   shareCredentials?: true;
   /** Daemon only: the server URL whose link supplies the credentials. Never trusted from the wire. */
   credentialsServer?: string;
+  /** Hub → daemon (v10): the master's configuration version this process must run with; the daemon applies it first. Never recorded for resume. */
+  configVersion?: string;
   cwd: string;
   recordedCwd: string | null;
   sessionFile: string;

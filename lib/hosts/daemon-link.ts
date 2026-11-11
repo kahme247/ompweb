@@ -5,7 +5,6 @@ import { isLoopbackHost } from "./host-login";
 import type { HostLink } from "./host-login";
 import { acknowledgeHostUpdateHealth } from "./updates";
 import { decodeBlobFrame, decodeDown, encodeLine, encodeQueued, HostOpError, LINK_CLOSE, LINK_LIMITS, LINK_PROTOCOL_VERSION, MIN_LINK_PROTOCOL_VERSION, LinkLimitError, LinkProtocolError, LinkSender, Outbox, PartJoiner, SeqWindow, UnknownMessageLog, type DownMessage, type UpMessage, type Unsequenced, type UnknownMessage, type LinkStatSample, type SendItem } from "./link-protocol";
-import type { HostCapacity } from "./capacity";
 
 const FIRST_RETRY_MS = 1000;
 const PONG_LINE = encodeLine({ type: "pong" });
@@ -76,7 +75,8 @@ export class DaemonLink {
   rekey(token: string): void { this.runtime.rekey(token); }
   isUp(): boolean { return this.runtime.isUp(); }
   busy(): boolean { return this.runtime.busy(); }
-  reportCapacity(sample: HostCapacity): void { this.runtime.reportCapacity(sample); }
+  /** An unsequenced report (`capacity`, `config_state`): sent now on an up link with room, else dropped; never replayed. */
+  report(message: Extract<UpMessage, { type: "capacity" | "config_state" }>): void { this.runtime.report(message); }
   queue(body: Unsequenced<UpMessage>, key: string, options?: { counted?: boolean; session?: string | null; blob?: number; ahead?: number }): number | null { return this.runtime.queue(body, key, options); }
   output(body: Unsequenced<Extract<UpMessage, { type: "stdout" | "stderr" }>>, session: string | null): void { this.runtime.output(body.ch, body, session); }
   discard(ch: string): void { this.runtime.discard(ch); }
@@ -132,10 +132,10 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
   let statsTimer: NodeJS.Timeout | undefined;
   let reliablePending = 0;
 
-  function reportCapacity(sample: HostCapacity): void {
+  function report(message: Extract<UpMessage, { type: "capacity" | "config_state" }>): void {
     const ws = linked;
     if (stopped || !ws || ws.readyState !== 1 || ws.bufferedAmount >= SEND_BUFFER_BYTES || inFlightBytes >= LINK_LIMITS.unackedBytes) return;
-    const data = encodeLine({ type: "ack", ack: down.acked }) + encodeLine({ type: "capacity", sample });
+    const data = encodeLine({ type: "ack", ack: down.acked }) + encodeLine(message);
     const bytes = Buffer.byteLength(data);
     if (inFlightBytes + bytes > LINK_LIMITS.unackedBytes) return;
     ws.send(data); inFlight.push(bytes); inFlightBytes += bytes;
@@ -471,7 +471,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
     stopped = true; stopSignal.abort(); socket?.close(); clearTimeout(flushTimer); clearTimeout(statsTimer);
     await loop;
   }
-  return { queue, output, discard, result, reportCapacity, busy: () => reliablePending > 0, ackedDown: () => down.acked, isUp: () => linked !== null && !stopped,
+  return { queue, output, discard, result, report, busy: () => reliablePending > 0, ackedDown: () => down.acked, isUp: () => linked !== null && !stopped,
     rekey: (token: string) => { owner.login.token = token; authorization = "Bearer " + token; socket?.close(1001, "credentials changed"); },
     start: () => { if (!started && !stopped) { started = true; loop = keepLinked(); } }, stop };
 }

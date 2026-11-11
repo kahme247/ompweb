@@ -6,7 +6,7 @@ import { readSessionHeaderSync } from "../omp/session-files";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import type { DaemonLink } from "./daemon-link";
-import { CREATION_ID_RE, HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
+import { CONFIG_VERSION_RE, CREATION_ID_RE, HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
 import { PendingRequests } from "./pending-requests";
 import { StreamSnapshot } from "./stream-snapshot";
 import { ChannelLifecycle } from "./channel-lifecycle";
@@ -50,11 +50,13 @@ type ChannelDeps = {
 };
 const collision = () => new HostOpError(409, "session_running_elsewhere", "This session is already running on another link");
 const invalid = (message = "Invalid channel request") => new HostOpError(400, "invalid_request", message);
-/** A process start's launch: the wire never names the credentials server; it is the opening link's own, and only when the hub asks. */
-function withCredentials(launch: SpawnRequest, link: DaemonLink, share: unknown): SpawnRequest {
+/** A process start's launch, from what its opener asked: the wire never names the credentials server (it is the opening
+ * link's own, and only when the hub asks), and a configuration version passes only in its one valid form. */
+function forStart(launch: SpawnRequest, link: DaemonLink, opener: SpawnRequest): SpawnRequest {
   const result = { ...launch };
-  delete result.shareCredentials; delete result.credentialsServer;
-  if (share === true) result.credentialsServer = link.login.url;
+  delete result.shareCredentials; delete result.credentialsServer; delete result.configVersion;
+  if (opener.shareCredentials === true) result.credentialsServer = link.login.url;
+  if (typeof opener.configVersion === "string" && CONFIG_VERSION_RE.test(opener.configVersion)) result.configVersion = opener.configVersion;
   return result;
 }
 
@@ -116,7 +118,7 @@ export class ChannelTable {
       }
       channel = advertised;
     } else {
-      channel = await this.ensure(args.sessionId, withCredentials(args.launch, link, args.launch.shareCredentials), null, undefined, args.preparing ? link.id : undefined);
+      channel = await this.ensure(args.sessionId, forStart(args.launch, link, args.launch), null, undefined, args.preparing ? link.id : undefined);
     }
     if (this.goneLinks.has(link.id)) {
       channel.lifecycle?.linkGone(link.id);
@@ -159,9 +161,9 @@ export class ChannelTable {
       channel.transport.onExit(() => exit.resolve());
       this.stopChannel(channel);
       await exit.promise;
-      // A new process: the opener's flag decides its credentials, as for any start (spec C6).
-      const launch = this.deps.prepareLaunch(withCredentials({ ...channel.launch, advisor: args.launch.advisor,
-        ...(args.launch.spawnModel ? { spawnModel: args.launch.spawnModel } : {}) }, link, args.launch.shareCredentials));
+      // A new process: the opener's flags decide its credentials and configuration, as for any start (spec C6, K4).
+      const launch = this.deps.prepareLaunch(forStart({ ...channel.launch, advisor: args.launch.advisor,
+        ...(args.launch.spawnModel ? { spawnModel: args.launch.spawnModel } : {}) }, link, args.launch));
       const spawning = this.create(launch, channel.pending.sessionId, null, undefined, args.preparing ? link.id : undefined);
       this.pendingSpawns.add(spawning);
       try {
@@ -195,7 +197,7 @@ export class ChannelTable {
     this.reservedChannels.add(args.ch);
     let channel: Channel;
     const launch = { ...args };
-    delete launch.shareCredentials; delete launch.credentialsServer;
+    delete launch.shareCredentials; delete launch.credentialsServer; delete launch.configVersion;
     try { channel = await this.ensure(null, launch, link.id, args.ch); }
     finally { this.reservedChannels.delete(args.ch); }
     if (this.goneLinks.has(link.id)) {
@@ -562,8 +564,9 @@ export class ChannelTable {
         ...(channel.launch.creationId === undefined ? {} : { creationId: channel.launch.creationId }) }));
   }
   running(): HostResumeEntry[] {
+    // A recovered session starts on the version already applied: the resume manifest never names one.
     return [...this.channels.values()].filter(channel => (channel.lifecycle?.isRunning || channel.resuming) && channel.pending.sessionId && channel.launch.sessionFile && !channel.sessionMovePending)
-      .map(channel => ({ sessionId: channel.pending.sessionId!, launch: channel.launch }));
+      .map(channel => { const launch = { ...channel.launch }; delete launch.configVersion; return { sessionId: channel.pending.sessionId!, launch }; });
   }
   /** Resumes each entry once; returns the entries whose resume failed. */
   async recover(entries: HostResumeEntry[]): Promise<HostResumeEntry[]> {
