@@ -2,7 +2,7 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import React from "react";
-const { cleanup, fireEvent, render, screen } = await import("@testing-library/react/pure.js");
+const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react/pure.js");
 
 const { ExtensionDialog } = await import("./ExtensionDialog.tsx");
 afterEach(cleanup);
@@ -121,7 +121,8 @@ test("attached checkbox select sends each toggle at once, so Done cannot replace
   try {
     fireEvent.click(screen.getByRole("button", { name: "lint, not checked" }));
     assert.deepEqual(responses, [{ id: "jobs-2", value: "lint" }]);
-    // omp takes one answer per request: a second tap before the next request is not sent.
+    // omp takes one answer per request: the options are disabled until the next request arrives.
+    assert.equal(screen.getByRole("button", { name: "pytest, not checked" }).disabled, true);
     fireEvent.click(screen.getByRole("button", { name: "pytest, not checked" }));
     assert.equal(responses.length, 1);
 
@@ -159,10 +160,10 @@ test("a checkbox toggle that fails to send can be tried again", async () => {
   }));
   try {
     fireEvent.click(screen.getByRole("button", { name: "pytest, not checked" }));
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitFor(() => assert.equal(screen.getByRole("button", { name: "pytest, not checked" }).disabled, false));
     fireEvent.click(screen.getByRole("button", { name: "pytest, not checked" }));
     assert.deepEqual(responses, [{ id: "jobs-4", value: "pytest" }, { id: "jobs-4", value: "pytest" }]);
+    assert.equal(screen.getByRole("button", { name: "pytest, not checked" }).disabled, true);
   } finally {
     view.unmount();
   }
