@@ -48,8 +48,12 @@ function canonicalizePath(p: string): string {
   // Resolve symlinks so a project opened through a symlinked path compares
   // equal to the canonical repository root git reports (#322). Missing paths
   // (e.g. deleted files in a status listing) keep the lexical resolution.
+  // .native returns the on-disk casing on case-insensitive filesystems
+  // (macOS APFS), matching sameOnDiskEntry in lib/omp/agents-service.ts;
+  // the plain realpathSync preserves input casing and would let two
+  // spellings of the same directory compare unequal.
   try {
-    return fs.realpathSync(p);
+    return fs.realpathSync.native(p);
   } catch {
     return path.resolve(p);
   }
@@ -57,6 +61,16 @@ function canonicalizePath(p: string): string {
 
 function isWithinPath(parent: string, target: string): boolean {
   const relative = path.relative(canonicalizePath(parent), canonicalizePath(target));
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+// Lexical containment against an already-canonical parent: the target is a
+// git status entry, whose location is repo-relative, so following the entry
+// itself would drop a tracked symlink that points outside the selected
+// directory. The canonical parent is what fixes the symlinked-cwd case
+// (#322); the entry's own target is never resolved here.
+function isWithinCanonicalParent(canonicalParent: string, target: string): boolean {
+  const relative = path.relative(canonicalParent, path.resolve(target));
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
@@ -99,8 +113,14 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
     return { isGitRepository: false, repositoryRoot: null, files: [] };
   }
 
+  // The cwd is canonicalized once: it is constant across the filter, and
+  // entries are compared by location only (isWithinCanonicalParent) so a
+  // tracked symlink inside the selection is kept even when its target
+  // points outside it. getGitFileDiff below keeps the fully canonical
+  // check, since git reads the file content through the link there.
+  const canonicalCwd = canonicalizePath(cwd);
   const entries = (await readStatusEntries(repositoryRoot))
-    .filter((entry) => isWithinPath(cwd, path.resolve(repositoryRoot, entry.path)));
+    .filter((entry) => isWithinCanonicalParent(canonicalCwd, path.resolve(repositoryRoot, entry.path)));
   const reasons = await readCollapseReasons(repositoryRoot, entries.map((entry) => entry.path));
   const files = entries.map((entry): GitFileStatus => ({
     filePath: path.resolve(repositoryRoot, entry.path),
