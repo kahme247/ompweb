@@ -16,7 +16,17 @@ import { resolveOmpBin, wrapWindowsScript } from "./omp-cli";
 /** Mutable: tests shorten them. */
 export const AUTH_BROKER_TIMINGS = { readyMs: 60_000, idleMs: 300_000, killMs: 5_000 };
 
-export class AuthBrokerUnavailableError extends Error {}
+/** Why the broker could not answer, for the log (never the message: it can carry the child's stderr). */
+type AuthBrokerFailure = "binary_missing" | "token_command_failed" | "not_ready" | "exited" | "refused_token";
+
+export class AuthBrokerUnavailableError extends Error {
+  /** Unset when the request to a running broker failed. */
+  readonly reason?: AuthBrokerFailure;
+  constructor(message: string, reason?: AuthBrokerFailure, options?: ErrorOptions) {
+    super(message, options);
+    this.reason = reason;
+  }
+}
 
 interface Broker {
   url: string;
@@ -70,7 +80,7 @@ export function disposeAuthBroker(): void {
 
 async function startBroker(state: AuthBrokerState, isCurrent: () => boolean): Promise<Broker> {
   const bin = resolveOmpBin();
-  if (!bin) throw new AuthBrokerUnavailableError("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
+  if (!bin) throw new AuthBrokerUnavailableError("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.", "binary_missing");
   // Same environment rules as the auth gateway: no named profile, no project env leaks.
   const env = sanitizeProjectCommandEnvironment({ ...process.env });
   delete env.OMP_PROFILE;
@@ -80,11 +90,11 @@ async function startBroker(state: AuthBrokerState, isCurrent: () => boolean): Pr
   const tokenCommand = wrapWindowsScript(bin, ["auth-broker", "token"]);
   const tokenRun = Promise.withResolvers<string>();
   execFile(tokenCommand.file, tokenCommand.args, { cwd: homedir(), env, timeout: readyMs, windowsHide: true }, (error, stdout) => {
-    if (error) tokenRun.reject(new AuthBrokerUnavailableError(`omp auth-broker token failed: ${error.message}`, { cause: error }));
+    if (error) tokenRun.reject(new AuthBrokerUnavailableError(`omp auth-broker token failed: ${error.message}`, "token_command_failed", { cause: error }));
     else tokenRun.resolve(stdout.trim());
   });
   const token = await tokenRun.promise;
-  if (!token) throw new AuthBrokerUnavailableError("omp auth-broker token printed nothing");
+  if (!token) throw new AuthBrokerUnavailableError("omp auth-broker token printed nothing", "token_command_failed");
   // disposeAuthBroker() ran while the token command did: spawning now would leave an unowned child.
   if (!isCurrent()) throw new AuthBrokerUnavailableError("omp auth-broker was stopped while starting");
 
@@ -99,7 +109,7 @@ async function startBroker(state: AuthBrokerState, isCurrent: () => boolean): Pr
 
   const { promise, resolve, reject } = Promise.withResolvers<Broker>();
   const readyTimer = setTimeout(() => {
-    reject(new AuthBrokerUnavailableError("omp auth-broker did not become ready"));
+    reject(new AuthBrokerUnavailableError("omp auth-broker did not become ready", "not_ready"));
     terminate(child);
   }, readyMs);
   readyTimer.unref?.();
@@ -110,7 +120,7 @@ async function startBroker(state: AuthBrokerState, isCurrent: () => boolean): Pr
       state.child = null;
       state.broker = null;
     }
-    reject(new AuthBrokerUnavailableError(`omp auth-broker ${what}${stderrTail ? `: ${stderrTail.slice(-500)}` : ""}`));
+    reject(new AuthBrokerUnavailableError(`omp auth-broker ${what}${stderrTail ? `: ${stderrTail.slice(-500)}` : ""}`, "exited"));
   };
   child.on("exit", (code, signal) => gone(`exited (code ${code ?? "null"}, signal ${signal ?? "none"})`));
   child.on("error", (error) => gone(`failed to start: ${error.message}`));
@@ -200,7 +210,8 @@ export async function brokerFetch(
     }
   };
   try {
-    // shortcut: an abort during a cold start is seen only once the start settles (at most readyMs); upgrade if that wait matters.
+    // shortcut: an abort during a cold start takes effect only once the start settles, at most twice readyMs (the token
+    // command and the ready wait each have that timeout); upgrade if that wait matters.
     const start = currentBroker(state);
     const { url, token } = await start;
     const headers = new Headers(init.headers);
@@ -212,13 +223,13 @@ export async function brokerFetch(
       response = await fetch(`${url}${path}`, { method: init.method, headers, body: init.body, signal, proxy: false });
     } catch (error) {
       if (signal.aborted) throw error;
-      throw new AuthBrokerUnavailableError(`omp auth-broker request failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      throw new AuthBrokerUnavailableError(`omp auth-broker request failed: ${error instanceof Error ? error.message : String(error)}`, undefined, { cause: error });
     }
     if (response.status === 401) {
       void response.body?.cancel();
       // Only the broker that refused: a concurrent 401 must not stop its replacement.
       if (state.broker === start) disposeAuthBroker();
-      throw new AuthBrokerUnavailableError("omp auth-broker refused its own token");
+      throw new AuthBrokerUnavailableError("omp auth-broker refused its own token", "refused_token");
     }
     return releaseWithBody(response, release);
   } catch (error) {

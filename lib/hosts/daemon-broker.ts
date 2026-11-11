@@ -60,7 +60,8 @@ async function forward(req: IncomingMessage, res: ServerResponse, secret: Buffer
   if (body === null) return reply(res, 413, "Request body is too large");
   // No await from here to the fetch: the link is read as late as possible, so a link removed during a slow body is not used.
   const login = deps.login(Buffer.from(key, "base64url").toString());
-  if (!login) return reply(res, 503, "No credential link for this server");
+  // 403, not 5xx: omp treats 5xx as transient and may start from its snapshot cache.
+  if (!login) return reply(res, 403, "No credential link for this server");
 
   const controller = new AbortController();
   res.once("close", () => controller.abort());
@@ -82,6 +83,7 @@ async function forward(req: IncomingMessage, res: ServerResponse, secret: Buffer
     deps.log(`broker forward failed (${describe(error)})`);
     return reply(res, 502, "The server request failed");
   }
+  if (upstream.status >= 400) deps.log(`broker forward answered ${upstream.status}`);
   const headers: Record<string, string> = {};
   for (const name of RESPONSE_HEADERS) {
     const value = upstream.headers.get(name);
@@ -89,7 +91,7 @@ async function forward(req: IncomingMessage, res: ServerResponse, secret: Buffer
   }
   res.writeHead(upstream.status, headers);
   res.flushHeaders();
-  // Chunk by chunk as it arrives: the snapshot stream stays open for hours.
+  // Chunk by chunk as it arrives: omp holds the snapshot stream open only while a session is active, and reopens it on its next use.
   // Same stream at runtime: the fetch typings and node:stream/web declare it separately.
   const stream = upstream.body as unknown as WebReadableStream | null;
   if (stream) pipeline(Readable.fromWeb(stream), res, () => {});
