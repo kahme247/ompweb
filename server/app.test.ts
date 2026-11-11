@@ -162,6 +162,32 @@ test("only /api/hosts/broker/v1/ passes the gate to the broker route", async (t)
   }
 });
 
+test("only the two cluster-config routes pass the gate, not hosts/[id]/cluster or hosts/[id]/updates", async (t) => {
+  process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD_HASH;
+  });
+  // The routes' own refusal: no bearer token.
+  for (const target of ["/api/hosts/cluster-config/manifest", `/api/hosts/cluster-config/file/${"a".repeat(64)}`]) {
+    const { status, body } = await rawRequest("GET", target);
+    assert.equal(status, 401, target);
+    assert.match(body, /"error":"Unknown host token"/, target);
+  }
+  for (const [method, target] of [
+    ["DELETE", "/api/hosts/cluster-config/cluster"],
+    ["PUT", "/api/hosts/cluster-config/cluster"],
+    ["GET", "/api/hosts/cluster-config/updates"],
+    ["POST", "/api/hosts/cluster-config/updates"],
+    ["GET", `/api/hosts/cluster-config/file/${"a".repeat(64)}/x`],
+    ["GET", "/api/hosts/cluster-config/manifest/x"],
+  ] as const) {
+    const { status, body } = await rawRequest(method, target);
+    // The gate's 401: never the handler's answer (a 409 not_member, say).
+    assert.equal(status, 401, `${method} ${target}`);
+    assert.match(body, /"code":"password_required"/, `${method} ${target}`);
+  }
+});
+
 test("an ungated path is the file itself, and an ungated miss never gets the app shell", async (t) => {
   process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
   t.after(() => {

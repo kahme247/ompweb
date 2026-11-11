@@ -18,17 +18,28 @@ const PLUGIN_LIST_TTL_MS = 30_000;
 const noStore = { "cache-control": "no-store" };
 
 let plugins: { at: number; list: PluginEntry[] } | null = null;
+let pluginRead: Promise<PluginEntry[]> | null = null;
 let cached: { fingerprint: string; current: Current } | null = null;
 
-/** Never a stale list: members remove the plugins the manifest lacks, so a list that cannot be read is an error. */
-async function pluginList(): Promise<PluginEntry[]> {
-  if (plugins && Date.now() - plugins.at < PLUGIN_LIST_TTL_MS) return plugins.list;
+/** One `omp plugin list` at a time. A failed read keeps the last good list (members remove the plugins the manifest lacks, so never an empty one), retried after the same lifetime; with no list ever read it is an error. */
+async function readPluginList(): Promise<PluginEntry[]> {
   try {
     plugins = { at: Date.now(), list: await listPlugins((args) => runOmpCli(args, 30_000)) };
   } catch {
-    throw new ClusterConfigError("unreadable", "the plugin list cannot be read (omp plugin list failed)");
+    // Never omp's own output: it may name paths or settings.
+    console.log(`[omp-web] cluster-config the plugin list cannot be read${plugins ? "; serving the last one read" : ""}`);
+    if (!plugins) throw new ClusterConfigError("unreadable", "the plugin list cannot be read (omp plugin list failed)");
+    plugins = { at: Date.now(), list: plugins.list };
   }
   return plugins.list;
+}
+
+function pluginList(): Promise<PluginEntry[]> {
+  if (plugins && Date.now() - plugins.at < PLUGIN_LIST_TTL_MS) return Promise.resolve(plugins.list);
+  pluginRead ??= readPluginList().finally(() => {
+    pluginRead = null;
+  });
+  return pluginRead;
 }
 
 const statOrNull = (path: string): Stats | null => {
@@ -40,13 +51,13 @@ const statOrNull = (path: string): Stats | null => {
 };
 
 /**
- * Path, size, modification time and executable bit of every file `buildManifest` would read, following links, without
+ * Path, file identity (device, inode), size, modification and change time, and executable bit of every file `buildManifest` would read, following links, without
  * reading any content. Mirrors buildManifest's walk (skipped `.git` and `node_modules`, link loops, `.yaml` standing in
  * for an absent `.yml`); a read error here only leaves the file out, and buildManifest then reports it.
  */
 function treeFingerprint(roots: Record<ConfigRoot, string>): string {
   const parts: string[] = [];
-  const note = (path: string, stat: Stats) => parts.push(`${path}\0${stat.size}\0${stat.mtimeMs}\0${stat.mode & 0o100}`);
+  const note = (path: string, stat: Stats) => parts.push(`${path}\0${stat.dev}\0${stat.ino}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0${stat.mode & 0o100}`);
   const walk = (dir: string, walking: Set<string>) => {
     let real: string;
     let names: string[];
