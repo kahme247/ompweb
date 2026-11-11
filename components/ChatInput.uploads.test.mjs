@@ -157,6 +157,8 @@ async function uploadOwner(t) {
   const uploadsRoute = await import("../app/api/uploads/route.ts");
   const uploadRoute = await import("../app/api/uploads/[id]/route.ts");
   const hub = await import("../lib/hosts/hub.ts");
+  const { closeOutboxStore } = await import("../lib/message-outbox.ts");
+  const { closeNotificationStore } = await import("../lib/notification-store.ts");
   const { createHost } = await import("../lib/hosts/registry.ts");
   const { runHostDaemon } = await import("../lib/hosts/daemon.ts");
   const server = Bun.serve({
@@ -167,12 +169,16 @@ async function uploadOwner(t) {
   });
   const { host, token } = createHost("Composer upload owner");
   const daemon = runHostDaemon({ url: `http://127.0.0.1:${server.port}`, token, allowHttp: false });
+  const uploadRequests = [];
   t.after(async () => {
     cleanup();
+    await Promise.all(uploadRequests);
     realUploadRoutes = null;
     await daemon.stop();
     await server.stop(true);
     hub.flushLinkSamples();
+    closeNotificationStore();
+    closeOutboxStore();
     for (const [key, value] of [["PI_CODING_AGENT_DIR", previous.agentDir], ["OMP_WEB_OMP_BIN", previous.ompBin]]) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -182,9 +188,12 @@ async function uploadOwner(t) {
   await waitFor(() => assert.ok(["online", "omp-missing"].includes(hub.getHost(host.id).status())), { timeout: 5000 });
   realUploadRoutes = (url, init) => {
     const req = new Request(new URL(String(url), "http://composer.test"), init);
-    if (String(url) === "/api/uploads") return uploadsRoute.POST(req);
     const context = { params: Promise.resolve({ id: new URL(req.url).pathname.split("/").at(-1) }) };
-    return init.method === "DELETE" ? uploadRoute.DELETE(req, context) : uploadRoute.PUT(req, context);
+    const response = String(url) === "/api/uploads"
+      ? uploadsRoute.POST(req)
+      : init.method === "DELETE" ? uploadRoute.DELETE(req, context) : uploadRoute.PUT(req, context);
+    uploadRequests.push(response);
+    return response;
   };
   return { hostId: host.id, staged: (id) => readFileSync(join(scratch, "agent", "omp-web", "uploads", `${id}.part`)) };
 }
