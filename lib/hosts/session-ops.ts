@@ -12,7 +12,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "path";
 import { promisify } from "util";
 import { comparableProjectPath } from "../comparable-path";
 import { mediaFilePath } from "../media-cache";
-import { resolveOmpBin } from "../omp/omp-cli";
+import { resolveOmpBin, wrapWindowsScript } from "../omp/omp-cli";
 import { listArchivedSessionInfos, restoreArchivedSession, restoreFailureStatus } from "../omp/archive";
 import {
   archiveSessionFileWithArtifacts,
@@ -305,7 +305,8 @@ async function runOmpExport(filePath: string, outputPath: string): Promise<void>
   if (!bin) {
     throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
   }
-  await execFileAsync(bin, ["--export", filePath, outputPath], {
+  const target = wrapWindowsScript(bin, ["--export", filePath, outputPath]);
+  await execFileAsync(target.file, target.args, {
     cwd: tmpdir(),
     timeout: 60_000,
     maxBuffer: 4 * 1024 * 1024,
