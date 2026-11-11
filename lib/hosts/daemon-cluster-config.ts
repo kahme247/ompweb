@@ -174,7 +174,7 @@ export function createClusterConfig(deps: {
   let pluginsError: string | null = null;
   let missingCommands: string[] = [];
   let stopped = false;
-  // Restores called and not yet finished: behind one, the applied version no longer counts.
+  // Restores called and not yet finished: while one is, ensure is refused.
   let restoring = 0;
   let queue: Promise<unknown> = Promise.resolve();
   const inflight = new Map<string, Promise<void>>();
@@ -250,19 +250,14 @@ export function createClusterConfig(deps: {
    * version to `trash/`. The backup, the swaps, the agent environment and `state.json` are one transaction: on any
    * failure everything moved is put back, so the member keeps exactly what it had. A backup without `state.json` (a
    * stop in the middle, or a failure that could not put everything back) is put back before the next apply.
+   * `adopted`: the member's plugin list came from a backup that kept it, and outlives a rollback.
    */
-  function install(manifest: ConfigManifest, ownPlugins: PluginEntry[] | null) {
+  function install(manifest: ConfigManifest, ownPlugins: PluginEntry[] | null, adopted: boolean) {
     const d = dirs();
     const roots = deps.roots();
     const first = ownPlugins !== null;
     const aside = first ? d.own : d.trash;
-    // A link above an entry (`~/.agents`) would take the member's files and the master's somewhere else: refused before anything moves.
-    for (const entry of ENTRIES) {
-      for (let path = dirname(entry.path); path !== "."; path = dirname(path)) {
-        const dir = join(roots[entry.root], path);
-        if (lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink()) fail(`${dir} is a symbolic link; cluster configuration needs a real directory there: replace the link with a directory`);
-      }
-    }
+    refuseLinkedParents(roots);
     const undo: (() => void)[] = [];
     let previousState: Buffer | null = null;
     try {
@@ -325,11 +320,7 @@ export function createClusterConfig(deps: {
         applied = null;
         fail(`${messageOf(error)}; the previous files could not all be put back: the next apply, or leaving the cluster, first restores this host's own configuration from ${d.own}`);
       }
-      if (first) {
-        // absent.json first: a backup without it holds nothing that was moved.
-        quietly(() => rmSync(join(d.own, "absent.json"), { force: true }));
-        quietly(() => removeAll(d.own));
-      }
+      if (first) quietly(() => clearBackup(adopted));
       quietly(() => removeAll(d.trash));
       throw error;
     }
@@ -343,8 +334,8 @@ export function createClusterConfig(deps: {
       return null;
     }
     const d = dirs();
-    // An apply or a restore that stopped half-way: the member's own configuration goes back first, so the new backup takes it.
-    if (exists(d.own) && !exists(d.stateFile)) await restoreNow();
+    // An apply or a restore that stopped half-way: the member's own files go back first, so the new backup takes them; its plugin list is adopted below.
+    if (exists(d.own) && !exists(d.stateFile)) restoreFiles();
     // A file the master no longer has means its configuration changed since the manifest: one more try with the new one.
     let manifest = await fetchManifest(serverUrl);
     if (manifest.version !== applied?.version && !(await download(serverUrl, manifest))) {
@@ -356,14 +347,20 @@ export function createClusterConfig(deps: {
       return null;
     }
     let ownPlugins: PluginEntry[] | null = null;
-    if (!exists(d.own)) {
-      try {
-        ownPlugins = await installedPlugins();
-      } catch (error) {
-        fail(`this host's plugins cannot be listed: ${lastLine(error)}`);
+    let adopted = false;
+    if (!exists(d.stateFile)) {
+      // A list the backup still holds is the member's own: the live plugins may already be the master's.
+      ownPlugins = keptPlugins();
+      adopted = ownPlugins !== null;
+      if (!ownPlugins) {
+        try {
+          ownPlugins = await installedPlugins();
+        } catch (error) {
+          fail(`this host's plugins cannot be listed: ${lastLine(error)}`);
+        }
       }
     }
-    install(manifest, ownPlugins);
+    install(manifest, ownPlugins, adopted);
 
     applied = { version: manifest.version, plugins: manifest.plugins };
     files = "current";
@@ -447,41 +444,74 @@ export function createClusterConfig(deps: {
     report();
   }
 
+  /** A link above an entry (`~/.agents`) would take the member's files and the master's somewhere else: refused before anything moves. */
+  function refuseLinkedParents(roots: Record<ConfigRoot, string>) {
+    for (const entry of ENTRIES) {
+      for (let path = dirname(entry.path); path !== "."; path = dirname(path)) {
+        const dir = join(roots[entry.root], path);
+        if (lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink()) fail(`${dir} is a symbolic link; cluster configuration needs a real directory there: replace the link with a directory`);
+      }
+    }
+  }
+
+  /** The member's own plugin list as the backup keeps it, or null without one. */
+  function keptPlugins(): PluginEntry[] | null {
+    const file = join(dirs().own, "plugins.json");
+    if (!exists(file)) return null;
+    const list = parseJson(readFileSync(file, "utf8"), "the backup's plugins.json");
+    if (!Array.isArray(list) || !list.every(isPlugin)) fail("the backup's plugins.json is malformed");
+    return list as PluginEntry[];
+  }
+
+  /** Empties the backup, `absent.json` first (without it nothing counts as moved); `keepPlugins` keeps its plugin list. */
+  function clearBackup(keepPlugins: boolean) {
+    const { own } = dirs();
+    rmSync(join(own, "absent.json"), { force: true });
+    if (!keepPlugins) removeAll(own);
+    else if (exists(own)) for (const name of readdirSync(own)) if (name !== "plugins.json") removeAll(join(own, name));
+  }
+
   /**
-   * Puts the member's own configuration back. Run again after it stopped half-way, it finishes: `absent.json` goes once
-   * every entry is back, the rest of the backup once the plugins are.
+   * Puts the member's own entries and agent environment back, and answers the backup's plugin list. Run again after it
+   * stopped half-way, it finishes: `absent.json` goes once every entry is back.
    */
+  function restoreFiles(): PluginEntry[] | null {
+    const d = dirs();
+    const roots = deps.roots();
+    refuseLinkedParents(roots);
+    // Before anything moves: from here on no version counts as applied, now or after a restart.
+    applied = null;
+    rmSync(d.stateFile, { force: true });
+    // Without absent.json nothing is to move: the backup stopped before its first move, or its entries are back already.
+    const absentFile = join(d.own, "absent.json");
+    if (exists(absentFile)) {
+      const absent = parseJson(readFileSync(absentFile, "utf8"), "the backup's absent.json") as [ConfigRoot, string][];
+      for (const entry of ENTRIES) {
+        const live = join(roots[entry.root], entry.path);
+        const saved = join(d.own, entry.root, entry.path);
+        // Neither saved nor absent: never moved (an apply stopped before it), or already put back.
+        if (exists(saved)) {
+          removeAll(live);
+          makeDir(dirname(live));
+          move(saved, live);
+        } else if (absent.some(([root, path]) => root === entry.root && path === entry.path)) removeAll(live);
+      }
+      // Parents an apply created; rmdir leaves one that has since gained other content.
+      for (const [root, path] of absent) if (!ENTRIES.some((entry) => entry.root === root && entry.path === path)) quietly(() => rmdirSync(join(roots[root], path)));
+      saveWebServerSettings({ agentEnv: parseJson(readFileSync(join(d.own, "agent-env.json"), "utf8"), "the backup's agent-env.json") as Record<string, string> });
+      rmSync(absentFile);
+    }
+    return keptPlugins();
+  }
+
+  /** Leaving: the member's own files, then its plugins. The plugin list stays in the backup until they are back, so leaving again retries them and a new backup adopts it. */
   async function restoreNow() {
     const d = dirs();
     if (!exists(d.own)) return;
     if (stopped) throw failure(new Error("the host daemon is stopping"), "restoring");
-    const roots = deps.roots();
-    let ownPlugins: PluginEntry[] | null = null;
+    let ownPlugins: PluginEntry[] | null;
     try {
-      // Before anything moves: from here on no version counts as applied, now or after a restart.
-      applied = null;
-      rmSync(d.stateFile, { force: true });
-      // Without absent.json nothing is to move: the backup stopped before its first move, or its entries are back already.
-      const absentFile = join(d.own, "absent.json");
-      if (exists(absentFile)) {
-        const absent = parseJson(readFileSync(absentFile, "utf8"), "the backup's absent.json") as [ConfigRoot, string][];
-        for (const entry of ENTRIES) {
-          const live = join(roots[entry.root], entry.path);
-          const saved = join(d.own, entry.root, entry.path);
-          // Neither saved nor absent: never moved (an apply stopped before it), or already put back.
-          if (exists(saved)) {
-            removeAll(live);
-            makeDir(dirname(live));
-            move(saved, live);
-          } else if (absent.some(([root, path]) => root === entry.root && path === entry.path)) removeAll(live);
-        }
-        // Parents an apply created; rmdir leaves one that has since gained other content.
-        for (const [root, path] of absent) if (!ENTRIES.some((entry) => entry.root === root && entry.path === path)) quietly(() => rmdirSync(join(roots[root], path)));
-        saveWebServerSettings({ agentEnv: parseJson(readFileSync(join(d.own, "agent-env.json"), "utf8"), "the backup's agent-env.json") as Record<string, string> });
-        rmSync(absentFile);
-      }
-      const pluginsFile = join(d.own, "plugins.json");
-      if (exists(pluginsFile)) ownPlugins = parseJson(readFileSync(pluginsFile, "utf8"), "the backup's plugins.json") as PluginEntry[];
+      ownPlugins = restoreFiles();
     } catch (error) {
       throw failure(error, "restoring");
     }
@@ -498,7 +528,7 @@ export function createClusterConfig(deps: {
       throw new HostOpError(409, "cluster_config_failed", "the host daemon stopped before this host's own plugins were back; its next start finishes it");
     }
     try {
-      removeAll(d.own);
+      clearBackup(failed !== null);
       removeAll(d.cc);
     } catch (error) {
       throw failure(error, "restoring");
@@ -530,15 +560,14 @@ export function createClusterConfig(deps: {
   return {
     /** Resolves once the files of `version` are applied; rejects with HostOpError(409, "cluster_config_failed", reason) otherwise. Concurrent calls share one apply. */
     ensure(version: string, serverUrl: string): Promise<void> {
-      // Behind a pending restore nothing counts as applied: the call waits its turn, then applies again.
-      if (restoring === 0) {
-        if (applied?.version === version) {
-          current();
-          return Promise.resolve();
-        }
-        const shared = inflight.get(version);
-        if (shared) return shared;
+      // A leave in progress is final: re-applying after it would put the master's files back.
+      if (restoring > 0) return Promise.reject(new HostOpError(409, "cluster_config_failed", "This host is leaving the cluster"));
+      if (applied?.version === version) {
+        current();
+        return Promise.resolve();
       }
+      const shared = inflight.get(version);
+      if (shared) return shared;
       const { promise, resolve, reject } = Promise.withResolvers<void>();
       inflight.set(version, promise);
       enqueue(async () => {
