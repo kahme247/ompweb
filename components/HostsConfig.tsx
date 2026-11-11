@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
-import { CLUSTER_PROJECTS_DIR, CLUSTER_SINCE_VERSION, clusterOf, isClusterMember } from "@/lib/hosts/cluster";
+import { CLUSTER_PROJECTS_DIR, clusterJoinBlock, clusterOf, isClusterMember } from "@/lib/hosts/cluster";
 import type { HostRow } from "@/lib/hosts/hub";
 import type { HostPool } from "@/lib/hosts/pools";
 import { useI18n } from "@/lib/i18n";
@@ -157,7 +157,7 @@ function JoinDialog({ host, onClose }: { host: HostRow; onClose: () => void }) {
         <form onSubmit={(event) => void submit(event)} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, fontWeight: 500, color: "var(--text-muted)" }}>
             {t("hostsConfig.joinFolder", { name })}
-            <input autoFocus value={folder} aria-invalid={error !== null} aria-describedby={error ? errorId : undefined} onChange={(event) => setFolder(event.target.value)} style={inputStyle} />
+            <input autoFocus required value={folder} aria-invalid={error !== null} aria-describedby={error ? errorId : undefined} onChange={(event) => setFolder(event.target.value)} style={inputStyle} />
           </label>
           <p style={noteStyle}>{t("hostsConfig.joinProjectsNote", { name })}</p>
           <p style={noteStyle}>{t("hostsConfig.joinCredentialsNote", { name })}</p>
@@ -179,11 +179,13 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
   const name = hostName(t, host);
   const linked = "allowAgentStart" in host ? host : null;
   const member = isClusterMember(cluster.pools, host.id);
-  // Unknown membership (pools not loaded) disables every switch. Otherwise only a non-member needs a ready host: leaving always works.
-  const joinReason = !cluster.poolsLoaded ? (cluster.poolsFailed ? "poolsUnavailable" : null)
-    : member ? null
-      : host.status !== "online" ? "joinOffline"
-        : linked && ((host.hostVersion ?? 0) < CLUSTER_SINCE_VERSION || !host.workspaceOps.includes("gitOrigins")) ? "joinUpgrade" : null;
+  // Unknown membership (pools not loaded) disables every switch and every share toggle; the reason is only shown once the load failed.
+  // Otherwise only a non-member needs a ready host: leaving always works.
+  const unavailable = !cluster.poolsLoaded && cluster.poolsFailed ? t("hostsConfig.poolsUnavailable") : null;
+  const block = cluster.poolsLoaded && !member && linked ? clusterJoinBlock({ status: host.status, protocol: host.hostVersion, supports: (operation) => host.workspaceOps.includes(operation) }) : null;
+  const joinReason = unavailable ?? (block === null ? null
+    : block === "upgrade" || block === "needs-upgrade" ? t("hostsConfig.joinUpgrade")
+      : block === "omp-missing" ? hostStatusText(t, host) : t("hostsConfig.joinOffline"));
   const reasonId = useId();
   const forcedId = useId();
   const details = [
@@ -222,7 +224,7 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
               aria-describedby={joinReason ? reasonId : undefined}
               onChange={(joining) => (joining ? onJoin() : onLeave())}
             />
-            {joinReason && <span id={reasonId} style={{ fontSize: 11, color: "var(--text-dim)", maxWidth: 200 }}>{t(`hostsConfig.${joinReason}`)}</span>}
+            {joinReason && <span id={reasonId} style={{ fontSize: 11, color: "var(--text-dim)", maxWidth: 200 }}>{joinReason}</span>}
           </div>
         )}
         {linked && (
@@ -240,9 +242,9 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
             <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.shareCredentials")}</span>
             <ToggleSwitch
               checked={linked.shareCredentials || member}
-              disabled={member}
+              disabled={member || !cluster.poolsLoaded}
               aria-label={t("hostsConfig.shareCredentialsAria", { name })}
-              aria-describedby={member ? forcedId : undefined}
+              aria-describedby={member ? forcedId : unavailable ? reasonId : undefined}
               onChange={(shareCredentials) => { if (shareCredentials) onShare(); else void call("PATCH", "/api/hosts", { id: host.id, shareCredentials }).catch(failure); }}
             />
             {member && <span id={forcedId} style={{ fontSize: 11, color: "var(--text-dim)", maxWidth: 200 }}>{t("hostsConfig.shareForced")}</span>}

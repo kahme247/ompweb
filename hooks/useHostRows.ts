@@ -37,7 +37,12 @@ export function useHostRows(): { hosts: HostRow[] | null; pools: HostPool[]; poo
           setHosts(data.hosts);
           setFailed(false);
         }
-        if (Array.isArray(data.pools)) setPools(data.pools);
+        // A frame that carries pools is as good as the snapshot: it also recovers from a failed first request.
+        if (Array.isArray(data.pools)) {
+          setPools(data.pools);
+          setPoolsLoaded(true);
+          setPoolsFailed(false);
+        }
       } catch {
         // A malformed frame is skipped; the next change sends a full list.
       }

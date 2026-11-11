@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, CLUSTER_SINCE_VERSION, ClusterError, isClusterMember, joinCluster, leaveCluster, type HostProjectFacts } from "@/lib/hosts/cluster";
+import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, ClusterError, clusterJoinBlock, isClusterMember, joinCluster, leaveCluster, type HostProjectFacts } from "@/lib/hosts/cluster";
 import type { Host } from "@/lib/hosts/host";
 import { getHost, getHostLinkProtocol, notifyHostsChange } from "@/lib/hosts/hub";
 import { HostOpError } from "@/lib/hosts/link-protocol";
@@ -48,8 +48,9 @@ function valueOf<T>(result: OpResult<T>): T {
 }
 
 function requireReady(host: Host): void {
-  if (host.status() !== "online") throw new HostOpError(409, "host_offline", `${host.label} is offline`);
-  if ((getHostLinkProtocol(host.id) ?? 0) >= CLUSTER_SINCE_VERSION && host.supportsWorkspaceOp("gitOrigins")) return;
+  const block = clusterJoinBlock({ status: host.status(), protocol: getHostLinkProtocol(host.id), supports: (operation) => host.supportsWorkspaceOp(operation) });
+  if (block === null) return;
+  if (block !== "upgrade") throw new HostOpError(409, "host_offline", `${host.label} is offline`);
   throw host.id === LOCAL_HOST_ID
     ? new HostOpError(409, "host_restart_required", "Restart this machine's ompweb host daemon to join the cluster")
     : new HostOpError(409, "host_upgrade_required", `Update ompweb on ${host.label} to join the cluster`);

@@ -4,6 +4,7 @@ import { comparableProjectPath } from "../comparable-path";
 import { cloneDirectoryName, repositoryKey } from "../git-clone";
 import { LOCAL_HOST_ID } from "../project-ordering";
 import type { ManagedProject } from "../types";
+import type { HostStatus } from "./host";
 import type { HostPool, PoolProject } from "./pools";
 
 export const CLUSTER_ID = "cluster";
@@ -11,6 +12,15 @@ export const CLUSTER_LABEL = "Cluster";
 export const CLUSTER_PROJECTS_DIR = "ompweb-cluster";
 /** The first link protocol whose daemons can be cluster members; they also need the `gitOrigins` operation. */
 export const CLUSTER_SINCE_VERSION = 9;
+
+/**
+ * Why a host cannot join the cluster now, or null: the one rule behind the join route and the Settings switch.
+ * Non-online hosts retain their status as the reason; online hosts need the protocol and operation below.
+ */
+export function clusterJoinBlock(host: { status: HostStatus; protocol: number | null; supports: (operation: "gitOrigins") => boolean }): Exclude<HostStatus, "online"> | "upgrade" | null {
+  if (host.status !== "online") return host.status;
+  return (host.protocol ?? 0) >= CLUSTER_SINCE_VERSION && host.supports("gitOrigins") ? null : "upgrade";
+}
 
 export class ClusterError extends Error {
   readonly name = "ClusterError";
