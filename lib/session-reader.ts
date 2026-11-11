@@ -1131,6 +1131,30 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
   return rest;
 }
 
+/**
+ * Per-message fields the history UI never reads dominate the session
+ * response (measured 2.1 MB of a 3.7 MB context on a 597-message session;
+ * inputTransformations alone is 53% — #307). They are provider-internal
+ * (opaque thinking signatures, request controls, context snapshots) and no
+ * reader in components/, hooks/, lib/ or app/ touches them, so the display
+ * context drops them. The on-disk session file keeps the full message.
+ */
+const UNUSED_ASSISTANT_MESSAGE_FIELDS = [
+  "inputTransformations",
+  "thinkingSignature",
+  "requestControls",
+  "contextSnapshot",
+] as const;
+
+function stripUnusedAssistantFields(message: AgentMessage): AgentMessage {
+  if (message.role !== "assistant") return message;
+  const record = message as unknown as Record<string, unknown>;
+  if (UNUSED_ASSISTANT_MESSAGE_FIELDS.every((field) => record[field] === undefined)) return message;
+  const stripped = { ...record };
+  for (const field of UNUSED_ASSISTANT_MESSAGE_FIELDS) delete stripped[field];
+  return stripped as unknown as AgentMessage;
+}
+
 function toolResultImagesAsUrls(message: AgentMessage): AgentMessage {
   if (message.role !== "toolResult") return message;
   const content = toolResultContentAsUrls(message.content);
@@ -1212,7 +1236,7 @@ export function entryToUiMessage(
       const normalized = options.deferToolResultImages
         ? toolResultImagesAsUrls(normalizeToolCalls(raw))
         : normalizeToolCalls(raw);
-      const message = stripToolResultDetails(normalized);
+      const message = stripUnusedAssistantFields(stripToolResultDetails(normalized));
       if (!options.deferThinking || message.role !== "assistant") return withNormalizedTimestamp(message);
       // Guard like the loader does for bad lines: normalizeToolCalls passes
       // non-array content through unchanged, so a string-content assistant
