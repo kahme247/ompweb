@@ -150,7 +150,7 @@ export const localHost: Omit<Host, "workspaceOps" | "supportsWorkspaceOp"> = {
   sessionOps,
   status: () => "online",
   onStatus: () => () => {},
-  async spawnRpc(request) {
+  async spawnRpc(request, _sessionId, options) {
     const { cwd } = request;
     const launchConfig = await launchConfigForCwd(cwd);
     if (request.creationId !== undefined) {
@@ -164,7 +164,7 @@ export const localHost: Omit<Host, "workspaceOps" | "supportsWorkspaceOp"> = {
       cwd,
       // Re-read per spawn so a respawn picks up environment values the user
       // added in Settings after the session was created (#104).
-      env: getAgentEnvOverrides(),
+      env: { ...getAgentEnvOverrides(), ...options?.env },
       extraArgs: [...buildSessionSpawnArgs(request.sessionFile, request.toolNames, request.advisor, launchConfig, request.spawnModel), "--extension", SESSION_EDIT_EXTENSION_PATH],
     });
     return {

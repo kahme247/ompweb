@@ -35,14 +35,14 @@ Checked against OMP's source, and run on 2026-11-11 with omp 18.18.6 in throwawa
 ### C3. The broker runs as a child of the web server
 
 - `lib/omp/auth-broker.ts`, modelled on `lib/omp/auth-gateway.ts`: started on the first forwarded request with `omp auth-broker serve --bind=127.0.0.1:0`, ready once it prints its listening address, stopped after 5 minutes with no forwarded request in flight (an open snapshot stream counts as in flight) and when the server shuts down. Its bearer token comes from `omp auth-broker token` and stays in the server process; if the broker refuses that token (it was regenerated), the child is stopped and the next request starts a new one.
-- Sessions on this machine and the Settings screens keep using the store directly. The broker reloads the store before every snapshot and every refresh pass, so a login or logout in Settings reaches the hosts.
+- Sessions on this machine and the Settings screens keep using the store directly. The broker reloads the store before every snapshot and every refresh pass, so a login or logout in Settings reaches the hosts: every OMP process started afterwards uses it, and a running process picks it up the next time it is used, because OMP stops listening for updates after 20 seconds without activity and resumes on its next use. A running process keeps the access tokens and API keys it has already loaded until it ends.
 - The broker and this machine's own OMP processes refresh the same OAuth rows. That is the situation several local OMP processes are already in, handled by OMP's own store; it is checked in the live test, not by ompweb's tests.
 
 ### C4. One forwarding route on the web server
 
 `/api/hosts/broker/[...path]`:
 
-- Outside the password gate, like `/api/hosts/link`: the daemon has no session cookie. `UNGATED` names the prefix `api/hosts/broker/` and nothing beside it.
+- Outside the password gate, like `/api/hosts/link`: the daemon has no session cookie. `UNGATED` names the prefix `api/hosts/broker/v1/` and nothing beside it.
 - Authenticates `Authorization: Bearer <host token>` with `hostForToken` before reading any body: 401 for an unknown token, 403 for a host without `shareCredentials` and for `local`, 503 when `hosts.json` is unreadable or the broker cannot start.
 - Forwards only an allow-list of broker endpoints, with the method, query and body (at most 1 MiB), and the request headers `content-type`, `accept`, `if-none-match` and `omp-auth-broker-capabilities`, replacing the bearer with the broker's. Returns the status, the body as a stream and the response headers `content-type`, `etag`, `cache-control` and `vary`.
 - The allow-list is the snapshot, its stream, health, the per-credential `refresh`, `disable`, `block` and `blocks` calls, and the usage calls. Everything else answers 404, including `POST /v1/credential` (a host cannot add or replace a credential) and any endpoint a later OMP adds, until it is reviewed and listed.
@@ -63,7 +63,7 @@ The forwarder checks the secret, then sends the request to `<that link's server 
 The host token is deliberately not put in the process environment:
 
 - OMP's tools inherit the environment. An agent that runs `env` would write the host token into the session file and send it to the model provider, which is the reason the web password is kept out of the environment. The daemon secret that leaks this way is usable only on that machine's loopback, by a user who can already read `host.json`.
-- A long-running OMP process keeps working when the host token is replaced or the server comes back on another address: the daemon reads the link's current values for every request.
+- A long-running OMP process keeps working when the host token is replaced: the daemon reads the link's current token for every request. The server URL is the key that selects the link, so a server that comes back on another URL is refused rather than followed.
 
 ### C6. Link protocol v9
 
@@ -106,7 +106,7 @@ Tests sit beside the code, as in the rest of the repository.
 - Registry and `PATCH /api/hosts`: the new field, its absence in old files, the `local` refusal.
 - Daemon forwarder: wrong secret, link selection, host token replaced between two requests, streaming.
 - Hub and daemon: the flag is set only for sharing hosts; refusal below v9; spawn environment; resume with the link present and absent.
-- Live, at a time agreed with the user because it uses real logins: a session on a host with an empty credential store answers with the server's login; a logout on the server makes the host's next request fail.
+- Live, at a time agreed with the user because it uses real logins: a session on a host with an empty credential store answers with the server's login; a session started after a logout on the server cannot use that login.
 
 ## Documentation
 

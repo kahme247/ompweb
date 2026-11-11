@@ -3,7 +3,7 @@ import { hostForToken, HostRegistryUnreadableError, LOCAL_HOST_ID, type HostReco
 import { AuthBrokerUnavailableError, brokerFetch } from "@/lib/omp/auth-broker";
 
 // A linked host's daemon forwards omp's auth-broker calls here (lib/omp/auth-broker.ts runs the broker). proxy.ts does
-// not run for this path: the host's bearer token is checked before anything else is read.
+// not gate the /v1/ paths: the host's bearer token is checked before anything else is read.
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const noStore = { "cache-control": "no-store" };
@@ -18,6 +18,13 @@ const ALLOWED: readonly (readonly [method: string, path: RegExp])[] = [
 ];
 const REQUEST_HEADERS = ["content-type", "accept", "if-none-match", "omp-auth-broker-capabilities"];
 const RESPONSE_HEADERS = ["content-type", "etag", "cache-control", "vary"];
+// A path the allow-list has not vetted reaches the log only as plain `/v1/` text.
+const PLAIN_PATH = /^\/v1\/[A-Za-z0-9/_-]*$/;
+
+/** Never a token, a query, a body or an error message: a broker failure names only its class. */
+function log(hostId: string, method: string, path: string, status: number, reason?: string) {
+  console.log(`[omp-web] broker ${hostId} ${method} ${path} ${status}${reason ? ` ${reason}` : ""}`);
+}
 
 function only(source: Headers, names: readonly string[]): Headers {
   const picked = new Headers();
@@ -28,8 +35,8 @@ function only(source: Headers, names: readonly string[]): Headers {
   return picked;
 }
 
-/** The sharing host the bearer token names, or the refusal to answer with. */
-function admit(request: Request): HostRecord | Response {
+/** The sharing host the bearer token names, or the refusal to answer with (a 403 is logged; a 401 has no host to name). */
+function admit(request: Request, path: string): HostRecord | Response {
   const header = request.headers.get("authorization");
   const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
   let host: HostRecord | null;
@@ -42,15 +49,21 @@ function admit(request: Request): HostRecord | Response {
   }
   if (!host) return fail("Unknown host token", 401);
   // `local` is refused by id: a hand-edited hosts.json can give its record the flag.
-  if (host.id === LOCAL_HOST_ID || !host.shareCredentials) return fail("Credential sharing is off for this host", 403);
+  if (host.id === LOCAL_HOST_ID || !host.shareCredentials) {
+    log(host.id, request.method, PLAIN_PATH.test(path) ? path : "-", 403);
+    return fail("Credential sharing is off for this host", 403);
+  }
   return host;
 }
 
 async function forward(request: Request, { params, disableIdleTimeout }: { params: Promise<{ path: string[] }>; disableIdleTimeout: () => void }) {
-  const first = admit(request);
-  if (first instanceof Response) return first;
   const path = `/${(await params).path.join("/")}`;
-  if (!ALLOWED.some(([method, allowed]) => method === request.method && allowed.test(path))) return fail("Not found", 404);
+  const first = admit(request, path);
+  if (first instanceof Response) return first;
+  if (!ALLOWED.some(([method, allowed]) => method === request.method && allowed.test(path))) {
+    log(first.id, request.method, PLAIN_PATH.test(path) ? path : "-", 404);
+    return fail("Not found", 404);
+  }
 
   // Public to proxy.ts, so Bun's idle timeout is still on: the snapshot stream and the long poll stay open without traffic.
   disableIdleTimeout();
@@ -66,10 +79,9 @@ async function forward(request: Request, { params, disableIdleTimeout }: { param
 
   // The body can take as long as the sender likes, and no request of this host is abortable (abortBrokerRequests) until
   // brokerFetch registers it: a host revoked or switched off meanwhile must not get through. No await from here to that call.
-  const host = admit(request);
+  const host = admit(request, path);
   if (host instanceof Response) return host;
 
-  const log = (status: number) => console.log(`[omp-web] broker ${host.id} ${request.method} ${path} ${status}`);
   let upstream: Response;
   try {
     upstream = await brokerFetch(host.id, path + new URL(request.url).search, {
@@ -80,10 +92,13 @@ async function forward(request: Request, { params, disableIdleTimeout }: { param
     });
   } catch (error) {
     const unavailable = error instanceof AuthBrokerUnavailableError;
-    log(unavailable ? 503 : 502);
+    const reason = unavailable ? (error.reason ?? "fetch_failed")
+      // The host disconnected, or abortBrokerRequests cut it off.
+      : request.signal.aborted || (error instanceof Error && error.name === "AbortError") ? "aborted" : "fetch_failed";
+    log(host.id, request.method, path, unavailable ? 503 : 502, reason);
     return unavailable ? fail("The auth broker is unavailable", 503) : fail("The auth broker request failed", 502);
   }
-  log(upstream.status);
+  log(host.id, request.method, path, upstream.status);
   return new Response(upstream.body, { status: upstream.status, headers: only(upstream.headers, RESPONSE_HEADERS) });
 }
 
