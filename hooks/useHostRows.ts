@@ -37,8 +37,10 @@ export function useHostRows(): { hosts: HostRow[] | null; pools: HostPool[]; poo
           setHosts(data.hosts);
           setFailed(false);
         }
-        // A frame that carries pools is as good as the snapshot: it also recovers from a failed first request.
+        // A frame that carries pools is as good as the snapshot: it also recovers from a failed first request,
+        // and cancels one still running so its older answer, or its failure, is ignored.
         if (Array.isArray(data.pools)) {
+          controller.abort();
           setPools(data.pools);
           setPoolsLoaded(true);
           setPoolsFailed(false);

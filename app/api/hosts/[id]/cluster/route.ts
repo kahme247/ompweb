@@ -90,7 +90,7 @@ export async function PUT(request: Request, { params }: Context) {
   if (request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/json") return fail("Content-Type must be application/json", "unsupported_media_type", 415);
   try {
     const { id } = await params;
-    // This machine is the master: it joins with the first linked host, never by request.
+    // This machine is the master: any join adds it while it is not a member; it never joins by request.
     const host = id === LOCAL_HOST_ID ? null : getHost(id);
     if (!host) return fail("Unknown host", "unknown_host", 404);
     const body = await parseJsonWithinLimit<unknown>(request, 8192);

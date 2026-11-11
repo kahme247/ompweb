@@ -68,7 +68,7 @@ export function joinCluster(
 ): HostPool[] {
   const current = clusterOf(pools);
   if (current?.members.some((existing) => existing.hostId === member.hostId)) {
-    throw new ClusterError("already_member", `Host ${member.hostId} is already in the cluster`);
+    throw new ClusterError("already_member", "The host is already in the cluster");
   }
   const base = current ?? { id: CLUSTER_ID, label: CLUSTER_LABEL, enabled: true, members: [], projects: [] };
   const next: HostPool = {
@@ -88,15 +88,17 @@ export function joinCluster(
     if (next.projects.some((candidate) => Object.hasOwn(candidate.clonePaths, member.hostId) && comparableProjectPath(candidate.clonePaths[member.hostId]) === path)) continue;
     const existing = next.projects.find((candidate) => repositoryKey(candidate.origin) === key);
     if (existing && Object.hasOwn(existing.clonePaths, member.hostId)) continue; // an existing binding may already hold sessions
+    // A visible checkout keeps a hidden cluster project visible, else the project and its sessions vanish from the sidebar.
     const result: PoolProject = existing
-      ? { ...existing, clonePaths: { ...existing.clonePaths, [member.hostId]: project.path } }
+      ? { ...existing, hidden: existing.hidden && project.hidden === true, clonePaths: { ...existing.clonePaths, [member.hostId]: project.path } }
       : {
-        id: newId(), name: cloneDirectoryName(origin)!, origin, clonePaths: { [member.hostId]: project.path },
+        // The name the host showed: its own, else its folder's (spec M3); the origin's only for a root path.
+        id: newId(), name: project.name || project.path.split(/[\\/]/).filter(Boolean).pop() || cloneDirectoryName(origin)!, origin, clonePaths: { [member.hostId]: project.path },
         addedAt: project.addedAt ?? now, hidden: project.hidden ?? false,
         alias: project.alias, sortOrder: project.sortOrder, pinOrder: project.pinOrder, launchConfig: project.launchConfig,
       };
     if (!valid(result)) continue;
-    if (existing) existing.clonePaths[member.hostId] = project.path;
+    if (existing) Object.assign(existing, result);
     else next.projects.push(result);
   }
   for (const project of next.projects) {

@@ -30,16 +30,17 @@ const hostRow = (overrides = {}) => ({
 });
 const linked = (id, label, overrides = {}) => hostRow({ id, label, allowAgentStart: false, shareCredentials: false, ...overrides });
 
-/** `pools: null` makes GET /api/hosts fail and `"pending"` never answers it; `home: null` makes GET /api/home fail. Other requests go to `respond`. */
+/** `pools: null` makes GET /api/hosts fail, `"pending"` never answers it, and a promise answers it once settled (null failing); `home: null` makes GET /api/home fail. Other requests go to `respond`. */
 async function showHosts(t, { hosts, pools = [], home = "/home/andre", respond = async () => Response.json({ pools }) }) {
   const calls = [];
-  let answered = false;
+  let snapshot;
   t.mock.method(globalThis, "fetch", async (url, init) => {
     const method = init?.method ?? "GET";
     if (String(url) === "/api/hosts" && method === "GET") {
+      snapshot = init;
       if (pools === "pending") return new Promise(() => {});
-      answered = true;
-      return pools === null ? new Response("{}", { status: 500 }) : Response.json({ hosts: [], pools });
+      const answer = await pools;
+      return answer === null ? new Response("{}", { status: 500 }) : Response.json({ hosts: [], pools: answer });
     }
     if (String(url).startsWith("/api/home?")) {
       calls.push({ method, url: String(url) });
@@ -55,13 +56,12 @@ async function showHosts(t, { hosts, pools = [], home = "/home/andre", respond =
   const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
   act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts }) } }));
   await screen.findByRole("button", { name: "Rename This machine" });
-  // Pools come from the snapshot request: wait until it was answered, then let its continuation apply the result.
-  if (pools !== "pending") {
-    await waitFor(() => assert.ok(answered));
-    await act(async () => {});
+  // Settled once the snapshot is applied: every cluster switch is then enabled or says why not; while loading it is disabled without a reason.
+  if (Array.isArray(pools) || pools === null) {
+    await waitFor(() => assert.ok(screen.getAllByRole("switch", { name: /is in the cluster$/ }).every((toggle) => !toggle.disabled || toggle.hasAttribute("aria-describedby"))));
   }
   const frame = (data) => act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify(data) } }));
-  return { calls, frame, user: userEvent.setup() };
+  return { calls, frame, snapshotAborted: () => snapshot?.signal?.aborted === true, user: userEvent.setup() };
 }
 
 const rowOf = (name) => screen.getByRole("button", { name: `Rename ${name}` }).closest("li");
@@ -79,6 +79,31 @@ test("without a cluster this machine's row has no master label", async (t) => {
   await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools: [] });
   assert.equal(screen.queryByText("Cluster master"), null);
   assert.equal(clusterSwitch("Laptop").disabled, false);
+});
+
+test("a first pool without this machine gives its row no master label", async (t) => {
+  await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("h1") });
+  assert.equal(screen.queryByText("Cluster master"), null);
+});
+
+for (const [label, local, pools] of [
+  ["offline", { status: "offline" }, []],
+  ["on protocol 8", { hostVersion: 8 }, cluster("h1")],
+  ["without gitOrigins", { workspaceOps: [] }, []],
+]) {
+  test(`while this machine must join too and is ${label}, a non-member cannot join and says why; a member can still leave`, async (t) => {
+    await showHosts(t, { hosts: [hostRow(local), linked("h1", "Laptop"), linked("h2", "Desk")], pools });
+    const desk = clusterSwitch("Desk");
+    assert.equal(desk.disabled, true);
+    assert.equal(reasonOf(desk), "Restart the host service on this machine first");
+    if (pools.length) assert.equal(clusterSwitch("Laptop").disabled, false);
+  });
+}
+
+test("once this machine is a member, its own readiness no longer blocks a join", async (t) => {
+  await showHosts(t, { hosts: [hostRow({ status: "offline" }), linked("h1", "Laptop")], pools: cluster("local") });
+  assert.equal(clusterSwitch("Laptop").disabled, false);
+  assert.equal(clusterSwitch("Laptop").getAttribute("aria-describedby"), null);
 });
 
 for (const [label, row, reason] of [
@@ -145,6 +170,17 @@ test("joining asks for the folder, prefilled from the host's home, and sends it"
   await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
 });
 
+for (const [label, pools, says] of [["no cluster", [], true], ["a first pool without this machine", cluster("h2"), true], ["this machine a member", cluster("local"), false]]) {
+  test(`with ${label} the join dialog ${says ? "says" : "does not say"} that this machine joins too`, async (t) => {
+    const { user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools });
+    await user.click(clusterSwitch("Laptop"));
+    const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
+    const note = within(dialog).queryByText(/^This machine joins too: its Git projects become cluster projects/);
+    assert.equal(note !== null, says);
+    if (says) assert.match(note.textContent, /any member with capacity \(currently Linux hosts only\)/);
+  });
+}
+
 test("a refused join shows the server's message and keeps the dialog open", async (t) => {
   const { user } = await showHosts(t, {
     hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local"),
@@ -186,6 +222,7 @@ test("leaving is confirmed, then sends DELETE", async (t) => {
   const { calls, user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local", "h1") });
   await user.click(clusterSwitch("Laptop"));
   const dialog = await screen.findByRole("dialog", { name: "Remove Laptop from the cluster?" });
+  assert.ok(within(dialog).getByText(/The cluster keeps the projects it gained from Laptop; hide any you do not want\./));
   assert.equal(calls.some((call) => call.method === "DELETE"), false);
   await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
   await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
@@ -227,6 +264,23 @@ test("a hosts frame that carries pools recovers from a failed first request", as
   assert.equal(clusterSwitch("Laptop").getAttribute("aria-describedby"), null);
   assert.equal(screen.getByRole("switch", { name: "Use this server's provider logins on Laptop" }).disabled, false);
 });
+
+for (const [label, late] of [["answers", []], ["fails", null]]) {
+  test(`a hosts frame with pools wins over an initial request that ${label} later`, async (t) => {
+    const answer = Promise.withResolvers();
+    const { frame, snapshotAborted } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools: answer.promise });
+    frame({ hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local", "h1") });
+    await waitFor(() => assert.equal(clusterSwitch("Laptop").getAttribute("aria-checked"), "true"));
+    await waitFor(() => assert.ok(snapshotAborted(), "the outdated request is cancelled"));
+    await act(async () => {
+      answer.resolve(late);
+      await answer.promise;
+    });
+    assert.equal(clusterSwitch("Laptop").getAttribute("aria-checked"), "true");
+    assert.equal(clusterSwitch("Laptop").disabled, false);
+    assert.equal(screen.queryByText("Could not load hosts. Retrying…"), null);
+  });
+}
 
 test("a frame that removes a member returns its share toggle to the stored flag", async (t) => {
   const { frame } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local", "h1") });
