@@ -1770,6 +1770,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
               const projectKey = projectIdentity(project);
               // A member's own project listed in the cluster group: name its node.
               const node = project.poolId || host.id === hostOf(project) ? undefined : hosts?.find((candidate) => candidate.id === hostOf(project));
+              const unavailable = node ? hostUnavailableReason(node.id) : null;
               const tree = treesByProject.get(projectKey) ?? buildSessionTree(sessions);
               // Sessions group under a project through the case-folded comparable
               // form (see groupSessionsByProject), so the active highlight must
@@ -1781,7 +1782,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 <ProjectRow
                   key={projectKey}
                   project={project}
-                  nodeLabel={node ? hostName(t, node) : undefined}
+                  node={node ? { label: hostName(t, node), statusText: unavailable ? hostStatusText(t, node) : null, unavailableReason: unavailable } : undefined}
                   isActive={isActive}
                   activity={projectActivity.get(foldedHostProjectKey(project.hostId, workspaceKeyOf(project)))}
                   tree={tree}

@@ -1777,7 +1777,8 @@ export function AppShell({ appName }: { appName: string }) {
   const newSessionProject = effectivePoolProject ? projectIdentity(effectivePoolProject) : (workspaceOptions.cwd === effectiveNewSessionCwd && workspaceOptions.hostId === newSessionHostKey ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
   // The panel's target is the group the sidebar lists the project under: the cluster for a member's pinned project. The real host (above) is where the session runs.
   const newSessionGroupKey = projectTargetId(effectivePoolProject ?? { hostId: newSessionHostKey }, pools);
-  const hostProjects = workspaceOptions.projects.filter((project) => projectTargetId(project, pools) === newSessionGroupKey);
+  // Pool projects first (stable), as in the sidebar's cluster group.
+  const hostProjects = workspaceOptions.projects.filter((project) => projectTargetId(project, pools) === newSessionGroupKey).sort((a, b) => Number(Boolean(b.poolId)) - Number(Boolean(a.poolId)));
   // Two members' projects can share a path, so a non-pool option's value carries its host.
   const newSessionWorkspaceValue = effectivePoolProject ? projectIdentity(effectivePoolProject) : effectiveNewSessionCwd ? hostProjectKey(newSessionHost, effectiveNewSessionCwd) : "";
   const memberIds = new Set(pools.flatMap((pool) => pool.members.map((member) => member.hostId)));
@@ -2551,7 +2552,8 @@ export function AppShell({ appName }: { appName: string }) {
                           id="new-session-host"
                           value={newSessionGroupKey}
                           onChange={(event) => {
-                            const first = workspaceOptions.projects.find((project) => projectTargetId(project, pools) === event.target.value);
+                            const matches = workspaceOptions.projects.filter((project) => projectTargetId(project, pools) === event.target.value);
+                            const first = matches.find((project) => project.poolId) ?? matches[0];
                             if (!first || event.target.value === newSessionGroupKey) return;
                             suppressCwdRef.current = first.path;
                             setActivePoolProject(first.poolId ? first : null);
@@ -2602,7 +2604,7 @@ export function AppShell({ appName }: { appName: string }) {
                         const node = !project.poolId && projectTargetId(project, pools) !== (project.hostId ?? LOCAL_HOST_ID) ? hosts?.find((host) => host.id === (project.hostId ?? LOCAL_HOST_ID)) : undefined;
                         return (
                           <option key={projectIdentity(project)} value={project.poolId ? projectIdentity(project) : hostProjectKey(project.hostId, foldedHostProjectKey(project.hostId, project.path) === foldedHostProjectKey(newSessionHost, newSessionProject) ? effectiveNewSessionCwd ?? project.path : project.path)}>
-                            {node ? `${name} (${hostName(t, node)})` : name}
+                            {node ? t("hosts.projectOnNode", { name, node: hostName(t, node) }) : name}
                           </option>
                         );
                       })}

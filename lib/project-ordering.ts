@@ -73,8 +73,9 @@ export function groupProjectsByHost<T extends { hostId?: string; poolId?: string
   });
   return ordered.map((host) => ({
     host,
-    // The sort is stable: pool projects first, each kind in the given order.
-    projects: projects.filter((project) => projectTargetId(project, pools) === host.id).sort((a, b) => Number(Boolean(b.poolId)) - Number(Boolean(a.poolId))),
+    // The sort is stable: pool projects first, each kind in the given order. A pool project's own target is `pool:<id>`, which also holds for the sidebar's entries (their `hostId` is that target).
+    projects: projects.filter((project) => projectTargetId(project, pools) === host.id)
+      .sort((a, b) => Number(projectTargetId(b).startsWith("pool:")) - Number(projectTargetId(a).startsWith("pool:"))),
   }));
 }
 
