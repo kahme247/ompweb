@@ -1,6 +1,6 @@
 # Shared provider credentials for linked hosts — design
 
-Date: 2026-11-10. Branch: `feat/shared-credentials` (on `main` c72de444).
+Date: 2026-11-10. Branch: `feat/shared-credentials` (started on `main` c72de444; `feat/transparent-host-pool`, which owns link protocol 8, is merged in).
 Builds on: `docs/specs/2026-10-28-remote-hosts-design.md` ("Security", "Protocol versions and compatibility"), `docs/specs/2026-11-06-multi-server-host-design.md` (M1, M3, M7), and OMP's own `docs/auth-broker-gateway.md`.
 
 ## Why
@@ -65,12 +65,12 @@ The host token is deliberately not put in the process environment:
 - OMP's tools inherit the environment. An agent that runs `env` would write the host token into the session file and send it to the model provider, which is the reason the web password is kept out of the environment. The daemon secret that leaks this way is usable only on that machine's loopback, by a user who can already read `host.json`.
 - A long-running OMP process keeps working when the host token is replaced or the server comes back on another address: the daemon reads the link's current values for every request.
 
-### C6. Link protocol v8
+### C6. Link protocol v9
 
-- `open.launch` gains `shareCredentials?: true`. The hub sets it when the host's record has sharing on; a v8 daemon then spawns as in C5, using the link that sent the `open`.
+- `open.launch` gains `shareCredentials?: true`. The hub sets it when the host's record has sharing on; a v9 daemon then spawns as in C5, using the link that sent the `open`.
 - With several web servers on one daemon (M3), the server whose `open` starts the process decides. A server that joins a running process does not change its credentials.
 - Resume after a daemon restart (M7): the recorded `launch` keeps the flag and the server URL of its link. If that link is no longer in `host.json`, the session is not resumed and the reason is logged.
-- `LINK_PROTOCOL_VERSION` becomes 8; `MIN_LINK_PROTOCOL_VERSION` stays 4. For a host with sharing on whose daemon speaks v4–v7, the hub refuses to start a process with 426 `host_upgrade_required`. Hosts with sharing off behave exactly as before on every version.
+- `LINK_PROTOCOL_VERSION` becomes 9; `MIN_LINK_PROTOCOL_VERSION` stays 4. For a host with sharing on whose daemon speaks v4–v8, the hub refuses to start a process with 426 `host_upgrade_required`. Hosts with sharing off behave exactly as before on every version.
 
 ### C7. No silent fallback to other credentials
 
@@ -105,7 +105,7 @@ Tests sit beside the code, as in the rest of the repository.
 - Broker child with a fake `omp`: lazy start, readiness, idle stop with a stream open and closed, restart after an exit.
 - Registry and `PATCH /api/hosts`: the new field, its absence in old files, the `local` refusal.
 - Daemon forwarder: wrong secret, link selection, host token replaced between two requests, streaming.
-- Hub and daemon: the flag is set only for sharing hosts; refusal below v8; spawn environment; resume with the link present and absent.
+- Hub and daemon: the flag is set only for sharing hosts; refusal below v9; spawn environment; resume with the link present and absent.
 - Live, at a time agreed with the user because it uses real logins: a session on a host with an empty credential store answers with the server's login; a logout on the server makes the host's next request fail.
 
 ## Documentation
@@ -113,5 +113,5 @@ Tests sit beside the code, as in the rest of the repository.
 - `README.md`: sharing in "Run sessions on another machine", the reverse-proxy path and the security note.
 - `AGENTS.md`: file map, "Remote hosts", "Auth and model config".
 - `DESIGN.md`: the paragraph that says each machine uses its own credentials.
-- `docs/specs/2026-10-28-remote-hosts-design.md`: the v8 line under "Rules".
+- `docs/specs/2026-10-28-remote-hosts-design.md`: the v9 line under "Rules".
 - `CHANGELOG.md`, and the Settings strings in English, Chinese and Japanese.

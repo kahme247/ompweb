@@ -4,15 +4,17 @@
 
 **Goal:** a linked host with sharing turned on runs its omp sessions with the web server machine's provider logins, through omp's own auth broker.
 
-**Architecture:** the web server runs `omp auth-broker serve` on loopback as an idle-stopped child and exposes an allow-listed forwarding route that authenticates the host token. The host daemon runs a loopback forwarder with a per-run secret and starts omp with `OMP_AUTH_BROKER_URL`/`OMP_AUTH_BROKER_TOKEN` pointing at it, so the host token never enters a child environment. A per-host registry flag and link protocol v8 decide which spawns get it.
+**Architecture:** the web server runs `omp auth-broker serve` on loopback as an idle-stopped child and exposes an allow-listed forwarding route that authenticates the host token. The host daemon runs a loopback forwarder with a per-run secret and starts omp with `OMP_AUTH_BROKER_URL`/`OMP_AUTH_BROKER_TOKEN` pointing at it, so the host token never enters a child environment. A per-host registry flag and link protocol v9 decide which spawns get it.
 
 **Tech Stack:** TypeScript; server on Bun; daemon modules on Node through `jiti`; tests `bun test --parallel`.
 
 **Spec:** `docs/specs/2026-11-10-shared-credentials-design.md` (C1–C7). Read it first.
 
+**Base:** the branch contains `feat/transparent-host-pool` (merged at `0425e39b`), which owns link protocol 8. Line numbers in this plan predate that merge, so locate code by the names given.
+
 ## Global Constraints
 
-- `LINK_PROTOCOL_VERSION = 8`, `MIN_LINK_PROTOCOL_VERSION = 4` (literal one-line exports: the deploy script `sed`s them).
+- `LINK_PROTOCOL_VERSION = 9`, `MIN_LINK_PROTOCOL_VERSION = 4` (literal one-line exports: the deploy script `sed`s them).
 - Daemon-loaded files (`lib/hosts/daemon*.ts`, `host.ts`, `host-resume.ts`, `local-host.ts`, `link-protocol.ts`, the new `lib/hosts/daemon-broker.ts`, and their `lib/` imports): relative imports only, no `Bun` global.
 - ompweb never imports `@oh-my-pi/*` and never reads `agent.db`.
 - A host with sharing on never runs a session with its own stored logins: every failure path refuses, none falls back.
@@ -21,7 +23,7 @@
 - Request bodies on both forwarders: at most 1 MiB (`1_048_576` bytes), else 413.
 - Forwarded request headers: `content-type`, `accept`, `if-none-match`, `omp-auth-broker-capabilities`. Forwarded response headers: `content-type`, `etag`, `cache-control`, `vary`. Nothing else in either direction.
 - Never log a token, a secret or a body. The host token never appears in an omp child's environment or arguments.
-- Existing suites must pass. Update fixtures only where they pin the server's own protocol version as 7; never weaken an assertion.
+- Existing suites must pass. Update fixtures only where they pin the server's own protocol version as 8; never weaken an assertion.
 - Commit titles follow the log (`feat(hosts): …`, `docs(hosts): …`). Commit and push after every task.
 - No production service or daemon is touched. Task 8 uses throwaway home directories and a free port.
 
@@ -164,39 +166,39 @@ Order of checks, each answering JSON `{ error }` with `cache-control: no-store`:
 
 ---
 
-### Task 4: link protocol v8 and the hub's flag
+### Task 4: link protocol v9 and the hub's flag
 
 **Files:**
-- Modify: `lib/hosts/link-protocol.ts:18` (version), plus a new constant
+- Modify: `lib/hosts/link-protocol.ts` (`LINK_PROTOCOL_VERSION`), plus a new constant
 - Modify: `lib/hosts/host.ts` (`SpawnRequest`)
-- Modify: `lib/hosts/hub.ts` (`RemoteHost.spawnRpc`, about line 1424)
-- Test: `lib/hosts/hub-v7.test.mjs`; fixtures that pin the server's version as 7
+- Modify: `lib/hosts/hub.ts` (`RemoteHost.spawnRpc`)
+- Test: `lib/hosts/hub-v7.test.mjs`; fixtures that pin the server's version as 8
 
 **Interfaces:**
 - Consumes: `HostRecord.shareCredentials` (Task 1).
 - Produces:
 
 ```ts
-export const LINK_PROTOCOL_VERSION = 8;
-export const SHARED_CREDENTIALS_SINCE_VERSION = 8;
+export const LINK_PROTOCOL_VERSION = 9;
+export const SHARED_CREDENTIALS_SINCE_VERSION = 9;
 // SpawnRequest gains:
-/** Hub → daemon (v8): run this process with the opening server's provider logins. */
+/** Hub → daemon (v9): run this process with the opening server's provider logins. */
 shareCredentials?: true;
 /** Daemon only: the server URL whose link supplies the credentials. Never trusted from the wire. */
 credentialsServer?: string;
 ```
 
-`spawnRpc`, before it sends anything: read the host's record with `loadHosts()`. If sharing is on and the link's `hostVersion` is below 8, throw `new HostOpError(426, "host_upgrade_required", "Update ompweb on <label> to share credentials with it")`. Otherwise the `open` launch is `{ ...spawnRequest, shareCredentials: true }` for a sharing host and `spawnRequest` unchanged for any other. `local` never shares.
+`spawnRpc`, before it sends anything: read the host's record with `loadHosts()`. If sharing is on and the link's `hostVersion` is below 9, throw `new HostOpError(426, "host_upgrade_required", "Update ompweb on <label> to share credentials with it")`. Otherwise the `open` launch is `{ ...spawnRequest, shareCredentials: true }` for a sharing host and `spawnRequest` unchanged for any other. `local` never shares.
 
 - [ ] **Step 1: Write the failing tests** in `hub-v7.test.mjs`:
-  - sharing host linked at v8 → the daemon side receives `open` with `launch.shareCredentials === true`;
-  - non-sharing host at v8 → `"shareCredentials" in launch === false`;
-  - sharing host linked at v7 → `spawnRpc` rejects with `status === 426`, `code === "host_upgrade_required"`, and no `open` or `spawn` request is sent;
-  - non-sharing host at v7 → opens as before.
+  - sharing host linked at v9 → the daemon side receives `open` with `launch.shareCredentials === true`;
+  - non-sharing host at v9 → `"shareCredentials" in launch === false`;
+  - sharing host linked at v8 → `spawnRpc` rejects with `status === 426`, `code === "host_upgrade_required"`, and no `open` or `spawn` request is sent;
+  - non-sharing host at v8 → opens as before.
 - [ ] **Step 2: Run** `bun test --parallel lib/hosts` — expected: the new tests fail.
-- [ ] **Step 3: Implement.** Then run the suite again and fix only fixtures that fail because they pin the server's own version as 7 (`serverVersion`, `welcome.v`, a hello `v` meant as "current").
+- [ ] **Step 3: Implement.** Then run the suite again and fix only fixtures that fail because they pin the server's own version as 8 (`serverVersion`, `welcome.v`, a hello `v` meant as "current").
 - [ ] **Step 4: Run** `bun test --parallel lib/hosts app server components` — expected: pass.
-- [ ] **Step 5: Commit** `feat(hosts): link protocol v8 carries the credential sharing flag`, push.
+- [ ] **Step 5: Commit** `feat(hosts): link protocol v9 carries the credential sharing flag`, push.
 
 ---
 
@@ -263,7 +265,7 @@ Decisions:
 - `HostResumeTracker.validate` keeps `credentialsServer` when it is a string and throws `Invalid recovery launch` when it is present and not a string. Without this a resumed session silently loses the field (Review Focus 5).
 
 - [ ] **Step 1: Write the failing tests.**
-  - `daemon-channels.test.mjs`: a v8 link with `login.url === "https://a.example"` opens with `launch.shareCredentials: true` → `deps.spawn` receives `credentialsServer === "https://a.example"` and no `shareCredentials`; an open with wire `credentialsServer: "https://evil.example"` and no flag → `deps.spawn` receives neither field; a second link joining that running session without the flag → `deps.spawn` called once in total; `spawnLegacy` with both wire fields → neither reaches `deps.spawn`.
+  - `daemon-channels.test.mjs`: a v9 link with `login.url === "https://a.example"` opens with `launch.shareCredentials: true` → `deps.spawn` receives `credentialsServer === "https://a.example"` and no `shareCredentials`; an open with wire `credentialsServer: "https://evil.example"` and no flag → `deps.spawn` receives neither field; a second link joining that running session without the flag → `deps.spawn` called once in total; `spawnLegacy` with both wire fields → neither reaches `deps.spawn`.
   - `host-resume.test.mjs`: an entry with `credentialsServer: "https://a.example"` comes back from `takeRunning()` with it; `credentialsServer: 5` → throws `Invalid recovery launch`.
   - `local-host-profile.test.mjs`: `spawnRpc(request, null, { env: { OMP_AUTH_BROKER_URL: "u" } })` → the spawned child's environment has it, and it wins over the same key in `agentEnv`.
   - `daemon-runtime.test.mjs`: an `open` with the flag on a daemon whose omp is `15.13.0` fails with `host_omp_too_old` and starts no process; with a current omp the child environment has both variables, the URL is loopback and the value of `OMP_AUTH_BROKER_TOKEN` is not the link's token; a recovered entry whose `credentialsServer` is not linked is not started and is logged with `credentials_link_gone`'s message.
@@ -299,9 +301,9 @@ Strings (keys `hostsConfig.<name>`):
 
 Documentation, normal prose, taken from the spec:
 - `README.md`, "Run sessions on another machine": what sharing does and does not share, the security note, omp 15.13.1; the reverse-proxy paragraphs (lines 184 and 508): `/api/hosts/broker/` must reach the server without the proxy's own authentication and without response buffering.
-- `AGENTS.md`: file map entries for the three new files; "Remote hosts": v8, the flag, the forwarder, no fallback; "Auth and model config": the broker child; the proxy-exclusion note gains the second path.
+- `AGENTS.md`: file map entries for the three new files; "Remote hosts": v9, the flag, the forwarder, no fallback; "Auth and model config": the broker child; the proxy-exclusion note gains the second path.
 - `DESIGN.md` lines 101–103: each machine uses its own credentials unless sharing is on.
-- `docs/specs/2026-10-28-remote-hosts-design.md`, "Rules" → "Version": add `8: open.launch.shareCredentials`.
+- `docs/specs/2026-10-28-remote-hosts-design.md`, "Rules" → "Version": add `9: open.launch.shareCredentials`.
 - `CHANGELOG.md`: one entry under the unreleased heading.
 
 - [ ] **Step 1: Write the failing test:** rendering a linked host with `shareCredentials: false`, clicking the toggle sends no request and shows the dialog title; confirming sends `PATCH /api/hosts` with `{ id, shareCredentials: true }`; with `shareCredentials: true`, clicking sends `{ id, shareCredentials: false }` with no dialog; the `local` row has no such toggle.
