@@ -163,6 +163,7 @@ test("joining asks for the folder, prefilled from the host's home, and sends it"
   assert.deepEqual(calls.filter((call) => call.url.startsWith("/api/home")), [{ method: "GET", url: "/api/home?hostId=h1" }]);
   assert.ok(within(dialog).getByText(/Its Git projects become cluster projects/));
   assert.ok(within(dialog).getByText(/Laptop will use this machine's provider logins/));
+  assert.ok(within(dialog).getByText("Its omp configuration (settings, models, MCP servers, skills, plugins, rules) is replaced by this machine's until it leaves; its own is kept and put back then."));
   assert.equal(calls.some((call) => call.method === "PUT"), false);
 
   await user.click(within(dialog).getByRole("button", { name: "Add to cluster" }));
@@ -181,18 +182,20 @@ for (const [label, pools, says] of [["no cluster", [], true], ["a first pool wit
   });
 }
 
-test("a refused join shows the server's message and keeps the dialog open", async (t) => {
-  const { user } = await showHosts(t, {
-    hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local"),
-    respond: async () => Response.json({ error: "The cluster changed during the join; try again", code: "cluster_changed" }, { status: 409 }),
+for (const [code, message] of [["cluster_changed", "The cluster changed during the join; try again"], ["host_in_other_cluster", "Laptop runs another server's cluster configuration; it must leave that cluster first"]]) {
+  test(`a refused join (${code}) shows the server's message and keeps the dialog open`, async (t) => {
+    const { user } = await showHosts(t, {
+      hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local"),
+      respond: async () => Response.json({ error: message, code }, { status: 409 }),
+    });
+    await user.click(clusterSwitch("Laptop"));
+    const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
+    await waitFor(() => assert.notEqual(within(dialog).getByLabelText(/Folder on Laptop/).value, ""));
+    await user.click(within(dialog).getByRole("button", { name: "Add to cluster" }));
+    assert.equal((await within(dialog).findByRole("alert")).textContent, message);
+    assert.ok(screen.getByRole("dialog", { name: "Add Laptop to the cluster?" }));
   });
-  await user.click(clusterSwitch("Laptop"));
-  const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
-  await waitFor(() => assert.notEqual(within(dialog).getByLabelText(/Folder on Laptop/).value, ""));
-  await user.click(within(dialog).getByRole("button", { name: "Add to cluster" }));
-  assert.equal((await within(dialog).findByRole("alert")).textContent, "The cluster changed during the join; try again");
-  assert.ok(screen.getByRole("dialog", { name: "Add Laptop to the cluster?" }));
-});
+}
 
 test("without a home folder the field starts empty and stays required; the dialog still opens", async (t) => {
   const { calls, user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local"), home: null });
@@ -231,6 +234,42 @@ test("leaving is confirmed, then sends DELETE", async (t) => {
   await user.click(clusterSwitch("Laptop"));
   await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
   await waitFor(() => assert.deepEqual(calls.find((call) => call.method === "DELETE"), { method: "DELETE", url: "/api/hosts/h1/cluster", body: undefined }));
+});
+
+test("a leave whose own configuration could not be put back says so and why", async (t) => {
+  const { toast } = await import("./ui/toast.tsx");
+  const errors = [];
+  t.mock.method(toast, "error", (message) => { errors.push(message); });
+  const { user } = await showHosts(t, {
+    hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local", "h1"),
+    respond: async () => Response.json({ pools: cluster("local"), restoreError: "omp-web/own-config/agent is not readable" }),
+  });
+  await user.click(clusterSwitch("Laptop"));
+  await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
+  await waitFor(() => assert.deepEqual(errors, ["Laptop left the cluster, but its own omp configuration could not be put back: omp-web/own-config/agent is not readable. It is retried automatically while the host is linked."]));
+});
+
+const configState = (fields = {}) => ({ version: "a".repeat(64), files: "current", plugins: "current", error: null, missingCommands: [], owned: true, current: true, ...fields });
+const configLines = (name) => within(rowOf(name)).queryAllByText(/^(Configuration:|Not installed on this host:)/).map((line) => line.textContent);
+
+for (const [label, clusterConfig, lines] of [
+  ["current", configState(), ["Configuration: same as the master"]],
+  ["updating", configState({ plugins: "pending", current: false }), ["Configuration: updating…"]],
+  ["not reported yet", undefined, ["Configuration: updating…"]],
+  ["failed", configState({ files: "failed", error: "the master answered 500 for the manifest", current: false }), ["Configuration: failed — the master answered 500 for the manifest"]],
+  ["held by another server", configState({ owned: false, current: false }), ["Configuration: held by another ompweb server; remove it from that server's cluster first"]],
+  ["current, with commands it lacks", configState({ missingCommands: ["uvx", "docker"] }), ["Configuration: same as the master", "Not installed on this host: uvx, docker"]],
+]) {
+  test(`a member's row states its configuration: ${label}`, async (t) => {
+    await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop", clusterConfig ? { clusterConfig } : {})], pools: cluster("local", "h1") });
+    assert.deepEqual(configLines("Laptop"), lines);
+  });
+}
+
+test("a standalone host shows no configuration line, even with a report", async (t) => {
+  await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop", { clusterConfig: configState({ owned: false, missingCommands: ["uvx"] }) })], pools: cluster("local") });
+  assert.deepEqual(configLines("Laptop"), []);
+  assert.deepEqual(configLines("This machine"), []);
 });
 
 test("while the pools load, every switch and share toggle is disabled and nothing is sent", async (t) => {

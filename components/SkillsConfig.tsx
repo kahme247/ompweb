@@ -130,7 +130,7 @@ function SkillDetail({
   onUpdate,
 }: {
   skill: Skill;
-  cwd: string;
+  cwd: string | null;
   onToggle: (skill: Skill) => void;
   toggling: boolean;
   saveError: string | null;
@@ -146,7 +146,7 @@ function SkillDetail({
   const enabled = !skill.disableModelInvocation;
 
   function displayPath(p: string): string {
-    if (label === "project" && p.startsWith(cwd)) {
+    if (label === "project" && cwd && p.startsWith(cwd)) {
       const rel = p.slice(cwd.length).replace(/^[/\\]/, "");
       return `./${rel}`;
     }
@@ -382,7 +382,8 @@ function AddSkillPanel({
   installedPackages,
   onInstalled,
 }: {
-  cwd: string;
+  /** null: the user level only (no project scope). */
+  cwd: string | null;
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   onInstalled: () => void;
 }) {
@@ -461,9 +462,9 @@ function AddSkillPanel({
   );
 
   const installPath =
-    scope === "global"
-      ? "~/.agents/skills/"
-      : `${shortenPath(cwd)}/.agents/skills/`;
+    scope === "project" && cwd
+      ? `${shortenPath(cwd)}/.agents/skills/`
+      : "~/.agents/skills/";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -533,7 +534,7 @@ function AddSkillPanel({
               flexShrink: 0,
             }}
           >
-            {(["global", "project"] as const).map((s) => (
+            {(cwd ? ["global", "project"] as const : ["global"] as const).map((s) => (
               <button
                 key={s}
                 onClick={() => setScope(s)}
@@ -545,7 +546,7 @@ function AddSkillPanel({
                   color: scope === s ? "var(--text)" : "var(--text-dim)",
                   fontWeight: scope === s ? 600 : 400,
                   borderRight:
-                    s === "global" ? "1px solid var(--border)" : "none",
+                    s === "global" && cwd ? "1px solid var(--border)" : "none",
                 }}
               >
                 {t(SOURCE_LABEL_KEYS[s])}
@@ -731,7 +732,8 @@ export function SkillsConfig({
   embedded = false,
   sessionId,
 }: {
-  cwd: string;
+  /** null: the user level only, as a request without a cwd lists and changes it. */
+  cwd: string | null;
   onClose: () => void;
   onSelectTab?: (tab: SettingsTab) => void;
   embedded?: boolean;
@@ -756,7 +758,7 @@ export function SkillsConfig({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`);
+      const res = await fetch(cwd ? `/api/skills?cwd=${encodeURIComponent(cwd)}` : "/api/skills");
       const d = (await res.json()) as { skills?: Skill[]; error?: string; code?: string };
       if (!res.ok || d.error) throw new Error(formatApiError(d.error ? d : `HTTP ${res.status}`));
       const list = d.skills ?? [];
@@ -940,7 +942,7 @@ export function SkillsConfig({
                 whiteSpace: "nowrap",
               }}
             >
-              {shortenPath(cwd)}
+              {cwd && shortenPath(cwd)}
             </code>
           </div>
           <button

@@ -389,3 +389,10 @@ export async function loadSkillsWithInstallInfo(cwd: string, ompBin: string | nu
     diagnostics,
   };
 }
+
+/** The user level only, for a request without a cwd (a cluster member's settings act on this machine's, spec K7): omp
+ * runs in its agent directory, where no project lies, and a project-scope entry is left out all the same. */
+export async function loadUserSkillsWithInstallInfo() {
+  const listed = await loadSkillsWithInstallInfo(getAgentDir());
+  return { ...listed, skills: listed.skills.filter((skill) => skill.sourceInfo?.scope !== "project") };
+}

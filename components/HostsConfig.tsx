@@ -163,6 +163,7 @@ function JoinDialog({ host, localJoins, onClose }: { host: HostRow; localJoins: 
           <p style={noteStyle}>{t("hostsConfig.joinProjectsNote", { name })}</p>
           {localJoins && <p style={noteStyle}>{t("hostsConfig.joinLocalNote")}</p>}
           <p style={noteStyle}>{t("hostsConfig.joinCredentialsNote", { name })}</p>
+          <p style={noteStyle}>{t("hostsConfig.joinConfigNote")}</p>
           {error && <div id={errorId} role="alert" style={{ fontSize: 12, color: "var(--status-error)" }}>{error}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
             <button type="button" className="ui-focus-ring" style={buttonStyle} disabled={busy} onClick={onClose}>{t("hostsConfig.cancel")}</button>
@@ -199,6 +200,13 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
     host.hostVersion !== null && host.status !== "needs-upgrade" && t("hostsConfig.protocol", { version: host.hostVersion }),
     linked && (host.lastSeenAt ? t("hostsConfig.lastSeen", { time: new Date(host.lastSeenAt).toLocaleString() }) : t("hostsConfig.neverSeen")),
   ].filter(Boolean).join(" · ");
+  // A member's configuration (spec K4); a member without a report yet is still being brought up to date.
+  const config = member ? linked?.clusterConfig : undefined;
+  const configLine = !member || !linked ? null
+    : !config ? t("hostsConfig.configUpdating")
+      : config.version !== null && !config.owned ? t("hostsConfig.configHeldElsewhere")
+        : config.error ? t("hostsConfig.configFailed", { reason: config.error })
+          : t(config.current ? "hostsConfig.configCurrent" : "hostsConfig.configUpdating");
 
   return (
     <li className="settings-card" style={{ flexWrap: "wrap", listStyle: "none" }}>
@@ -209,6 +217,8 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{hostStatusText(t, host)}</span>
         </div>
         {details && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)", overflowWrap: "anywhere" }}>{details}</div>}
+        {configLine && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)", overflowWrap: "anywhere" }}>{configLine}</div>}
+        {configLine && config?.missingCommands.length ? <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)", overflowWrap: "anywhere" }}>{t("hostsConfig.configMissing", { commands: config.missingCommands.join(", ") })}</div> : null}
         {isLocalRow(host) && host.daemonManaged && host.status === "offline" && (
           <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "var(--text-muted)" }}>
             {t("hostsConfig.localOfflineHint")}
@@ -300,7 +310,9 @@ export function HostsConfig() {
     if (!leaving) return;
     setBusy(true);
     try {
-      await call("DELETE", `/api/hosts/${encodeURIComponent(leaving.id)}/cluster`);
+      const { restoreError } = await call("DELETE", `/api/hosts/${encodeURIComponent(leaving.id)}/cluster`);
+      // It left; only putting its own configuration back failed (spec K6), which the server retries while the host is linked.
+      if (typeof restoreError === "string") toast.error(t("hostsConfig.leaveRestoreFailed", { name: leaving.label, reason: restoreError }));
       setLeaving(null);
     } catch (error) {
       failure(error);

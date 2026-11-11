@@ -861,7 +861,7 @@ function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly C
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, neverFoldActivity, onNeverFoldActivityChange, showToolCallsUnfolded, onShowToolCallsUnfoldedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, remoteHost, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, onRefreshAppUpdate, onRequestAppUpdate, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, neverFoldActivity, onNeverFoldActivityChange, showToolCallsUnfolded, onShowToolCallsUnfoldedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, remoteHost, cluster, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, onRefreshAppUpdate, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
@@ -881,8 +881,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   openUrlAutomatically: boolean;
   onOpenUrlAutomaticallyChange: (enabled: boolean) => void;
   cwd: string | null;
-  /** `cwd` lives on a remote host: its MCP settings are not available yet. */
+  /** `cwd` lives on a remote host: its MCP settings are not available yet, unless it is a cluster member (`cluster`). */
   remoteHost: boolean;
+  /** `cwd` or `sessionId` is a session or project of the cluster: its settings are the master's, this machine's (spec K7). */
+  cluster: boolean;
   sessionId: string | null;
   onModelsSaved: () => void;
   onPluginsReloaded: () => void;
@@ -897,6 +899,11 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const workspaceReady = cwd !== null;
   // Workspace-scoped panels read this machine's disk: not for a remote workspace yet.
   const remoteUnavailable = <p role="status" style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("hosts.notAvailableRemote")}</p>;
+  // On another member the panels act on this machine's user level, which every member runs; that member's workspace
+  // and session are not this machine's, so they are left out with the project-level parts they would show.
+  const panelsUnavailable = remoteHost && !cluster;
+  const panelCwd = remoteHost ? null : cwd;
+  const panelSessionId = remoteHost ? null : sessionId;
   const { fontSize, setFontSize } = useFontSize();
   const { uiScale, setUiScale } = useUiScale();
   const { touchTargets, setTouchTargets } = useTouchTargets();
@@ -1243,6 +1250,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             <SettingsTabs active={currentTab} onSelect={handleSelectTab} workspaceReady={workspaceReady} layout={isMobile ? "horizontal" : "vertical"} attentionTabs={attentionTabs} />
 
             <div className="settings-content" style={contentStyle}>
+            {cluster && !["hosts", "usage", "notifications"].includes(currentTab) && (
+              <p style={{ flexShrink: 0, margin: isMobile ? "16px 14px 0" : "16px 24px 0", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settings.clusterConfigNotice")}</p>
+            )}
             {nativeSettingsRequired && nativeSettingsLoading ? (
               <div className="settings-loading-state" role="status" aria-live="polite" aria-busy="true" aria-label={t("appShell.loading")}>
                 <div className="skeleton settings-loading-row" />
@@ -1731,7 +1741,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <div style={{ marginBottom: 4 }}>
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.extensionsTools")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.extensionsToolsDesc")}</p>
-                  {cwd && !remoteHost && <button type="button" className="settings-back ui-focus-ring" onClick={() => handleSelectTab("skills")}>{t("skillsConfig.title")}</button>}
+                  {cwd && (!remoteHost || cluster) && <button type="button" className="settings-back ui-focus-ring" onClick={() => handleSelectTab("skills")}>{t("skillsConfig.title")}</button>}
                 </div>
                 {cwd && !remoteHost && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
@@ -1755,7 +1765,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </NativeSetting>
                   </div>
                 )}
-                {remoteHost ? remoteUnavailable : <McpConfig cwd={cwd} sessionId={sessionId} />}
+                {panelsUnavailable ? remoteUnavailable : <McpConfig cwd={panelCwd} sessionId={panelSessionId} />}
                 {!cwd && <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>}
               </div>
             )}
@@ -1763,14 +1773,14 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             {/* SKILLS SUB-PANEL CONTRACT MATCH */}
             {cwd && currentTab === "skills" && (
               <div role="tabpanel" id="settings-panel-skills" aria-labelledby="settings-tab-mcp" className="settings-panel-inner" style={{ display: currentTab === "skills" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                {remoteHost ? remoteUnavailable : <SkillsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} />}
+                {panelsUnavailable ? remoteUnavailable : <SkillsConfig embedded cwd={panelCwd} sessionId={panelSessionId} onClose={onClose} />}
               </div>
             )}
 
             {/* PLUGINS SUB-PANEL CONTRACT MATCH */}
             {cwd && currentTab === "plugins" && (
               <div role="tabpanel" id="settings-panel-plugins" aria-labelledby="settings-tab-plugins" className="settings-panel-inner" style={{ display: currentTab === "plugins" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                {remoteHost ? remoteUnavailable : <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />}
+                {panelsUnavailable ? remoteUnavailable : <PluginsConfig embedded cwd={panelCwd} sessionId={panelSessionId} onClose={onClose} onReloaded={onPluginsReloaded} />}
               </div>
             )}
 
@@ -1800,7 +1810,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     {t("settingsConfig.agentsDesc")}
                   </p>
                 </div>
-                {remoteHost ? remoteUnavailable : <AgentsConfig cwd={cwd} />}
+                {panelsUnavailable ? remoteUnavailable : <AgentsConfig cwd={panelCwd} />}
               </div>
             )}
 

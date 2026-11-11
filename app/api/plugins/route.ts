@@ -3,6 +3,7 @@ import { existsSync, promises as fs } from "fs";
 import { basename, extname, join } from "path";
 import { ANSI_RE, parseJsonLoose } from "@/lib/omp/plugins-cli";
 import { resolveOmpBin } from "@/lib/omp/omp-cli";
+import { getAgentDir } from "@/lib/omp/paths";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import type {
@@ -199,13 +200,15 @@ async function toMarketplacePackageInfo(plugin: OmpMarketplacePlugin): Promise<P
   };
 }
 
-async function readPlugins(cwd: string): Promise<PluginsResponse> {
+/** Without a cwd, the user level only (a cluster member's settings act on this machine's, spec K7): omp runs in its
+ * agent directory, where no project lies, and a project-scope entry is left out all the same. */
+async function readPlugins(cwd: string | null): Promise<PluginsResponse> {
   const diagnostics: PluginDiagnostic[] = [];
   const packages: PluginPackageInfo[] = [];
   const totals = emptyCounts();
 
   try {
-    const { stdout } = await runOmp(["plugin", "list", "--json"], { cwd, timeout: 60_000 });
+    const { stdout } = await runOmp(["plugin", "list", "--json"], { cwd: cwd ?? getAgentDir(), timeout: 60_000 });
     const list = parseJsonLoose<OmpPluginList>(stdout);
     if (!list) {
       diagnostics.push({
@@ -217,6 +220,7 @@ async function readPlugins(cwd: string): Promise<PluginsResponse> {
         packages.push(await toNpmPackageInfo(plugin));
       }
       for (const plugin of list.marketplace ?? []) {
+        if (!cwd && plugin.scope === "project") continue;
         const info = await toMarketplacePackageInfo(plugin);
         if (plugin.shadowedBy) {
           diagnostics.push({
@@ -261,11 +265,9 @@ function pluginErrorResponse(error: unknown): Response {
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
-  if (!cwd) return Response.json({ error: "cwd required", code: "cwd_required" }, { status: 400 });
 
   try {
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
+    if (cwd && !isExistingFilePathAllowed(cwd, await getAllowedFileRoots())) {
       return Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
     }
     return Response.json(await readPlugins(cwd));
@@ -274,7 +276,7 @@ export async function GET(req: Request) {
   }
 }
 
-// POST /api/plugins body: { action, source?, scope?, cwd }
+// POST /api/plugins body: { action, source?, scope?, cwd? }; without a cwd, global changes only.
 export async function POST(req: Request) {
   try {
     const body = await req.json() as {
@@ -283,32 +285,34 @@ export async function POST(req: Request) {
       scope?: PluginScope;
       cwd?: string;
     };
-    if (!body.cwd) return Response.json({ error: "cwd required", code: "cwd_required" }, { status: 400 });
+    const cwd = body.cwd || null;
+    const scope = readScope(body.scope);
+    if (!cwd && scope === "project") return Response.json({ error: "cwd required", code: "cwd_required" }, { status: 400 });
     if (!body.action) return Response.json({ error: "action required", code: "action_required" }, { status: 400 });
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(body.cwd, allowedRoots)) {
+    if (cwd && !isExistingFilePathAllowed(cwd, await getAllowedFileRoots())) {
       return Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
     }
 
     const source = body.source?.trim();
-    const scopeArgs = readScope(body.scope) === "project" ? ["--scope", "project"] : [];
+    const scopeArgs = scope === "project" ? ["--scope", "project"] : [];
+    const dir = cwd ?? getAgentDir();
 
     if (body.action === "install") {
       if (!source) return Response.json({ error: "source required", code: "source_required" }, { status: 400 });
-      await runOmp(["plugin", "install", source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 300_000 });
+      await runOmp(["plugin", "install", source, "--json", ...scopeArgs], { cwd: dir, timeout: 300_000 });
     } else if (body.action === "remove") {
       if (!source) return Response.json({ error: "source required", code: "source_required" }, { status: 400 });
-      await runOmp(["plugin", "uninstall", source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 120_000 });
+      await runOmp(["plugin", "uninstall", source, "--json", ...scopeArgs], { cwd: dir, timeout: 120_000 });
     } else if (body.action === "update") {
-      await runOmp(["plugin", "upgrade", ...(source ? [source, ...scopeArgs] : [])], { cwd: body.cwd, timeout: 300_000 });
+      await runOmp(["plugin", "upgrade", ...(source ? [source, ...scopeArgs] : [])], { cwd: dir, timeout: 300_000 });
     } else if (body.action === "disable" || body.action === "enable") {
       if (!source) return Response.json({ error: "source required", code: "source_required" }, { status: 400 });
-      await runOmp(["plugin", body.action, source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 60_000 });
+      await runOmp(["plugin", body.action, source, "--json", ...scopeArgs], { cwd: dir, timeout: 60_000 });
     } else {
       return Response.json({ error: `Unsupported action: ${body.action}`, code: "plugin_unsupported_action" }, { status: 400 });
     }
 
-    return Response.json(await readPlugins(body.cwd));
+    return Response.json(await readPlugins(cwd));
   } catch (error) {
     return pluginErrorResponse(error);
   }

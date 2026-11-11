@@ -3,6 +3,7 @@ import { basename } from "path";
 import {
   getSkillToggleRoots,
   loadSkillsWithInstallInfo,
+  loadUserSkillsWithInstallInfo,
   parseSkillFrontmatter,
   readDisableModelInvocation,
   setDisableModelInvocation,
@@ -12,11 +13,18 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-acces
 // GET /api/skills?cwd=<path>
 // Lists what omp resolves (`omp skill list --json`), falling back to a scan
 // of omp's skill roots on binaries that predate the command. Each skill
-// carries `togglable`, the same check PATCH applies.
+// carries `togglable`, the same check PATCH applies. Without a cwd: the user
+// level only.
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
-  if (!cwd) return Response.json({ error: "cwd required", code: "cwd_required" }, { status: 400 });
+  if (!cwd) {
+    try {
+      return Response.json(await loadUserSkillsWithInstallInfo());
+    } catch (e) {
+      return Response.json({ error: String(e) }, { status: 500 });
+    }
+  }
 
   try {
     const allowedRoots = await getAllowedFileRoots();
