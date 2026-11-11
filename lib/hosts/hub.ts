@@ -1710,8 +1710,9 @@ export interface LinkedHostRow {
   hostVersion: number | null;
   serverVersion: number;
   workspaceOps: string[];
-  /** v10: the daemon's last cluster configuration report; `current` when it runs the master's version with its plugins in line. */
-  clusterConfig?: ConfigState & { current: boolean };
+  /** v10: the daemon's last cluster configuration report; `owned` when the configuration it holds is this server's,
+   * `current` when that is the master's version with its plugins in line. */
+  clusterConfig?: ConfigState & { owned: boolean; current: boolean };
 }
 
 export function listHosts(): LinkedHostRow[] {
@@ -1730,7 +1731,7 @@ export function listHosts(): LinkedHostRow[] {
       hostVersion: link?.hostVersion ?? null,
       serverVersion: LINK_PROTOCOL_VERSION,
       workspaceOps: [...(link?.workspaceOps ?? [])],
-      ...(link?.configState ? { clusterConfig: { ...link.configState, current: configCurrent(link) } } : {}),
+      ...(link?.configState ? { clusterConfig: { ...link.configState, owned: link.configOwned, current: configCurrent(link) } } : {}),
     };
   });
 }
@@ -1760,7 +1761,7 @@ export async function masterConfigVersion(): Promise<string> {
 const CLUSTER_CONFIG_OP_MS = 60_000;
 
 /** `clusterConfig` on a host's daemon (v10), waiting at most 60 s; the state it answers is kept like a `config_state` report. */
-export async function clusterConfigOp(hostId: string, args: { action: "apply"; version: string } | { action: "restore" }): Promise<ConfigState> {
+export async function clusterConfigOp(hostId: string, args: { action: "apply"; version: string } | { action: "restore" }): Promise<{ state: ConfigState; owned: boolean }> {
   const link = linkFor(hostId);
   link.configOps += 1;
   let result: unknown;
@@ -1777,7 +1778,7 @@ export async function clusterConfigOp(hostId: string, args: { action: "apply"; v
     throw new HostOpError(502, "host_bad_result", `${labelOf(hostId)} sent an invalid clusterConfig result`);
   }
   noteConfigState(link, state, result.owned);
-  return state;
+  return { state, owned: result.owned };
 }
 
 /**

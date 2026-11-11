@@ -116,8 +116,15 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     },
     runOmp: runOmpCli,
     commandExists,
-    onState: (state, owner) => {
-      if (!stopped) for (const link of links.values()) if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state, owned: owner === link.login.url });
+    // Never called while createClusterConfig runs: `config` is set by then.
+    onState: state => {
+      if (!stopped) for (const link of links.values()) if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state, owned: config.holds(link.login.url) });
+    },
+    // Configured, connected or not: host.json, or the links given on the command line. Unreadable, it may still be.
+    isLinked: url => {
+      let saved: HostLink[];
+      try { saved = readHostLinks(); } catch { return true; }
+      return [...saved, ...(explicit ?? [])].some(login => login.url.replace(/\/+$/, "") === url.replace(/\/+$/, ""));
     },
     log,
   });
@@ -248,7 +255,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         if (up) {
           channels.linkUp(link);
           reportCapacity();
-          if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state: config.state(), owned: config.owner() === link.login.url });
+          if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state: config.state(), owned: config.holds(link.login.url) });
           if (link.version >= 7) link.queue({ type: "channels_changed", channels: channels.listing(link, false) }, "channels");
         } else {
           services.get(link.id)?.onDisconnect();
@@ -407,7 +414,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         if (args.action === "apply" && typeof args.version === "string" && CONFIG_VERSION_RE.test(args.version)) await config.apply(args.version, link.login.url);
         else if (args.action === "restore") await config.restore(link.login.url);
         else throw new HostOpError(400, "invalid_request", "Invalid cluster configuration request");
-        return { state: config.state(), owned: config.owner() === link.login.url };
+        return { state: config.state(), owned: config.holds(link.login.url) };
       default: {
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
         const result = await run.apply(sessionOps, SESSION_OP_PARAMS[op].map(name => args[name]));

@@ -12,8 +12,9 @@ import { CONFIG_LIMITS, isManagedPath, mergeLocalSettings, MIRRORED, type Config
 import { HostOpError } from "./link-protocol";
 
 export interface ConfigState { version: string | null; files: "none" | "current" | "failed"; plugins: "none" | "pending" | "current" | "failed"; error: string | null; missingCommands: string[] }
-/** Every request to the master, its body included, must finish within `fetchMs`; tests shorten it. */
-export const clusterConfigTimings = { fetchMs: 30_000 };
+/** Every request to the master, its body included, must finish within `fetchMs`; a failed plugin step runs again at most
+ * once per `pluginRetryMs` (the hub's sync interval). Tests shorten them. */
+export const clusterConfigTimings = { fetchMs: 30_000, pluginRetryMs: 30_000 };
 
 const API = "/api/hosts/cluster-config/";
 const HASH_RE = /^[0-9a-f]{64}$/;
@@ -166,7 +167,9 @@ export function createClusterConfig(deps: {
   fetch(serverUrl: string, path: string, signal: AbortSignal): Promise<Response>; // authenticated by the caller; path starts with /api/hosts/cluster-config/
   runOmp(args: string[], timeoutMs: number): Promise<string>;
   commandExists(command: string): Promise<boolean>;
-  onState(state: ConfigState, owner: string | null): void;
+  onState(state: ConfigState): void; // also when the server holding the configuration changes: see holds()
+  /** Whether `serverUrl` is one of this daemon's configured links (host.json), connected or not. */
+  isLinked(serverUrl: string): boolean;
   log(message: string): void;
 }) {
   let applied: { version: string; plugins: PluginEntry[] } | null = null;
@@ -175,6 +178,8 @@ export function createClusterConfig(deps: {
   let filesError: string | null = null;
   let pluginsError: string | null = null;
   let missingCommands: string[] = [];
+  /** When the last plugin step started (Date.now()). */
+  let pluginsTried = 0;
   let stopped = false;
   // Restores called and not yet finished: while one is, ensure is refused.
   let restoring = 0;
@@ -188,8 +193,10 @@ export function createClusterConfig(deps: {
   let owner: string | null = null;
 
   const state = (): ConfigState => ({ version: applied?.version ?? null, files, plugins, error: filesError ?? pluginsError, missingCommands: [...missingCommands] });
-  const report = () => deps.onState(state(), owner);
-  const foreign = (serverUrl: string) => (owner !== null && owner !== serverUrl ? `This host runs the cluster configuration of ${owner}; it must leave that cluster first` : null);
+  const report = () => deps.onState(state());
+  // A holder this daemon no longer links to (re-linked at a new address, or removed) holds nothing back: the server asking takes over.
+  const foreign = (serverUrl: string) =>
+    owner !== null && owner !== serverUrl && deps.isLinked(owner) ? `This host runs the cluster configuration of ${owner}; it must leave that cluster first` : null;
   const dirs = () => {
     const cc = join(deps.stateDir(), "cluster-config");
     return { cc, objects: join(cc, "objects"), stage: join(cc, "stage"), trash: join(cc, "trash"), stateFile: join(cc, "state.json"), own: join(deps.stateDir(), "own-config") };
@@ -357,7 +364,9 @@ export function createClusterConfig(deps: {
     const held = foreign(serverUrl);
     if (held) throw new HostOpError(409, "cluster_config_failed", held);
     if (applied?.version === version) {
+      adopt(serverUrl);
       current();
+      retryPlugins();
       return null;
     }
     const d = dirs();
@@ -370,7 +379,9 @@ export function createClusterConfig(deps: {
       if (manifest.version !== applied?.version && !(await download(serverUrl, manifest))) fail("the master's configuration changed during the download");
     }
     if (manifest.version === applied?.version) {
+      adopt(serverUrl);
       current();
+      retryPlugins();
       return null;
     }
     let ownPlugins: PluginEntry[] | null = null;
@@ -388,6 +399,7 @@ export function createClusterConfig(deps: {
       }
     }
     install(manifest, ownPlugins, adopted, serverUrl);
+    adopt(serverUrl);
 
     applied = { version: manifest.version, plugins: manifest.plugins };
     files = "current";
@@ -460,8 +472,35 @@ export function createClusterConfig(deps: {
     return missing;
   }
 
+  /**
+   * The applied configuration is `serverUrl`'s from here on (the holder recorded before is not linked any more, or none
+   * was recorded). Best effort: unrecorded, the next apply records it, and meanwhile the hub hears it is not its own.
+   */
+  function adopt(serverUrl: string) {
+    if (owner === serverUrl) return;
+    try {
+      writeAtomic(join(dirs().own, "server.json"), JSON.stringify(serverUrl));
+    } catch (error) {
+      deps.log(`cluster-config: the backup's server.json cannot be written (${(error as NodeJS.ErrnoException).code ?? "error"})`);
+      return;
+    }
+    owner = serverUrl;
+    report();
+  }
+
+  /** A failed plugin step runs again when its version is asked for, at most once per pluginRetryMs, with nobody waiting for it. */
+  function retryPlugins() {
+    if (plugins !== "failed" || applied === null || Date.now() - pluginsTried < clusterConfigTimings.pluginRetryMs) return;
+    const target = applied.plugins;
+    plugins = "pending";
+    pluginsError = null;
+    report();
+    enqueue(() => syncPlugins(target)).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
+  }
+
   /** Step 7, in the queue after the files and without the caller waiting for it. */
   async function syncPlugins(target: PluginEntry[]) {
+    pluginsTried = Date.now();
     const failed = await reconcile(target);
     const missing = await missingMcpCommands().catch(() => missingCommands);
     if (stopped) return; // cut short: still pending, and run again from state.json at the next start
@@ -615,8 +654,10 @@ export function createClusterConfig(deps: {
     if (left.has(serverUrl)) return refuse("This host has left the cluster");
     const held = foreign(serverUrl);
     if (held) return refuse(held);
-    if (applied?.version === version) {
+    // Only for the recorded holder: another one adopts it first, in the queue.
+    if (applied?.version === version && owner === serverUrl) {
       current();
+      retryPlugins();
       return Promise.resolve();
     }
     const key = JSON.stringify([serverUrl, version]);
@@ -657,8 +698,11 @@ export function createClusterConfig(deps: {
       });
     },
     state,
-    /** The server whose configuration this host holds, or null. */
-    owner: () => owner,
+    /**
+     * Whether `serverUrl` decides over the configuration this host holds: it is the recorded holder, or that holder is no
+     * longer linked, so its apply takes the host over and its restore puts the member's own back.
+     */
+    holds: (serverUrl: string) => owner !== null && foreign(serverUrl) === null,
     async stop(): Promise<void> {
       stopped = true;
       halt.abort();

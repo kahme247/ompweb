@@ -3,7 +3,7 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, ClusterError, clusterJoinBlock, isClusterMember, joinCluster, leaveCluster, type HostProjectFacts } from "@/lib/hosts/cluster";
 import type { Host } from "@/lib/hosts/host";
-import { clusterConfigOp, getHost, getHostLinkProtocol, masterConfigVersion, notifyHostsChange } from "@/lib/hosts/hub";
+import { clusterConfigOp, getHost, getHostLinkProtocol, listHosts, masterConfigVersion, notifyHostsChange } from "@/lib/hosts/hub";
 import { CLUSTER_CONFIG_SINCE_VERSION, HostOpError } from "@/lib/hosts/link-protocol";
 import { loadPools, poolProjectBindings, savePools, validatePools, type HostPool, type PoolMember, type PoolProject } from "@/lib/hosts/pools";
 import { LOCAL_HOST_ID, loadHosts } from "@/lib/hosts/registry";
@@ -107,6 +107,11 @@ export async function PUT(request: Request, { params }: Context) {
     const addLocal = !isClusterMember(pools, LOCAL_HOST_ID);
     const joining = addLocal ? [getHost(LOCAL_HOST_ID), host] : [host];
     joining.forEach(requireReady);
+    // One cluster per host: its daemon would refuse this server's configuration, and every session start with it.
+    const held = listHosts().find((row) => row.id === id)?.clusterConfig;
+    if (held && held.version !== null && !held.owned) {
+      return fail(`${host.label} runs another server's cluster configuration; it must leave that cluster first`, "host_in_other_cluster", 409);
+    }
     // The host round trips come first. pools.json is then read again, joined and saved with no await between, so a change
     // made meanwhile (a leave, another join, a pool edit) is kept.
     const gathered: { member: { hostId: string; projectsRoot: string }; facts: HostProjectFacts[] }[] = [];
@@ -164,7 +169,10 @@ export async function DELETE(request: Request, { params }: Context) {
       restoreError = `Update ompweb on ${getHost(id)?.label ?? id} to put its own omp configuration back`;
     } else {
       try {
-        await clusterConfigOp(id, { action: "restore" });
+        const answer = await clusterConfigOp(id, { action: "restore" });
+        // Still holding a version that is not this server's: one this server cannot put back (another server's, or this
+        // server's recorded at an address the host still links to).
+        if (answer.state.version !== null && !answer.owned) restoreError = `${getHost(id)?.label ?? id} still runs a cluster configuration this server cannot put back`;
       } catch (error) {
         restoreError = error instanceof Error ? error.message : String(error);
       }
