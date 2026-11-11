@@ -528,15 +528,16 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `lib/session-resume.ts`), once, after the orphan's exit.
 - **Proxy exclusion.** The `proxy.ts` gate lets exactly `/api/hosts/link` through
   (the `UNGATED` pattern names that path, no subpaths) and the prefix
-  `/api/hosts/broker/` (below): the daemon has no
+  `/api/hosts/broker/v1/` (below): the daemon has no
   session cookie, so it authenticates with its bearer token instead. The hub
   verifies the `Authorization: Bearer <host token>` header before the upgrade
   (401 unknown token, 503 unreadable `hosts.json` or frozen server). Keep
-  `/api/hosts` itself behind the proxy. `/api/hosts/broker/` is the second
-  ungated path (the `UNGATED` pattern names that prefix): the daemon
-  authenticates there with its host token too. A reverse proxy must pass it
-  without its own authentication, without response buffering (the snapshot
-  stream stays open) and without redirects.
+  `/api/hosts` itself behind the proxy. `/api/hosts/broker/v1/` is the second
+  ungated path (the `UNGATED` pattern names that prefix; anything else under
+  `/api/hosts/broker/` stays gated): the daemon authenticates there with its
+  host token too. A reverse proxy must pass it without its own authentication,
+  without response buffering (the snapshot stream stays open) and without
+  redirects.
 - **Shared credentials** (`docs/specs/2026-11-10-shared-credentials-design.md`).
   A linked host's `shareCredentials` (default off; `local` never has it) makes the
   omp processes its daemon spawns use the credentials of the server machine
@@ -559,6 +560,12 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     host on a v4–v8 daemon, and the daemon refuses to spawn on an omp older than
     15.13.1. Starting a session is refused; it never uses the host's own stored
     logins. Joining a running session is never refused.
+  - **Which server decides.** The server whose `open` starts a process decides
+    its credentials, an advisor replacement included (`withCredentials` in
+    `lib/hosts/daemon-channels.ts`); a server that joins a running process does
+    not change them. The resume manifest keeps the server URL
+    (`launch.credentialsServer`). A launch whose link is no longer in `host.json`
+    is refused with 409 `credentials_link_gone`, on resume as on a new start.
   - **Scope.** The host can read current access tokens and stored API keys;
     refresh tokens stay on the server. Not shared: `models.yml` custom providers,
     environment-variable API keys, omp settings.
@@ -1593,7 +1600,7 @@ during the wait.
 
 ### Auth and model config
 - Auth flows go through RPC commands (`get_login_providers`, `login`, `get_logout_accounts`, `logout`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which omp-web never touches directly. `/api/auth/accounts/[provider]` lists stored accounts and removes one by `credentialId`; omp without those commands reports `supported: false` and the UI falls back to the read-only `omp usage` account list.
-- Linked hosts with `shareCredentials` read this machine's credentials through `lib/omp/auth-broker.ts`, the `omp auth-broker serve` child (the token comes from `omp auth-broker token` and stays in the server process; a refused token stops the child and the next request starts a new one). The broker reloads the store on every snapshot, so a login or logout in Settings reaches the hosts.
+- Linked hosts with `shareCredentials` read this machine's credentials through `lib/omp/auth-broker.ts`, the `omp auth-broker serve` child (the token comes from `omp auth-broker token` and stays in the server process; a refused token stops the child and the next request starts a new one). The broker reloads the store on every snapshot, so a login or logout in Settings reaches every omp process a sharing host starts afterwards; a running process picks it up the next time it is used (omp stops listening for updates after 20 seconds without activity and resumes on its next use) and keeps the access tokens and API keys it has already loaded until it ends.
 - The Models panel reads and writes `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback).
 - API-key status endpoints must never return the raw key.
 

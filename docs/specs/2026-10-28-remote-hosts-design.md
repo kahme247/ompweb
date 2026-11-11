@@ -8,8 +8,10 @@ without agents using SSH between them. An agent in one session can also start a
 session on another machine.
 
 Each machine keeps its own omp install, agent directory (`~/.omp/agent`),
-sessions and credentials. Nothing is shared between machines; omp-web only
-routes.
+sessions and credentials, except that a host with credential sharing turned on
+uses the web server's provider logins
+(`docs/specs/2026-11-10-shared-credentials-design.md`). Nothing else is shared
+between machines; omp-web only routes.
 
 ## Delivery
 
