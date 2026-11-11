@@ -71,8 +71,7 @@ async function main(argv: string[]): Promise<number> {
   // Login/logout need none of the daemon, which jiti would otherwise transpile on every run.
   const { runHostDaemon } = await import("./daemon");
   let daemon: HostDaemon | undefined;
-  // Windows ordinary standalone hosts retain their existing startup path.
-  const endpoint = process.platform === "win32" ? null : await createHostControlServer((command) => {
+  const endpoint = await createHostControlServer((command) => {
     if (!daemon) throw new Error("The host daemon is starting");
     return daemon.control(command);
   });

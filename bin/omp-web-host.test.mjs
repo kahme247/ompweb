@@ -195,22 +195,36 @@ test("CLI startup failure cleans its endpoint without dialing or needing credent
   assert.equal(existsSync(hostControlPath(f.agentDir)), false);
 });
 
-test("CLI controls explicitly reject Windows while ordinary host startup stays available", { skip: process.platform !== "win32" && "Windows-only control-command contract" }, async (t) => {
-  const scratch = mkdtempSync(join(tmpdir(), "omp-web-host-control-win-"));
-  t.after(() => rmSync(scratch, { recursive: true, force: true }));
-  const env = { ...process.env, HOME: scratch, USERPROFILE: scratch, PI_CODING_AGENT_DIR: join(scratch, "agent") };
-  for (const command of ["status", "drain", "resume"]) {
-    const result = await hostCommand(env, command);
-    assert.equal(result.code, 1);
-    assert.match(result.stderr, /Windows.*unsupported|not supported.*Windows|Unix.only/i);
+test("Windows: status/drain/resume reach the real daemon over its pipe; a duplicate is refused and a crash leaves no live control", { skip: process.platform !== "win32" && "Windows named-pipe CLI control" }, async (t) => {
+  const f = controlFixture(t);
+  const daemon = launchHost(t, f.env);
+  let status = await controlReady(f.env);
+  assert.equal(status.pid, daemon.child.pid);
+  assert.equal(status.drained, false);
+  for (const [command, drained] of [["drain", true], ["status", true], ["resume", false]]) {
+    const answer = await hostCommand(f.env, command);
+    assert.equal(answer.code, 0, answer.stderr);
+    assert.equal(JSON.parse(answer.stdout).drained, drained);
   }
+  const duplicate = await hostCommand(f.env);
+  assert.equal(duplicate.code, 1, duplicate.stderr);
+  assert.match(duplicate.stderr, /already running/);
+  // Windows terminates without running handlers: the descriptor stays, but nothing answers on its pipe.
+  daemon.child.kill();
+  await daemon.closed;
+  assert.equal((await hostCommand(f.env, "status")).code, 1, "status must not start a replacement daemon");
+  const restarted = launchHost(t, f.env);
+  status = await controlReady(f.env);
+  assert.equal(status.pid, restarted.child.pid, "a stale descriptor is replaced by the next daemon");
 });
 
-test("worker maintenance startup is drained before linking and can be explicitly resumed", unixControl, async (t) => {
+test("worker maintenance startup is drained before linking and can be explicitly resumed", async (t) => {
   const f = controlFixture(t);
   const daemon = launchHost(t, { ...f.env, OMP_WEB_HOST_DRAINED: "1" });
-  const { hostControlPath } = await import("../lib/hosts/host-control.ts");
-  t.after(() => rmSync(join(hostControlPath(f.agentDir), ".."), { recursive: true, force: true }));
+  if (process.platform !== "win32") {
+    const { hostControlPath } = await import("../lib/hosts/host-control.ts");
+    t.after(() => rmSync(join(hostControlPath(f.agentDir), ".."), { recursive: true, force: true }));
+  }
   const status = await controlReady(f.env);
   assert.equal(status.pid, daemon.child.pid);
   assert.equal(status.drained, true);

@@ -1,7 +1,10 @@
 // Private local maintenance on the existing host process; no web credentials or TCP listener.
-import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, linkSync, lstatSync, mkdirSync, realpathSync, unlinkSync, type Stats } from "node:fs";
-import { createConnection, createServer } from "node:net";
+// Unix: an owned 0600 socket in a 0700 directory. Windows: a named pipe, whose default DACL lets other
+// local users connect and whose name anyone may claim first, so the pipe name is random per start and every
+// request carries a per-start token; both live only in a descriptor file in this user's agent directory.
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, linkSync, lstatSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
+import { createConnection, createServer, type Server } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { getAgentDir } from "../omp/paths";
 
@@ -19,6 +22,41 @@ const MAX_MESSAGE = 4096;
 const errno = (error: unknown) => (error as NodeJS.ErrnoException)?.code;
 const unix = () => { if (process.platform === "win32") throw new Error("Local host control is Unix-only; it is not supported on Windows"); };
 const command = (value: unknown): value is HostControlCommand => value === "status" || value === "drain" || value === "resume";
+const PIPE_RE = /^\\\\\.\\pipe\\ompweb-host-[0-9a-f]{32}$/;
+const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+const digest = (value: string) => createHash("sha256").update(value).digest();
+
+/** The Windows endpoint descriptor: the current pipe name and token, in this user's agent directory. */
+export function hostControlDescriptorPath(agentDir = getAgentDir()): string {
+  return join(agentDir, "omp-web", "host-control.json");
+}
+
+function readDescriptor(file: string): { pipe: string; token: string } | null {
+  let text: string;
+  try {
+    const stat = lstatSync(file);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Unsafe host control descriptor: not a regular file");
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if (errno(error) === "ENOENT") return null;
+    throw error;
+  }
+  const value: unknown = JSON.parse(text);
+  if (!value || typeof value !== "object" || !("pipe" in value) || !("token" in value)
+    || typeof value.pipe !== "string" || typeof value.token !== "string" || !PIPE_RE.test(value.pipe) || !TOKEN_RE.test(value.token)) {
+    throw new Error("Invalid host control descriptor");
+  }
+  return { pipe: value.pipe, token: value.token };
+}
+
+/** True when something answers on `pipe`; a missing pipe means its daemon is gone. */
+function answering(pipe: string): Promise<boolean> {
+  const { promise, resolve, reject } = Promise.withResolvers<boolean>();
+  const socket = createConnection(pipe);
+  socket.once("connect", () => { socket.destroy(); resolve(true); });
+  socket.once("error", (error) => errno(error) === "ENOENT" ? resolve(false) : reject(error));
+  return promise;
+}
 
 /** Resolve existing prefixes so /var and /private/var name the same agent, even before it is created. */
 function canonical(path: string): string {
@@ -65,20 +103,9 @@ async function refused(path: string): Promise<void> {
   });
 }
 
-export async function createHostControlServer(control: (command: HostControlCommand) => HostControlStatus, agentDir = getAgentDir()): Promise<{ path: string; close(): Promise<void> }> {
-  const path = hostControlPath(agentDir);
-  const dir = dirname(path);
-  try { mkdirSync(dir, { mode: 0o700 }); } catch (error) { if (errno(error) !== "EEXIST") throw error; }
-  owned(dir, "directory", 0o700);
-  try {
-    const stale = owned(path, "socket", 0o600);
-    await refused(path);
-    const current = owned(path, "socket", 0o600);
-    if (!same(stale, current)) throw new Error("Host control endpoint changed during stale recovery");
-    unlinkSync(path);
-  } catch (error) { if (errno(error) !== "ENOENT") throw error; }
-
-  const server = createServer((socket) => {
+/** One newline-terminated JSON request, one reply. With `token`, the request must carry exactly that token. */
+function controlServer(control: (command: HostControlCommand) => HostControlStatus, token?: string): Server {
+  return createServer((socket) => {
     let input = "";
     let answered = false;
     socket.setTimeout(3000, () => socket.destroy());
@@ -91,13 +118,78 @@ export async function createHostControlServer(control: (command: HostControlComm
       answered = true;
       try {
         const request: unknown = JSON.parse(input.trim());
-        if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).length !== 1 || !("command" in request) || !command(request.command)) throw new Error("Invalid host control command");
+        if (!request || typeof request !== "object" || Array.isArray(request) || !("command" in request) || !command(request.command)
+          || Object.keys(request).length !== (token === undefined ? 1 : 2)) throw new Error("Invalid host control command");
+        if (token !== undefined && !("token" in request && typeof request.token === "string" && timingSafeEqual(digest(request.token), digest(token)))) {
+          throw new Error("Invalid host control token");
+        }
         socket.end(JSON.stringify({ ok: true, status: control(request.command) }) + "\n");
       } catch (error) {
         socket.end(JSON.stringify({ ok: false, error: { code: errno(error) || "invalid_control", message: error instanceof Error ? error.message : "Host control failed" } }) + "\n");
       }
     });
   });
+}
+
+async function createWindowsHostControlServer(control: (command: HostControlCommand) => HostControlStatus, agentDir: string): Promise<{ path: string; close(): Promise<void> }> {
+  const file = hostControlDescriptorPath(agentDir);
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const previous = readDescriptor(file);
+  if (previous) {
+    if (await answering(previous.pipe)) throw new Error("A host daemon is already running");
+    // Remove only the stale descriptor just inspected; another starter's replacement is never touched.
+    if (readDescriptor(file)?.token === previous.token) unlinkSync(file);
+  }
+  const pipe = `\\\\.\\pipe\\ompweb-host-${randomBytes(16).toString("hex")}`;
+  const token = randomBytes(32).toString("base64url");
+  const server = controlServer(control, token);
+  const listened = Promise.withResolvers<void>();
+  server.once("error", listened.reject);
+  server.listen(pipe, listened.resolve);
+  await listened.promise;
+  // Publish by exclusive hard link so readers never see a partial file and two starters cannot both win.
+  const temporary = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify({ pipe, token }) + "\n", { flag: "wx", mode: 0o600 });
+    try { linkSync(temporary, file); }
+    catch (error) { throw errno(error) === "EEXIST" ? new Error("A host daemon is already running") : error; }
+  } catch (error) {
+    const closed = Promise.withResolvers<void>();
+    server.close(() => closed.resolve());
+    await closed.promise;
+    throw error;
+  } finally {
+    try { unlinkSync(temporary); } catch (error) { if (errno(error) !== "ENOENT") throw error; }
+  }
+  let closing: Promise<void> | undefined;
+  return {
+    path: pipe,
+    close: () => {
+      if (closing) return closing;
+      const { promise, resolve, reject } = Promise.withResolvers<void>();
+      closing = promise;
+      try { if (readDescriptor(file)?.token === token) unlinkSync(file); } catch (error) { if (errno(error) !== "ENOENT") reject(error); }
+      server.close(() => resolve());
+      return promise;
+    },
+  };
+}
+
+export async function createHostControlServer(control: (command: HostControlCommand) => HostControlStatus, agentDir = getAgentDir()): Promise<{ path: string; close(): Promise<void> }> {
+  if (process.platform === "win32") return createWindowsHostControlServer(control, agentDir);
+  const path = hostControlPath(agentDir);
+  const dir = dirname(path);
+  try { mkdirSync(dir, { mode: 0o700 }); } catch (error) { if (errno(error) !== "EEXIST") throw error; }
+  owned(dir, "directory", 0o700);
+  try {
+    const stale = owned(path, "socket", 0o600);
+    await refused(path);
+    const current = owned(path, "socket", 0o600);
+    if (!same(stale, current)) throw new Error("Host control endpoint changed during stale recovery");
+    unlinkSync(path);
+  } catch (error) { if (errno(error) !== "ENOENT") throw error; }
+
+  const server = controlServer(control);
   // Bind privately, then publish an exclusive hard link. libuv unlinks its bind name on close;
   // it must never own the public name, which another process could replace before cleanup.
   const temporary = join(dir, `bind-${randomBytes(6).toString("hex")}.sock`);
@@ -124,15 +216,26 @@ export async function createHostControlServer(control: (command: HostControlComm
 
 export async function requestHostControl(value: HostControlCommand, agentDir = getAgentDir()): Promise<HostControlStatus> {
   if (!command(value)) throw new Error("Invalid host control command");
-  const path = hostControlPath(agentDir);
-  owned(dirname(path), "directory", 0o700);
-  owned(path, "socket", 0o600);
+  let path: string;
+  let request: string;
+  if (process.platform === "win32") {
+    // Only a pipe named in this user's descriptor; never a guessed or caller-supplied one.
+    const descriptor = readDescriptor(hostControlDescriptorPath(agentDir));
+    if (!descriptor) throw Object.assign(new Error("No host daemon is running for this agent directory"), { code: "ENOENT" });
+    path = descriptor.pipe;
+    request = JSON.stringify({ command: value, token: descriptor.token });
+  } else {
+    path = hostControlPath(agentDir);
+    owned(dirname(path), "directory", 0o700);
+    owned(path, "socket", 0o600);
+    request = JSON.stringify({ command: value });
+  }
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
     let text = "";
     socket.setTimeout(3000, () => socket.destroy(new Error("Host control response timed out")));
     socket.once("error", reject);
-    socket.once("connect", () => socket.write(JSON.stringify({ command: value }) + "\n"));
+    socket.once("connect", () => socket.write(request + "\n"));
     socket.on("data", (bytes) => {
       text += bytes.toString("utf8");
       if (Buffer.byteLength(text) > MAX_MESSAGE) socket.destroy(new Error("Host control response is too large"));
