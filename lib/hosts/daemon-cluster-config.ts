@@ -12,6 +12,8 @@ import { CONFIG_LIMITS, isManagedPath, mergeLocalSettings, MIRRORED, type Config
 import { HostOpError } from "./link-protocol";
 
 export interface ConfigState { version: string | null; files: "none" | "current" | "failed"; plugins: "none" | "pending" | "current" | "failed"; error: string | null; missingCommands: string[] }
+/** Every request to the master, its body included, must finish within `fetchMs`; tests shorten it. */
+export const clusterConfigTimings = { fetchMs: 30_000 };
 
 const API = "/api/hosts/cluster-config/";
 const HASH_RE = /^[0-9a-f]{64}$/;
@@ -161,10 +163,10 @@ function ownSettings(dir: string): { path: string; yaml: string } | null {
 export function createClusterConfig(deps: {
   roots(): Record<ConfigRoot, string>;
   stateDir(): string; // <agent dir>/omp-web
-  fetch(serverUrl: string, path: string): Promise<Response>; // authenticated by the caller; path starts with /api/hosts/cluster-config/
+  fetch(serverUrl: string, path: string, signal: AbortSignal): Promise<Response>; // authenticated by the caller; path starts with /api/hosts/cluster-config/
   runOmp(args: string[], timeoutMs: number): Promise<string>;
   commandExists(command: string): Promise<boolean>;
-  onState(state: ConfigState): void;
+  onState(state: ConfigState, owner: string | null): void;
   log(message: string): void;
 }) {
   let applied: { version: string; plugins: PluginEntry[] } | null = null;
@@ -178,9 +180,16 @@ export function createClusterConfig(deps: {
   let restoring = 0;
   let queue: Promise<unknown> = Promise.resolve();
   const inflight = new Map<string, Promise<void>>();
+  /** Aborts every request to the master at stop(). */
+  const halt = new AbortController();
+  /** Servers whose leave (`restore`) came after their last `apply`: a start one of them sent before it never applies again. */
+  const left = new Set<string>();
+  /** The server whose configuration this host holds, from its first apply until its restore (`own-config/server.json`): one cluster per host. */
+  let owner: string | null = null;
 
   const state = (): ConfigState => ({ version: applied?.version ?? null, files, plugins, error: filesError ?? pluginsError, missingCommands: [...missingCommands] });
-  const report = () => deps.onState(state());
+  const report = () => deps.onState(state(), owner);
+  const foreign = (serverUrl: string) => (owner !== null && owner !== serverUrl ? `This host runs the cluster configuration of ${owner}; it must leave that cluster first` : null);
   const dirs = () => {
     const cc = join(deps.stateDir(), "cluster-config");
     return { cc, objects: join(cc, "objects"), stage: join(cc, "stage"), trash: join(cc, "trash"), stateFile: join(cc, "state.json"), own: join(deps.stateDir(), "own-config") };
@@ -211,13 +220,25 @@ export function createClusterConfig(deps: {
     report();
   }
 
-  async function fetchManifest(serverUrl: string): Promise<ConfigManifest> {
-    const res = await deps.fetch(serverUrl, `${API}manifest`);
-    if (!res.ok) {
-      await res.body?.cancel();
-      fail(`the master answered ${res.status} for the manifest`);
+  /** A request to the master: answered, body included, within clusterConfigTimings.fetchMs, and cut short by stop(). */
+  async function fromMaster<T>(serverUrl: string, path: string, what: string, read: (res: Response) => Promise<T>): Promise<T> {
+    const signal = AbortSignal.any([halt.signal, AbortSignal.timeout(clusterConfigTimings.fetchMs)]);
+    try {
+      return await read(await deps.fetch(serverUrl, path, signal));
+    } catch (error) {
+      if (!signal.aborted) throw error;
+      return fail(stopped ? "the host daemon is stopping" : `the master did not send ${what} within ${clusterConfigTimings.fetchMs / 1000} s`);
     }
-    const body = await readBody(res, MANIFEST_BYTES, `the manifest is longer than ${MANIFEST_BYTES} bytes`);
+  }
+
+  async function fetchManifest(serverUrl: string): Promise<ConfigManifest> {
+    const body = await fromMaster(serverUrl, `${API}manifest`, "the manifest", async (res) => {
+      if (!res.ok) {
+        await res.body?.cancel();
+        fail(`the master answered ${res.status} for the manifest`);
+      }
+      return readBody(res, MANIFEST_BYTES, `the manifest is longer than ${MANIFEST_BYTES} bytes`);
+    });
     return checkManifest(parseJson(body.toString("utf8"), "the manifest"));
   }
 
@@ -225,15 +246,15 @@ export function createClusterConfig(deps: {
   async function download(serverUrl: string, manifest: ConfigManifest): Promise<boolean> {
     const { objects } = dirs();
     for (const file of manifest.files) {
+      if (stopped) fail("the host daemon is stopping");
       const target = join(objects, file.hash);
       if (exists(target)) continue;
-      const res = await deps.fetch(serverUrl, `${API}file/${file.hash}`);
-      if (!res.ok) {
+      const bytes = await fromMaster(serverUrl, `${API}file/${file.hash}`, file.path, async (res) => {
+        if (res.ok) return readBody(res, file.size, `${file.path} is longer than the manifest says`);
         await res.body?.cancel();
-        if (res.status === 404) return false;
-        fail(`the master answered ${res.status} for ${file.path}`);
-      }
-      const bytes = await readBody(res, file.size, `${file.path} is longer than the manifest says`);
+        return res.status === 404 ? null : fail(`the master answered ${res.status} for ${file.path}`);
+      });
+      if (bytes === null) return false;
       if (createHash("sha256").update(bytes).digest("hex") !== file.hash) fail(`${file.path} does not match its hash`);
       writeAtomic(target, bytes);
     }
@@ -250,9 +271,10 @@ export function createClusterConfig(deps: {
    * version to `trash/`. The backup, the swaps, the agent environment and `state.json` are one transaction: on any
    * failure everything moved is put back, so the member keeps exactly what it had. A backup without `state.json` (a
    * stop in the middle, or a failure that could not put everything back) is put back before the next apply.
-   * `adopted`: the member's plugin list came from a backup that kept it, and outlives a rollback.
+   * `adopted`: the member's plugin list came from a backup that kept it, and outlives a rollback. `serverUrl`: the
+   * server whose configuration a first apply takes.
    */
-  function install(manifest: ConfigManifest, ownPlugins: PluginEntry[] | null, adopted: boolean) {
+  function install(manifest: ConfigManifest, ownPlugins: PluginEntry[] | null, adopted: boolean, serverUrl: string) {
     const d = dirs();
     const roots = deps.roots();
     const first = ownPlugins !== null;
@@ -280,6 +302,8 @@ export function createClusterConfig(deps: {
         // absent.json last: once it exists, entries may have moved, and a restore puts them back.
         writeAtomic(join(d.own, "plugins.json"), JSON.stringify(ownPlugins));
         writeAtomic(join(d.own, "agent-env.json"), JSON.stringify(previousEnv));
+        writeAtomic(join(d.own, "server.json"), JSON.stringify(serverUrl));
+        owner = serverUrl;
         // Absent entries, and their missing parents, are noted: a restore removes them.
         const absent: [ConfigRoot, string][] = [];
         for (const entry of ENTRIES) {
@@ -329,6 +353,9 @@ export function createClusterConfig(deps: {
   /** Steps 1-6. Answers the plugin list to bring in line, or null when nothing new was applied. */
   async function applyFiles(version: string, serverUrl: string): Promise<PluginEntry[] | null> {
     if (stopped) fail("the host daemon is stopping");
+    // Another server's first apply came earlier in the queue. Not reported: the state this host reports is that server's.
+    const held = foreign(serverUrl);
+    if (held) throw new HostOpError(409, "cluster_config_failed", held);
     if (applied?.version === version) {
       current();
       return null;
@@ -360,7 +387,7 @@ export function createClusterConfig(deps: {
         }
       }
     }
-    install(manifest, ownPlugins, adopted);
+    install(manifest, ownPlugins, adopted, serverUrl);
 
     applied = { version: manifest.version, plugins: manifest.plugins };
     files = "current";
@@ -463,10 +490,12 @@ export function createClusterConfig(deps: {
     return list as PluginEntry[];
   }
 
-  /** Empties the backup, `absent.json` first (without it nothing counts as moved); `keepPlugins` keeps its plugin list. */
+  /** Empties the backup, `absent.json` first (without it nothing counts as moved), then the server it was taken for; `keepPlugins` keeps its plugin list. */
   function clearBackup(keepPlugins: boolean) {
     const { own } = dirs();
     rmSync(join(own, "absent.json"), { force: true });
+    rmSync(join(own, "server.json"), { force: true });
+    owner = null;
     if (!keepPlugins) removeAll(own);
     else if (exists(own)) for (const name of readdirSync(own)) if (name !== "plugins.json") removeAll(join(own, name));
   }
@@ -505,12 +534,15 @@ export function createClusterConfig(deps: {
   }
 
   /**
-   * The member's own files, then its plugins: a leave, or (`recovery`) the restore at the start that finishes an apply
-   * or a restore cut short. A plugin step cut short by a stop keeps the backup's plugin list.
+   * The member's own files, then its plugins: a leave of `leaving`, or (null) the restore at the start that finishes an
+   * apply or a restore cut short. A plugin step cut short by a stop keeps the backup's plugin list.
    */
-  async function restoreNow(recovery: boolean) {
+  async function restoreNow(leaving: string | null) {
+    const recovery = leaving === null;
     const d = dirs();
     if (!exists(d.own)) return;
+    // Another server's configuration: not this server's to put back.
+    if (leaving !== null && foreign(leaving)) return;
     if (stopped) throw failure(new Error("the host daemon is stopping"), "restoring");
     let ownPlugins: PluginEntry[] | null;
     try {
@@ -544,8 +576,14 @@ export function createClusterConfig(deps: {
     report();
   }
 
-  // At the start: a version applied before reruns its plugin job, which a stop may have cut short; a backup without
-  // one (an apply or a restore stopped half-way) is put back.
+  // At the start: the server whose configuration the backup was taken for; a version applied before reruns its plugin
+  // job, which a stop may have cut short; a backup without one (an apply or a restore stopped half-way) is put back.
+  try {
+    const value = parseJson(readFileSync(join(dirs().own, "server.json"), "utf8"), "the backup's server.json");
+    owner = typeof value === "string" ? value : fail("the backup's server.json is malformed");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") deps.log(`cluster-config: ${messageOf(error)}; no server counts as holding this host's configuration`);
+  }
   let saved: unknown = null;
   try {
     saved = JSON.parse(readFileSync(dirs().stateFile, "utf8"));
@@ -560,48 +598,70 @@ export function createClusterConfig(deps: {
     enqueue(() => syncPlugins(target)).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
   } else if (exists(dirs().own)) {
     plugins = "pending";
-    enqueue(() => restoreNow(true)).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
+    enqueue(() => restoreNow(null)).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
+  }
+
+  const refuse = (message: string) => Promise.reject(new HostOpError(409, "cluster_config_failed", message));
+
+  /**
+   * A session start's version, from the server `serverUrl` that opens it: resolves once the files of `version` are
+   * applied; rejects with HostOpError(409, "cluster_config_failed", reason) otherwise. Concurrent calls share one apply.
+   * Refused after that server's restore until its next apply, and while another server's configuration is held.
+   */
+  function ensure(version: string, serverUrl: string): Promise<void> {
+    // A leave in progress is final: re-applying after it would put the master's files back.
+    if (restoring > 0) return refuse("This host is leaving the cluster");
+    // A start the server sent before its leave, still on its way here.
+    if (left.has(serverUrl)) return refuse("This host has left the cluster");
+    const held = foreign(serverUrl);
+    if (held) return refuse(held);
+    if (applied?.version === version) {
+      current();
+      return Promise.resolve();
+    }
+    const key = JSON.stringify([serverUrl, version]);
+    const shared = inflight.get(key);
+    if (shared) return shared;
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    inflight.set(key, promise);
+    enqueue(async () => {
+      let target: PluginEntry[] | null;
+      try {
+        target = await applyFiles(version, serverUrl);
+      } catch (error) {
+        reject(failure(error, "applying"));
+        return;
+      } finally {
+        if (inflight.get(key) === promise) inflight.delete(key);
+      }
+      resolve();
+      // Still in the queue: a later restore waits for the plugins, the caller does not.
+      if (target) await syncPlugins(target);
+    }).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
+    return promise;
   }
 
   return {
-    /** Resolves once the files of `version` are applied; rejects with HostOpError(409, "cluster_config_failed", reason) otherwise. Concurrent calls share one apply. */
-    ensure(version: string, serverUrl: string): Promise<void> {
-      // A leave in progress is final: re-applying after it would put the master's files back.
-      if (restoring > 0) return Promise.reject(new HostOpError(409, "cluster_config_failed", "This host is leaving the cluster"));
-      if (applied?.version === version) {
-        current();
-        return Promise.resolve();
-      }
-      const shared = inflight.get(version);
-      if (shared) return shared;
-      const { promise, resolve, reject } = Promise.withResolvers<void>();
-      inflight.set(version, promise);
-      enqueue(async () => {
-        let target: PluginEntry[] | null;
-        try {
-          target = await applyFiles(version, serverUrl);
-        } catch (error) {
-          reject(failure(error, "applying"));
-          return;
-        } finally {
-          if (inflight.get(version) === promise) inflight.delete(version);
-        }
-        resolve();
-        // Still in the queue: a later restore waits for the plugins, the caller does not.
-        if (target) await syncPlugins(target);
-      }).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
-      return promise;
+    ensure,
+    /** The server's own request (`clusterConfig apply`): this host is its member again, so its starts apply again. */
+    apply(version: string, serverUrl: string): Promise<void> {
+      left.delete(serverUrl);
+      return ensure(version, serverUrl);
     },
-    /** Leaving the cluster: put the member's own configuration back. */
-    restore(): Promise<void> {
+    /** `serverUrl` no longer counts this host as a member: its configuration gives way to the member's own; another server's stays. */
+    restore(serverUrl: string): Promise<void> {
+      left.add(serverUrl);
       restoring++;
-      return enqueue(() => restoreNow(false)).finally(() => {
+      return enqueue(() => restoreNow(serverUrl)).finally(() => {
         restoring--;
       });
     },
     state,
+    /** The server whose configuration this host holds, or null. */
+    owner: () => owner,
     async stop(): Promise<void> {
       stopped = true;
+      halt.abort();
       await queue;
     },
   };

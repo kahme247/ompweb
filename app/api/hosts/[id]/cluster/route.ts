@@ -157,9 +157,12 @@ export async function DELETE(request: Request, { params }: Context) {
     savePools(pools);
     if (loadHosts().find((record) => record.id === id)?.shareCredentials !== true) abortBrokerRequests(id);
     notifyHostsChange();
-    // After the save, so no apply follows it (spec K6). A daemon before protocol 10 never applied anything.
+    // After the save, so no apply follows it (spec K6). A host that cannot take it now (offline, timed out, or a daemon
+    // older than protocol 10) gets it from the sync once it reports holding this server's configuration.
     let restoreError: string | undefined;
-    if ((getHostLinkProtocol(id) ?? CLUSTER_CONFIG_SINCE_VERSION) >= CLUSTER_CONFIG_SINCE_VERSION) {
+    if ((getHostLinkProtocol(id) ?? CLUSTER_CONFIG_SINCE_VERSION) < CLUSTER_CONFIG_SINCE_VERSION) {
+      restoreError = `Update ompweb on ${getHost(id)?.label ?? id} to put its own omp configuration back`;
+    } else {
       try {
         await clusterConfigOp(id, { action: "restore" });
       } catch (error) {

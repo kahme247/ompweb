@@ -1,17 +1,18 @@
 // Pure computation of cluster membership (spec M3, M6): no disk, network or clock.
-// Browser-importable: only types from ./pools (it loads node:fs), no node:* modules.
+// Browser-importable: only types from ./pools (it loads node:fs), no node:* modules; ./link-protocol is pure.
 import { comparableProjectPath } from "../comparable-path";
 import { cloneDirectoryName, repositoryKey } from "../git-clone";
 import { LOCAL_HOST_ID } from "../project-ordering";
 import type { ManagedProject } from "../types";
 import type { HostStatus } from "./host";
+import { CLUSTER_CONFIG_SINCE_VERSION } from "./link-protocol";
 import type { HostPool, PoolProject } from "./pools";
 
 export const CLUSTER_ID = "cluster";
 export const CLUSTER_LABEL = "Cluster";
 export const CLUSTER_PROJECTS_DIR = "ompweb-cluster";
-/** The first link protocol whose daemons can be cluster members (10: they apply the master's configuration); they also need the `gitOrigins` operation. */
-export const CLUSTER_SINCE_VERSION = 10;
+/** The first link protocol whose daemons can be cluster members (they apply the master's configuration); they also need the `gitOrigins` operation. */
+export const CLUSTER_SINCE_VERSION = CLUSTER_CONFIG_SINCE_VERSION;
 
 /**
  * Why a host cannot join the cluster now, or null: the one rule behind the join route and the Settings switch.

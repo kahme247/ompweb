@@ -141,6 +141,10 @@ interface Link {
   capacity: CapacitySnapshot | null;
   /** v10: the daemon's last cluster configuration report (`config_state`, or a `clusterConfig` answer); null until one. */
   configState: ConfigState | null;
+  /** v10: that report says the configuration the host holds is this server's (a non-member holding it gets `restore`). */
+  configOwned: boolean;
+  /** `clusterConfig` ops sent and not answered: the sync never piles another on. */
+  configOps: number;
   ompVersion: string | null;
   ompwebVersion: string | null;
   workspaceOps: Set<string>;
@@ -270,6 +274,8 @@ function linkFor(id: string): Link {
       shared: false,
       capacity: null,
       configState: null,
+      configOwned: false,
+      configOps: 0,
       ompVersion: null,
       ompwebVersion: null,
       workspaceOps: new Set(),
@@ -713,6 +719,7 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   link.socket = ws;
   link.capacity = null;
   link.configState = null;
+  link.configOwned = false;
   previous?.close(LINK_CLOSE.replaced, "replaced by a newer link");
   if (previous) {
     // Upload bytes the old socket may have lost must not be followed by later ones on this socket: they resume instead.
@@ -926,11 +933,18 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
   }
 }
 
-/** A member's configuration report: a change reaches Settings (`hosts` subscribers). */
-function noteConfigState(link: Link, state: ConfigState): void {
-  if (JSON.stringify(link.configState) === JSON.stringify(state)) return;
+/** A configuration report: a change reaches Settings (`hosts` subscribers). */
+function noteConfigState(link: Link, state: ConfigState, owned: boolean): void {
+  if (link.configOwned === owned && JSON.stringify(link.configState) === JSON.stringify(state)) return;
   link.configState = state;
+  link.configOwned = owned;
   notifyHostsChange();
+}
+
+/** The member runs this server's configuration as it is now, plugins included: Settings' `current`, and the sync's target otherwise. */
+function configCurrent(link: Link): boolean {
+  const state = link.configState;
+  return link.configOwned && state !== null && state.version !== null && state.version === hub().masterConfig.version && state.files === "current" && state.plugins === "current";
 }
 
 /** `whole`: for a `part` that completes a line, that line decoded. `joined`: that line itself, which gets no dedup of
@@ -943,7 +957,7 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
     return;
   }
   if (message.type === "config_state") {
-    if ((link.hostVersion ?? 0) >= CLUSTER_CONFIG_SINCE_VERSION) noteConfigState(link, message.state);
+    if ((link.hostVersion ?? 0) >= CLUSTER_CONFIG_SINCE_VERSION) noteConfigState(link, message.state, message.owned);
     return;
   }
   if (message.type === "unknown") {
@@ -1716,8 +1730,7 @@ export function listHosts(): LinkedHostRow[] {
       hostVersion: link?.hostVersion ?? null,
       serverVersion: LINK_PROTOCOL_VERSION,
       workspaceOps: [...(link?.workspaceOps ?? [])],
-      ...(link?.configState ? { clusterConfig: { ...link.configState, current: link.configState.version !== null && link.configState.version === hub().masterConfig.version
-        && link.configState.files === "current" && link.configState.plugins === "current" } } : {}),
+      ...(link?.configState ? { clusterConfig: { ...link.configState, current: configCurrent(link) } } : {}),
     };
   });
 }
@@ -1746,30 +1759,46 @@ export async function masterConfigVersion(): Promise<string> {
 
 const CLUSTER_CONFIG_OP_MS = 60_000;
 
-/** `clusterConfig` on a member's daemon (v10), waiting at most 60 s; the state it answers is kept like a `config_state` report. */
+/** `clusterConfig` on a host's daemon (v10), waiting at most 60 s; the state it answers is kept like a `config_state` report. */
 export async function clusterConfigOp(hostId: string, args: { action: "apply"; version: string } | { action: "restore" }): Promise<ConfigState> {
-  const result = await request(hostId, "clusterConfig", args, CLUSTER_CONFIG_OP_MS);
+  const link = linkFor(hostId);
+  link.configOps += 1;
+  let result: unknown;
+  try {
+    result = await request(hostId, "clusterConfig", args, CLUSTER_CONFIG_OP_MS);
+  } finally {
+    link.configOps -= 1;
+  }
   let state: ConfigState;
   try {
-    state = decodeConfigState(isRecord(result) ? result.state : null);
+    if (!isRecord(result) || typeof result.owned !== "boolean") throw new Error("owned must be a boolean");
+    state = decodeConfigState(result.state);
   } catch {
     throw new HostOpError(502, "host_bad_result", `${labelOf(hostId)} sent an invalid clusterConfig result`);
   }
-  const link = hub().links.get(hostId);
-  if (link) noteConfigState(link, state);
+  noteConfigState(link, state, result.owned);
   return state;
 }
 
-/** One round of startClusterConfigSync: each online v10 member whose reported version is not the master's gets `apply`. */
+/**
+ * One round of startClusterConfigSync. A linked host outside the cluster that still holds this server's configuration
+ * (its leave's restore failed or could not be sent) gets `restore`; each online v10 member that is not current gets
+ * `apply`, which for the version it already holds costs nothing but a fresh report. Never while one of its ops is unanswered.
+ */
 export async function syncClusterConfig(): Promise<void> {
-  const members = () => {
+  const members = (): Set<string> | null => {
     try {
-      return (clusterOf(loadPools())?.members ?? []).map((member) => member.hostId).filter((id) => id !== LOCAL_HOST_ID);
+      return new Set(clusterOf(loadPools())?.members.map((member) => member.hostId));
     } catch {
-      return [];
+      return null; // who is a member is unknown: nobody gets either op
     }
   };
-  if (members().length === 0) return;
+  const idle = (link: Link) => link.status === "online" && (link.hostVersion ?? 0) >= CLUSTER_CONFIG_SINCE_VERSION && link.configOps === 0;
+  const before = members();
+  if (!before) return;
+  // Read and sent with no await between: a host that joins meanwhile gets its apply after this restore.
+  for (const link of hub().links.values()) if (!before.has(link.id) && link.configOwned && idle(link)) clusterConfigOp(link.id, { action: "restore" }).catch(() => {});
+  if (![...before].some((id) => id !== LOCAL_HOST_ID)) return;
   let version: string;
   try {
     version = await masterConfigVersion();
@@ -1777,19 +1806,20 @@ export async function syncClusterConfig(): Promise<void> {
     return; // logged by masterConfigVersion
   }
   // The pools again, and nothing awaited before the sends: a host that left meanwhile never gets an apply after its restore.
-  for (const hostId of members()) {
+  for (const hostId of members() ?? []) {
     const link = hub().links.get(hostId);
-    if (!link || link.status !== "online" || (link.hostVersion ?? 0) < CLUSTER_CONFIG_SINCE_VERSION || link.configState?.version === version) continue;
+    if (hostId === LOCAL_HOST_ID || !link || !idle(link) || configCurrent(link)) continue;
     clusterConfigOp(hostId, { action: "apply", version }).catch(() => {}); // the daemon reports a failure in its state
   }
 }
 
-/** instrumentation.node.ts: every 30 s while a cluster exists, members that are behind catch up (spec K3). */
+/** instrumentation.node.ts: at once, then every 30 s, members that are behind catch up and hosts that left get their own configuration back (spec K3, K6). */
 export function startClusterConfigSync(): void {
   const state = hub();
   if (state.configSync) return;
   state.configSync = setInterval(() => void syncClusterConfig(), 30_000);
   state.configSync.unref?.();
+  void syncClusterConfig();
 }
 
 export interface LocalHostRow {

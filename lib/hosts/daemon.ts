@@ -104,18 +104,21 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
   const entrypoint = canonicalPath(process.argv[1] || process.execPath) || resolve(process.argv[1] || process.execPath);
   const resume = new HostResumeTracker();
   // A cluster member runs on the master's configuration (spec K3-K6): fetched over the link that asks, with its token.
+  // Each link is told whether the configuration this host holds is its server's.
   const config = createClusterConfig({
     roots: () => ({ agent: getAgentDir(), home: homedir() }),
     stateDir: () => join(getAgentDir(), "omp-web"),
-    fetch: async (serverUrl, path) => {
+    fetch: async (serverUrl, path, signal) => {
       const login = links.get(serverUrl)?.login;
-      const pending = login && serverFetch(login, CONFIG_API, path.slice(CONFIG_API.length), {});
+      const pending = login && serverFetch(login, CONFIG_API, path.slice(CONFIG_API.length), { signal });
       if (!pending) throw new Error("the web server is no longer linked to this host");
       return pending;
     },
     runOmp: runOmpCli,
     commandExists,
-    onState: state => { if (!stopped) for (const link of links.values()) if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state }); },
+    onState: (state, owner) => {
+      if (!stopped) for (const link of links.values()) if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state, owned: owner === link.login.url });
+    },
     log,
   });
   const forwarder = startBrokerForwarder({ login: url => links.get(url)?.login ?? null, log });
@@ -245,7 +248,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         if (up) {
           channels.linkUp(link);
           reportCapacity();
-          if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state: config.state() });
+          if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state: config.state(), owned: config.owner() === link.login.url });
           if (link.version >= 7) link.queue({ type: "channels_changed", channels: channels.listing(link, false) }, "channels");
         } else {
           services.get(link.id)?.onDisconnect();
@@ -336,7 +339,10 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     if (!isHostOp(op)) throw new HostOpError(501, "unknown_op", "Unknown host op: " + op);
     if (!isRecord(args)) throw new HostOpError(400, "invalid_request", "Host op arguments must be an object");
     if (stopped) throw new HostOpError(503, "host_stopping", "This host is stopping");
-    if (drained && !["closeFile", "unwatchFile", "cancelClone", "close"].includes(op)) throw new HostOpError(409, "host_drained", "This host is locally drained for maintenance; resume it before starting new work");
+    // Putting this host's own configuration back is not new work: a drained member can still leave its cluster.
+    if (drained && !["closeFile", "unwatchFile", "cancelClone", "close"].includes(op) && !(op === "clusterConfig" && args.action === "restore")) {
+      throw new HostOpError(409, "host_drained", "This host is locally drained for maintenance; resume it before starting new work");
+    }
     if (isWorkspaceOp(op)) {
       if (op === "publishUpload") requireUploadOwner(link, args.id);
       const input = isRecord(args.input) ? args.input : null;
@@ -396,12 +402,12 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
       case "uploadAttach": requireUploadOwner(link, args.id); return uploads.attach(args.id, sessionsPath(args.sessionFile), args.sessionId);
       case "setUploadRetention": return uploadRetention.set(args.days);
       case "clusterConfig":
-        // `apply` takes the master's files over the link that asked; ensure is called before any await, so a `restore`
-        // sent after it on this link is queued after it.
-        if (args.action === "apply" && typeof args.version === "string" && CONFIG_VERSION_RE.test(args.version)) await config.ensure(args.version, link.login.url);
-        else if (args.action === "restore") await config.restore();
+        // `apply`: the server counts this host as its member and sends its configuration over this link; `restore`: it no
+        // longer does. Called before any await, so a `restore` sent after an `apply` on this link is queued after it.
+        if (args.action === "apply" && typeof args.version === "string" && CONFIG_VERSION_RE.test(args.version)) await config.apply(args.version, link.login.url);
+        else if (args.action === "restore") await config.restore(link.login.url);
         else throw new HostOpError(400, "invalid_request", "Invalid cluster configuration request");
-        return { state: config.state() };
+        return { state: config.state(), owned: config.owner() === link.login.url };
       default: {
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
         const result = await run.apply(sessionOps, SESSION_OP_PARAMS[op].map(name => args[name]));
@@ -416,7 +422,9 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     stopped = true; watcher.close(); clearTimeout(reloadTimer); clearInterval(sweepTimer); clearInterval(capacityTimer); uploadRetention.stop();
     // Freeze before exit handlers observe children stopping.
     resume.freeze();
-    stopping = (async () => { await Promise.all([...links.values()].map(link => link.stop())); await Promise.all([...stops, ...[...services.values()].map(service => service.stop())]); await channels.stop(); await config.stop(); await forwarder.stop(); resume.dispose(); finish(code); })();
+    // The configuration first: its requests to a server are aborted at once, so no start waiting on them holds the stop.
+    const configStopped = config.stop();
+    stopping = (async () => { await Promise.all([...links.values()].map(link => link.stop())); await Promise.all([...stops, ...[...services.values()].map(service => service.stop())]); await channels.stop(); await configStopped; await forwarder.stop(); resume.dispose(); finish(code); })();
     return stopping;
   }
   // Links first: a recovered sharing session needs its link to start.

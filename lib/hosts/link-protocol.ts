@@ -188,8 +188,9 @@ export type UpMessage =
   | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
   /** v8: a fresh resource sample; unsequenced and never retained for replay. */
   | { type: "capacity"; sample: HostCapacity }
-  /** v10: the daemon's cluster configuration state, at link up and on each change; unsequenced and never retained for replay. */
-  | { type: "config_state"; state: ConfigState }
+  /** v10: the daemon's cluster configuration state, at link up and on each change, and whether the configuration it holds
+   * is this link's server's (`owned`); unsequenced and never retained for replay. */
+  | { type: "config_state"; state: ConfigState; owned: boolean }
   /** v6: the daemon has written `received` bytes of upload `id` for this start `attempt`, `done` once all of them are
    * written and synced; with `error` the upload failed and its staged file is gone. */
   | { type: "upload_ack"; seq: number; id: string; attempt: string; received: number; done: boolean; error?: { status: number; code: string; message: string } }
@@ -528,7 +529,7 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
     case "capacity":
       return { type: "capacity", sample: capacitySample(o.sample) };
     case "config_state":
-      return { type: "config_state", state: decodeConfigState(o.state) };
+      return { type: "config_state", state: decodeConfigState(o.state), owned: bool(o, "owned") };
     case "upload_ack": {
       const attempt = str(o, "attempt");
       if (!UPLOAD_ID_RE.test(attempt)) fail("attempt must be a UUIDv4");
