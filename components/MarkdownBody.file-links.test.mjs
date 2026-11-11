@@ -79,3 +79,21 @@ test("without a file panel (a remote host's session) a path link renders as its 
   assert.deepEqual(links.map((a) => a.getAttribute("href")), ["https://x.test"]);
   assert.match(container.textContent, /local:\/\/uploads\/a\.txt/);
 });
+
+test("a local:// evidence link opens in-app without decoding its session-relative URL", () => {
+  const opened = [];
+  const { container } = renderChat("[Captured evidence](local://100%25/evidence.json#details)", opened);
+  const link = container.querySelector("a");
+  assert.equal(link?.getAttribute("href"), "local://100%25/evidence.json#details");
+  assert.equal(link.hasAttribute("target"), false);
+  assert.equal(fireEvent.click(link, { button: 0, ctrlKey: true }), false);
+  assert.deepEqual(opened, ["local://100%25/evidence.json#details"]);
+  assert.equal(fireEvent(link, new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true })), false);
+});
+
+test("local:// links without a file opener stay text, and unsafe schemes never become navigable", () => {
+  const { container } = render(React.createElement(MarkdownBody, null,
+    "[Evidence](local://evidence.json) [unsafe](javascript:alert%281%29)"));
+  assert.equal(container.querySelector("a[href]"), null);
+  assert.match(container.textContent, /Evidence/);
+});

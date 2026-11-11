@@ -78,6 +78,7 @@ import {
 } from "./AppShell-layout";
 import type { CrossSessionHostToolCall, ManagedProject, SessionInfo, SessionTreeNode } from "@/lib/types";
 import { runHostTool } from "@/hooks/useAgentSession-stream";
+import { isLocalUri } from "@/lib/local-uri";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { openEventStream } from "@/lib/event-stream";
 import type { ChatInputHandle } from "./ChatInput";
@@ -1529,7 +1530,26 @@ export function AppShell({ appName }: { appName: string }) {
     });
   }, [fileTabs]);
 
-  const handleOpenFile = useCallback((filePath: string, fileName: string, source: WorkspaceFileSource) => {
+  const localFileOpensRef = useRef(new Set<AbortController>());
+  useEffect(() => {
+    const pending = localFileOpensRef.current;
+    return () => {
+      for (const controller of pending) controller.abort();
+      pending.clear();
+    };
+  }, []);
+  const handleOpenFile = useCallback(function openFile(filePath: string, fileName: string, source: WorkspaceFileSource): void {
+    if (isLocalUri(filePath)) {
+      const controller = new AbortController();
+      localFileOpensRef.current.add(controller);
+      void runHostTool("open_file", { path: filePath }, {
+        openUrl: () => "",
+        openFile: (path, name, owner) => openFile(path, name, owner ? { ...source, sessionId: owner } : source),
+      }, source.sessionId ?? undefined, controller.signal).then(({ text, isError }) => {
+        if (isError && !controller.signal.aborted) toast.error(text);
+      }).finally(() => localFileOpensRef.current.delete(controller));
+      return;
+    }
     const absolute = filePath.startsWith("/") || filePath.startsWith("~/") || filePath.startsWith("\\\\") || /^[a-zA-Z]:[\\/]/.test(filePath);
     const rooted = !absolute && source.cwd ? joinFilePath(source.cwd, filePath) : filePath;
     const target = filePath.startsWith("~/") ? filePath : normalizeLocalPath(rooted);

@@ -4,6 +4,7 @@ import { Children, cloneElement, isValidElement, useContext, useMemo, type Compo
 import ReactMarkdown, { type Components, type UrlTransform } from "react-markdown";
 import { remarkInlineCodeFileLinks, resolveLocalFileHref } from "@/lib/file-links";
 import { getFileApiUrl } from "@/lib/file-paths";
+import { isLocalUri } from "@/lib/local-uri";
 import { WorkspaceFileContext } from "@/lib/workspace-file-context";
 import { AgentLinkContext, agentAwareUrlTransform, agentLinkIds, remarkAgentLinks } from "../lib/agent-links";
 import { GithubRepoContext, remarkGithubRefs } from "../lib/github-refs";
@@ -12,8 +13,8 @@ import { markdownCodeRenderer } from "./MarkdownCode";
 import { ClickableImage } from "./ImageLightbox";
 import { TableChart } from "./TableChart";
 
-// The default sanitizer reads `C:` as a scheme; a drive path (`\` arrives as `%5C`) is a local file the `a` renderer opens.
-const urlTransform: UrlTransform = (url, key, node) => (/^[A-Za-z]:(?:\/|%5C)/i.test(url) ? url : agentAwareUrlTransform(url, key, node));
+// Session-local links and Windows drive paths are opened in-app, never by the browser.
+const urlTransform: UrlTransform = (url, key, node) => (key === "href" && isLocalUri(url) || /^[A-Za-z]:(?:\/|%5C)/i.test(url) ? url : agentAwareUrlTransform(url, key, node));
 
 /** Props accepted by `MarkdownBody`. */
 export interface MarkdownBodyProps {
@@ -137,7 +138,7 @@ export function useMarkdownBodyRendering({ children, isStreaming, cwd, onOpenFil
         const anchor = <a href={href} {...props} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{textParts}</a>;
         return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
       }
-      const filePath = resolveLocalFileHref(href, cwd);
+      const filePath = href && isLocalUri(href) ? href : resolveLocalFileHref(href, cwd);
       if (filePath) {
         // Without a file panel (a remote host's session, a dialog) a path link has nowhere to go: show its text.
         if (!onOpenFile) return <>{textParts}{imageParts}</>;
