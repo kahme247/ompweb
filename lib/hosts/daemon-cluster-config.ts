@@ -19,6 +19,8 @@ const LIST_MS = 60_000;
 const INSTALL_MS = 300_000;
 const UNINSTALL_MS = 120_000;
 const TOGGLE_MS = 60_000;
+// The manifest lists paths and hashes; a bundle at its 50 MiB limit is still far below this.
+const MANIFEST_BYTES = 5_242_880;
 // The mirrored entries, and the `.yaml` names omp reads when a `.yml` is absent: a member's own one waits in the backup
 // under its own name, so the live tree holds only the manifest's `.yml`.
 const ENTRIES: readonly { root: ConfigRoot; path: string }[] = [...MIRRORED, { root: "agent", path: "config.yaml" }, { root: "agent", path: "models.yaml" }];
@@ -42,6 +44,16 @@ const quietly = (step: () => void) => {
     return false;
   }
 };
+
+/** `rename`, which moves a link as a link. It cannot cross filesystems: the reason then names the two directories. */
+function move(from: string, to: string) {
+  try {
+    renameSync(from, to);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EXDEV") fail(`${dirname(from)} and ${dirname(to)} are on different filesystems; cluster configuration needs them on one filesystem`);
+    throw error;
+  }
+}
 
 /** Written under a fresh name beside `path`, then renamed over it: never half a file, never written through a link at `path`. */
 function writeAtomic(path: string, data: string | Uint8Array, mode = 0o600) {
@@ -104,8 +116,8 @@ function checkManifest(value: unknown): ConfigManifest {
   return manifest;
 }
 
-/** The body, refused as soon as it passes the size the manifest declares. */
-async function readBody(res: Response, size: number, path: string): Promise<Uint8Array> {
+/** The body, refused as soon as it passes `limit` bytes. */
+async function readBody(res: Response, limit: number, tooLong: string): Promise<Buffer> {
   const chunks: Uint8Array[] = [];
   let length = 0;
   const reader = res.body?.getReader();
@@ -113,9 +125,9 @@ async function readBody(res: Response, size: number, path: string): Promise<Uint
     const { done, value } = await reader.read();
     if (done) break;
     length += value.byteLength;
-    if (length > size) {
+    if (length > limit) {
       await reader.cancel();
-      fail(`${path} is longer than the manifest says`);
+      fail(tooLong);
     }
     chunks.push(value);
   }
@@ -162,6 +174,8 @@ export function createClusterConfig(deps: {
   let pluginsError: string | null = null;
   let missingCommands: string[] = [];
   let stopped = false;
+  // Restores called and not yet finished: behind one, the applied version no longer counts.
+  let restoring = 0;
   let queue: Promise<unknown> = Promise.resolve();
   const inflight = new Map<string, Promise<void>>();
 
@@ -180,6 +194,7 @@ export function createClusterConfig(deps: {
   const installedPlugins = () => listPlugins((args) => deps.runOmp(args, LIST_MS));
 
   function failure(error: unknown, what: string): HostOpError {
+    if (error instanceof HostOpError) return error; // reported where it was raised
     const reason = messageOf(error);
     files = "failed";
     filesError = reason;
@@ -202,7 +217,8 @@ export function createClusterConfig(deps: {
       await res.body?.cancel();
       fail(`the master answered ${res.status} for the manifest`);
     }
-    return checkManifest(parseJson(await res.text(), "the manifest"));
+    const body = await readBody(res, MANIFEST_BYTES, `the manifest is longer than ${MANIFEST_BYTES} bytes`);
+    return checkManifest(parseJson(body.toString("utf8"), "the manifest"));
   }
 
   /** Every file of `manifest` in `objects/`, verified before it enters; false when the master no longer has one (404). */
@@ -217,7 +233,7 @@ export function createClusterConfig(deps: {
         if (res.status === 404) return false;
         fail(`the master answered ${res.status} for ${file.path}`);
       }
-      const bytes = await readBody(res, file.size, file.path);
+      const bytes = await readBody(res, file.size, `${file.path} is longer than the manifest says`);
       if (createHash("sha256").update(bytes).digest("hex") !== file.hash) fail(`${file.path} does not match its hash`);
       writeAtomic(target, bytes);
     }
@@ -232,14 +248,23 @@ export function createClusterConfig(deps: {
   /**
    * Steps 4-6. The first apply moves the member's own entries into `own-config/` where later ones move the previous
    * version to `trash/`. The backup, the swaps, the agent environment and `state.json` are one transaction: on any
-   * failure everything moved is put back, so the member keeps exactly what it had.
+   * failure everything moved is put back, so the member keeps exactly what it had. A backup without `state.json` (a
+   * stop in the middle, or a failure that could not put everything back) is put back before the next apply.
    */
   function install(manifest: ConfigManifest, ownPlugins: PluginEntry[] | null) {
     const d = dirs();
     const roots = deps.roots();
     const first = ownPlugins !== null;
     const aside = first ? d.own : d.trash;
+    // A link above an entry (`~/.agents`) would take the member's files and the master's somewhere else: refused before anything moves.
+    for (const entry of ENTRIES) {
+      for (let path = dirname(entry.path); path !== "."; path = dirname(path)) {
+        const dir = join(roots[entry.root], path);
+        if (lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink()) fail(`${dir} is a symbolic link; cluster configuration needs a real directory there: replace the link with a directory`);
+      }
+    }
     const undo: (() => void)[] = [];
+    let previousState: Buffer | null = null;
     try {
       removeAll(d.stage);
       removeAll(d.trash);
@@ -257,14 +282,19 @@ export function createClusterConfig(deps: {
 
       const previousEnv = loadWebServerSettings().agentEnv;
       if (first) {
-        // Absent entries, and their missing parents, are noted: a restore removes them, and a restore cut short can be run again.
+        // absent.json last: once it exists, entries may have moved, and a restore puts them back.
+        writeAtomic(join(d.own, "plugins.json"), JSON.stringify(ownPlugins));
+        writeAtomic(join(d.own, "agent-env.json"), JSON.stringify(previousEnv));
+        // Absent entries, and their missing parents, are noted: a restore removes them.
         const absent: [ConfigRoot, string][] = [];
         for (const entry of ENTRIES) {
           for (let path = entry.path; path !== "."; path = dirname(path)) if (!exists(join(roots[entry.root], path))) absent.push([entry.root, path]);
         }
         writeAtomic(join(d.own, "absent.json"), JSON.stringify(absent));
-        writeAtomic(join(d.own, "agent-env.json"), JSON.stringify(previousEnv));
-        writeAtomic(join(d.own, "plugins.json"), JSON.stringify(ownPlugins));
+      } else {
+        // Until the new state.json no version counts as applied, so a stop during the swaps leaves a backup to put back.
+        previousState = readFileSync(d.stateFile);
+        rmSync(d.stateFile);
       }
       // Step 6. Renames move links as links: nothing is ever written through one.
       for (const entry of ENTRIES) {
@@ -273,13 +303,13 @@ export function createClusterConfig(deps: {
         if (exists(live)) {
           const away = join(aside, entry.root, entry.path);
           makeDir(dirname(away));
-          renameSync(live, away);
-          undo.push(() => renameSync(away, live));
+          move(live, away);
+          undo.push(() => move(away, live));
         }
         if (exists(staged)) {
           const created = makeDir(dirname(live));
           if (created) undo.push(() => removeAll(created));
-          renameSync(staged, live);
+          move(staged, live);
           undo.push(() => removeAll(live));
         }
       }
@@ -287,11 +317,19 @@ export function createClusterConfig(deps: {
       undo.push(() => saveWebServerSettings({ agentEnv: previousEnv }));
       writeAtomic(d.stateFile, JSON.stringify({ version: manifest.version, plugins: manifest.plugins }));
     } catch (error) {
-      const intact = undo.reverse().map(quietly).every(Boolean);
+      const saved = previousState;
+      const intact = undo.reverse().map(quietly).every(Boolean) && (saved === null || quietly(() => writeAtomic(d.stateFile, saved)));
       quietly(() => removeAll(d.stage));
-      // What could not be put back stays where it was moved, for a person to recover.
-      if (!intact) fail(`${messageOf(error)}; some replaced files could not be put back and are kept in ${aside}`);
-      if (first) quietly(() => removeAll(d.own));
+      if (!intact) {
+        // What could not be put back stays where it was moved; the member's own files are all in the backup.
+        applied = null;
+        fail(`${messageOf(error)}; the previous files could not all be put back: the next apply, or leaving the cluster, first restores this host's own configuration from ${d.own}`);
+      }
+      if (first) {
+        // absent.json first: a backup without it holds nothing that was moved.
+        quietly(() => rmSync(join(d.own, "absent.json"), { force: true }));
+        quietly(() => removeAll(d.own));
+      }
       quietly(() => removeAll(d.trash));
       throw error;
     }
@@ -304,6 +342,9 @@ export function createClusterConfig(deps: {
       current();
       return null;
     }
+    const d = dirs();
+    // An apply or a restore that stopped half-way: the member's own configuration goes back first, so the new backup takes it.
+    if (exists(d.own) && !exists(d.stateFile)) await restoreNow();
     // A file the master no longer has means its configuration changed since the manifest: one more try with the new one.
     let manifest = await fetchManifest(serverUrl);
     if (manifest.version !== applied?.version && !(await download(serverUrl, manifest))) {
@@ -314,7 +355,6 @@ export function createClusterConfig(deps: {
       current();
       return null;
     }
-    const d = dirs();
     let ownPlugins: PluginEntry[] | null = null;
     if (!exists(d.own)) {
       try {
@@ -407,70 +447,98 @@ export function createClusterConfig(deps: {
     report();
   }
 
+  /**
+   * Puts the member's own configuration back. Run again after it stopped half-way, it finishes: `absent.json` goes once
+   * every entry is back, the rest of the backup once the plugins are.
+   */
   async function restoreNow() {
     const d = dirs();
     if (!exists(d.own)) return;
     if (stopped) throw failure(new Error("the host daemon is stopping"), "restoring");
     const roots = deps.roots();
-    let ownPlugins: PluginEntry[];
+    let ownPlugins: PluginEntry[] | null = null;
     try {
-      const absent = parseJson(readFileSync(join(d.own, "absent.json"), "utf8"), "the backup's absent.json") as [ConfigRoot, string][];
-      for (const entry of ENTRIES) {
-        const live = join(roots[entry.root], entry.path);
-        const saved = join(d.own, entry.root, entry.path);
-        // Neither saved nor absent: already put back by a restore that stopped half-way.
-        if (exists(saved)) {
-          removeAll(live);
-          makeDir(dirname(live));
-          renameSync(saved, live);
-        } else if (absent.some(([root, path]) => root === entry.root && path === entry.path)) removeAll(live);
+      // Before anything moves: from here on no version counts as applied, now or after a restart.
+      applied = null;
+      rmSync(d.stateFile, { force: true });
+      // Without absent.json nothing is to move: the backup stopped before its first move, or its entries are back already.
+      const absentFile = join(d.own, "absent.json");
+      if (exists(absentFile)) {
+        const absent = parseJson(readFileSync(absentFile, "utf8"), "the backup's absent.json") as [ConfigRoot, string][];
+        for (const entry of ENTRIES) {
+          const live = join(roots[entry.root], entry.path);
+          const saved = join(d.own, entry.root, entry.path);
+          // Neither saved nor absent: never moved (an apply stopped before it), or already put back.
+          if (exists(saved)) {
+            removeAll(live);
+            makeDir(dirname(live));
+            move(saved, live);
+          } else if (absent.some(([root, path]) => root === entry.root && path === entry.path)) removeAll(live);
+        }
+        // Parents an apply created; rmdir leaves one that has since gained other content.
+        for (const [root, path] of absent) if (!ENTRIES.some((entry) => entry.root === root && entry.path === path)) quietly(() => rmdirSync(join(roots[root], path)));
+        saveWebServerSettings({ agentEnv: parseJson(readFileSync(join(d.own, "agent-env.json"), "utf8"), "the backup's agent-env.json") as Record<string, string> });
+        rmSync(absentFile);
       }
-      // Parents an apply created; rmdir leaves one that has since gained other content.
-      for (const [root, path] of absent) if (!ENTRIES.some((entry) => entry.root === root && entry.path === path)) quietly(() => rmdirSync(join(roots[root], path)));
-      saveWebServerSettings({ agentEnv: parseJson(readFileSync(join(d.own, "agent-env.json"), "utf8"), "the backup's agent-env.json") as Record<string, string> });
-      ownPlugins = parseJson(readFileSync(join(d.own, "plugins.json"), "utf8"), "the backup's plugins.json") as PluginEntry[];
+      const pluginsFile = join(d.own, "plugins.json");
+      if (exists(pluginsFile)) ownPlugins = parseJson(readFileSync(pluginsFile, "utf8"), "the backup's plugins.json") as PluginEntry[];
     } catch (error) {
       throw failure(error, "restoring");
     }
-    const failed = await reconcile(ownPlugins);
-    try {
-      removeAll(d.cc);
-      removeAll(d.own);
-    } catch (error) {
-      throw failure(error, "restoring");
-    }
-    applied = null;
+    const failed = ownPlugins ? await reconcile(ownPlugins) : null;
     files = "none";
-    plugins = failed === null ? "none" : "failed";
     filesError = null;
-    pluginsError = failed;
     missingCommands = [];
+    if (stopped) {
+      // The plugins were cut short: the backup's list stays, and the next start finishes them.
+      plugins = "pending";
+      pluginsError = null;
+      report();
+      deps.log("cluster-config: stopped while putting this host's own plugins back; the next start finishes it");
+      throw new HostOpError(409, "cluster_config_failed", "the host daemon stopped before this host's own plugins were back; its next start finishes it");
+    }
+    try {
+      removeAll(d.own);
+      removeAll(d.cc);
+    } catch (error) {
+      throw failure(error, "restoring");
+    }
+    plugins = failed === null ? "none" : "failed";
+    pluginsError = failed;
     report();
   }
 
-  // A version applied before the daemon restarted: its plugin job may have been cut short, so it runs again.
+  // At the start: a version applied before reruns its plugin job, which a stop may have cut short; a backup without
+  // one (an apply or a restore stopped half-way) is put back.
+  let saved: unknown = null;
   try {
-    const saved: unknown = JSON.parse(readFileSync(dirs().stateFile, "utf8"));
-    if (isRecord(saved) && typeof saved.version === "string" && Array.isArray(saved.plugins) && saved.plugins.every(isPlugin)) {
-      const target = saved.plugins;
-      applied = { version: saved.version, plugins: target };
-      files = "current";
-      plugins = "pending";
-      enqueue(() => syncPlugins(target)).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
-    }
+    saved = JSON.parse(readFileSync(dirs().stateFile, "utf8"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") deps.log("cluster-config: state.json cannot be read; no version counts as applied");
+  }
+  if (isRecord(saved) && typeof saved.version === "string" && Array.isArray(saved.plugins) && saved.plugins.every(isPlugin)) {
+    const target = saved.plugins;
+    applied = { version: saved.version, plugins: target };
+    files = "current";
+    plugins = "pending";
+    enqueue(() => syncPlugins(target)).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
+  } else if (exists(dirs().own)) {
+    plugins = "pending";
+    enqueue(restoreNow).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
   }
 
   return {
     /** Resolves once the files of `version` are applied; rejects with HostOpError(409, "cluster_config_failed", reason) otherwise. Concurrent calls share one apply. */
     ensure(version: string, serverUrl: string): Promise<void> {
-      if (applied?.version === version) {
-        current();
-        return Promise.resolve();
+      // Behind a pending restore nothing counts as applied: the call waits its turn, then applies again.
+      if (restoring === 0) {
+        if (applied?.version === version) {
+          current();
+          return Promise.resolve();
+        }
+        const shared = inflight.get(version);
+        if (shared) return shared;
       }
-      const shared = inflight.get(version);
-      if (shared) return shared;
       const { promise, resolve, reject } = Promise.withResolvers<void>();
       inflight.set(version, promise);
       enqueue(async () => {
@@ -481,7 +549,7 @@ export function createClusterConfig(deps: {
           reject(failure(error, "applying"));
           return;
         } finally {
-          inflight.delete(version);
+          if (inflight.get(version) === promise) inflight.delete(version);
         }
         resolve();
         // Still in the queue: a later restore waits for the plugins, the caller does not.
@@ -490,7 +558,12 @@ export function createClusterConfig(deps: {
       return promise;
     },
     /** Leaving the cluster: put the member's own configuration back. */
-    restore: (): Promise<void> => enqueue(restoreNow),
+    restore(): Promise<void> {
+      restoring++;
+      return enqueue(restoreNow).finally(() => {
+        restoring--;
+      });
+    },
     state,
     async stop(): Promise<void> {
       stopped = true;

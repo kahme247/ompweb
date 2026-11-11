@@ -86,14 +86,14 @@ export function loadWebServerSettings(): WebServerSettings {
   return settings;
 }
 
-/** Atomic write (temp file + rename), like the project registry. */
+/** Atomic write (temp file + rename), like the project registry. Private to its user: it holds agentEnv. */
 export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebServerSettings {
   const path = settingsPath();
   const settings = { ...loadWebServerSettings(), ...patch };
   mkdirSync(resolve(path, ".."), { recursive: true });
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
-    writeFileSync(temp, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+    writeFileSync(temp, `${JSON.stringify(settings, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     renameSync(temp, path);
   } finally {
     try {
