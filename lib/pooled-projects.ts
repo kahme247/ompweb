@@ -155,7 +155,8 @@ async function prepare(input: {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PreparationError("pool_clone_conflict", "Clone target is not a completed repository");
       throw error;
     }
-    if (!gitStat.isDirectory() || gitStat.isSymbolicLink() || await git(cloneRoot, "rev-parse", "--show-toplevel") !== cloneRoot) {
+    // --show-cdup is empty only at the toplevel; no comparison between Git's and the caller's path spelling (8.3 names, separators).
+    if (!gitStat.isDirectory() || gitStat.isSymbolicLink() || await git(cloneRoot, "rev-parse", "--show-cdup") !== "") {
       throw new PreparationError("pool_clone_conflict", "Clone root must be an independent repository");
     }
     // Reject multiple literal URLs: Git fetches the first, whereas config --get returns the last.
@@ -172,7 +173,7 @@ async function prepare(input: {
     if (currentWorktree) {
       const dotGit = await lstat(join(cwd, ".git"));
       if (!dotGit.isFile() || dotGit.isSymbolicLink()
-        || await git(cwd, "rev-parse", "--show-toplevel") !== cwd
+        || await git(cwd, "rev-parse", "--show-cdup") !== ""
         || await realpath(await git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")) !== await realpath(gitDirectory)
         || await git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD") !== branch) {
         throw new PreparationError("pool_worktree_conflict", "Worktree target is owned by another checkout");

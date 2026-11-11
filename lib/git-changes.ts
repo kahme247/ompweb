@@ -36,9 +36,10 @@ async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFE
   return (await pending).stdout;
 }
 
+/** The toplevel in `cwd`'s own spelling: Git's --show-toplevel can differ in separators, 8.3 names and symlinks. */
 async function findRepositoryRoot(cwd: string): Promise<string | null> {
   try {
-    return (await git(cwd, ["rev-parse", "--show-toplevel"])).trim() || null;
+    return path.resolve(cwd, (await git(cwd, ["rev-parse", "--show-cdup"])).trim());
   } catch {
     return null;
   }
