@@ -84,3 +84,26 @@ export function createChildProcessEnvironment(
 ): NodeJS.ProcessEnv {
   return sanitizeProjectCommandEnvironment({ ...baseEnvironment, ...additions }, platform);
 }
+
+/**
+ * Variables that make Git use another repository or index than the one at its
+ * `-C` directory. A daemon started from a hook or a checkout can inherit them,
+ * and Git would then read or write that repository instead.
+ */
+const GIT_REPOSITORY_NAMES: readonly string[] = [
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX",
+];
+
+/** Environment for a `git -C <dir>` child: like createChildProcessEnvironment, and Git resolves the repository from `<dir>` alone. */
+export function createGitEnvironment(
+  additions: Readonly<Record<string, string | undefined>> = {},
+  baseEnvironment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const environment = createChildProcessEnvironment(additions, baseEnvironment, platform);
+  for (const name of Object.keys(environment)) {
+    if (matches(name, GIT_REPOSITORY_NAMES, platform)) delete environment[name];
+  }
+  return environment;
+}

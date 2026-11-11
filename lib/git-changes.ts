@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { promisify } from "util";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
-import { createChildProcessEnvironment } from "./project-command-env";
+import { createGitEnvironment } from "./project-command-env";
 import type {
   GitCollapseReason,
   GitFileDiffResponse,
@@ -26,7 +26,7 @@ async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFE
   const pending = execFileAsync("git", ["-C", cwd, ...args], {
     timeout: GIT_TIMEOUT_MS,
     maxBuffer,
-    env: createChildProcessEnvironment({ LC_ALL: "C" }),
+    env: createGitEnvironment({ LC_ALL: "C" }),
   });
   if (input !== undefined) {
     // git may exit before reading stdin (EPIPE); that failure surfaces through `pending`.
@@ -36,10 +36,12 @@ async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFE
   return (await pending).stdout;
 }
 
-/** The toplevel in `cwd`'s own spelling: Git's --show-toplevel can differ in separators, 8.3 names and symlinks. */
+/** The worktree toplevel in `cwd`'s own spelling: Git's --show-toplevel can differ in separators, 8.3 names and symlinks.
+ * Null outside a worktree; a bare repository has a Git directory but no toplevel. */
 async function findRepositoryRoot(cwd: string): Promise<string | null> {
   try {
-    return path.resolve(cwd, (await git(cwd, ["rev-parse", "--show-cdup"])).trim());
+    const [insideWorkTree, cdup = ""] = (await git(cwd, ["rev-parse", "--is-inside-work-tree", "--show-cdup"])).split("\n");
+    return insideWorkTree === "true" ? path.resolve(cwd, cdup.trim()) : null;
   } catch {
     return null;
   }

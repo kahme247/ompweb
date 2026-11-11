@@ -168,7 +168,8 @@ let previousCounters: CpuCounters | null = null;
 function windowsSample(): { current: CpuCounters; resources: EffectiveResources } | null {
   let busy = 0, idle = 0;
   for (const { times } of cpus()) {
-    busy += times.user + times.nice + times.sys + times.irq;
+    // libuv's Windows `sys` is kernel time minus idle, which already includes interrupt time; `irq` repeats it.
+    busy += times.user + times.nice + times.sys;
     idle += times.idle;
   }
   const available = freemem();

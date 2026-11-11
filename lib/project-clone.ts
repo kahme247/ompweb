@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import { lstat, mkdir, open, readFile, realpath, rm, unlink, type FileHandle } from "fs/promises";
 import { basename, dirname, join } from "path";
 import { cloneDirectoryName } from "./git-clone";
-import { createChildProcessEnvironment } from "./project-command-env";
+import { createGitEnvironment } from "./project-command-env";
 import type { OpResult } from "./hosts/session-ops";
 
 /** Shared across API/daemon processes. Abandoned reservations fail closed and
@@ -108,7 +108,7 @@ function runGitClone(origin: string, target: string, signal?: AbortSignal, onOut
   const { promise, resolve } = Promise.withResolvers<number | null>();
   const child = spawn("git", ["clone", "--progress", "--", origin, target], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: createChildProcessEnvironment({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
+    env: createGitEnvironment({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
     detached: process.platform !== "win32",
     windowsHide: true,
   });
