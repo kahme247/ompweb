@@ -44,6 +44,7 @@ import {
   type UpMessage,
   withSeq,
 } from "./link-protocol";
+import { sharesCredentials } from "./cluster";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, readHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
 import { confirmPooledChild, pooledStartForChild } from "./pool-starts";
@@ -1490,16 +1491,24 @@ export class RemoteHost implements Host {
         throw new HostOpError(426, "host_upgrade_required", `${this.label} needs a newer ompweb to use creation identity`);
       }
     }
-    // A pure join (expectedChannel) starts nothing, so it is neither refused nor flagged. An unreadable registry
-    // refuses the start: a host that may be sharing must never run a session with its own stored logins.
+    // A pure join (expectedChannel) starts nothing, so it is neither refused nor flagged. An unreadable registry or pool
+    // file refuses the start: a host that may be sharing must never run a session with its own stored logins.
     let sharing = false;
     if (options?.expectedChannel === undefined && this.id !== LOCAL_HOST_ID) {
+      let record: HostRecord | undefined;
       try {
-        sharing = readHosts().some((host) => host.id === this.id && host.shareCredentials);
+        record = readHosts().find((host) => host.id === this.id);
       } catch (error) {
         if (!(error instanceof HostRegistryUnreadableError)) throw error;
         throw new HostOpError(503, "host_registry_unreadable", "The linked-hosts registry cannot be read; no session was started");
       }
+      let pools: HostPool[];
+      try {
+        pools = loadPools();
+      } catch {
+        throw new HostOpError(503, "pool_storage_unavailable", "The host pool configuration cannot be read; no session was started");
+      }
+      sharing = record !== undefined && sharesCredentials(record, pools);
     }
     if (sharing && (!link.shared || (link.hostVersion ?? 0) < SHARED_CREDENTIALS_SINCE_VERSION)) {
       throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to share credentials with it`);

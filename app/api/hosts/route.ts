@@ -1,6 +1,7 @@
+import { sharesCredentials } from "@/lib/hosts/cluster";
 import { closeHostLink, hostsSnapshot, listHosts, notifyHostsChange } from "@/lib/hosts/hub";
 import { loadPools, savePools, type HostPool } from "@/lib/hosts/pools";
-import { createHost, HostRegistryUnreadableError, readHosts, revokeHost, UnknownHostError, updateHost } from "@/lib/hosts/registry";
+import { createHost, HostRegistryUnreadableError, readHosts, revokeHost, UnknownHostError, updateHost, type HostRecord } from "@/lib/hosts/registry";
 import { abortBrokerRequests } from "@/lib/omp/auth-broker";
 import { isRecord } from "@/lib/type-guards";
 
@@ -20,6 +21,15 @@ function failFor(error: unknown) {
   }
   if (error instanceof UnknownHostError) return fail("Unknown host", 404);
   throw error;
+}
+
+/** A member keeps sharing when its own flag goes off; pools that cannot be read leave that unknown, so its requests are cut. */
+function stillShares(record: HostRecord): boolean {
+  try {
+    return sharesCredentials(record, loadPools());
+  } catch {
+    return false;
+  }
 }
 
 async function readBody(req: Request): Promise<Record<string, unknown> | null> {
@@ -135,8 +145,8 @@ export async function PATCH(req: Request) {
   if (shareCredentials !== undefined && typeof shareCredentials !== "boolean") return fail("shareCredentials must be a boolean", 400);
   if (label === undefined && allowAgentStart === undefined && shareCredentials === undefined) return fail("Nothing to update", 400);
   try {
-    updateHost(body.id, { label, allowAgentStart, shareCredentials });
-    if (shareCredentials === false) abortBrokerRequests(body.id);
+    const updated = updateHost(body.id, { label, allowAgentStart, shareCredentials });
+    if (shareCredentials === false && !stillShares(updated)) abortBrokerRequests(body.id);
     notifyHostsChange();
     return Response.json({ host: hostsSnapshot().hosts.find((h) => h.id === body.id) }, { headers: noStore });
   } catch (error) {

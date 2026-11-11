@@ -29,6 +29,11 @@ export function isClusterMember(pools: readonly HostPool[], hostId: string): boo
   return clusterOf(pools)?.members.some((member) => member.hostId === hostId) ?? false;
 }
 
+/** Whether sessions on this host run on the server's provider logins: members always, other hosts by their own flag, `local` never. */
+export function sharesCredentials(record: { id: string; shareCredentials: boolean }, pools: readonly HostPool[]): boolean {
+  return record.id !== LOCAL_HOST_ID && (record.shareCredentials || isClusterMember(pools, record.id));
+}
+
 /** A path under a host's root, in the separator that root uses (hosts may run another OS than the server). */
 const under = (root: string, name: string) => `${root}${root.includes("\\") ? "\\" : "/"}${name}`;
 
