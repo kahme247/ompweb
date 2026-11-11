@@ -34,7 +34,16 @@ function renderPanels(subagents) {
 test("subagents header shows the completed count once nothing is running (#352)", () => {
   renderPanels(Array.from({ length: 6 }, (_, i) => makeSubagent(i, "completed")));
   const counter = screen.getByLabelText("6/6 complete");
-  assert.equal(counter.textContent, "6/6");
+  assert.equal(counter.textContent, "6/6 complete");
+});
+
+test("subagents header counts only truly completed runs, not failed ones (#352)", () => {
+  renderPanels([
+    ...Array.from({ length: 4 }, (_, i) => makeSubagent(i, "completed")),
+    ...Array.from({ length: 2 }, (_, i) => makeSubagent(i + 4, "failed")),
+  ]);
+  const counter = screen.getByLabelText("4/6 complete");
+  assert.equal(counter.textContent, "4/6 complete");
 });
 
 test("subagents header still shows the running count while any subagent runs", () => {

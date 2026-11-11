@@ -167,10 +167,13 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
   }
   const runningCount = running.length;
   // Once nothing runs, the header counts finished subagents instead of
-  // showing 0/N (#352): "0/6" reads as if nothing finished.
-  const headerCount = runningCount === 0 ? completed.length : runningCount;
+  // showing 0/N (#352): "0/6" reads as if nothing finished. Only
+  // status === "completed" counts: the `completed` bucket above also holds
+  // failed/aborted runs, and "6/6 complete" must not claim those.
+  const completedCount = subagents.filter((subagent) => subagent.status === "completed").length;
+  const headerCount = runningCount === 0 ? completedCount : runningCount;
   const headerSummary = runningCount === 0
-    ? t("chatWindow.subagentCompletedSummary", { completed: completed.length, total: subagents.length })
+    ? t("chatWindow.subagentCompletedSummary", { completed: completedCount, total: subagents.length })
     : t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length });
 
   function renderChip(subagent: SubagentInfo) {
@@ -261,7 +264,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
           aria-label={headerSummary}
           title={headerSummary}
         >
-          <span>{headerCount}/{subagents.length}</span>
+          <span>{runningCount === 0 ? headerSummary : `${headerCount}/${subagents.length}`}</span>
         </span>
         <ChevronDown
           size={14}
