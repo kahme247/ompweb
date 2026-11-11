@@ -30,6 +30,7 @@ import {
   PartJoiner,
   SeqWindow,
   SESSION_OP_PARAMS,
+  SHARED_CREDENTIALS_SINCE_VERSION,
   type DownMessage,
   UPLOADS_SINCE_VERSION,
   type HelloChannel,
@@ -1488,8 +1489,14 @@ export class RemoteHost implements Host {
         throw new HostOpError(426, "host_upgrade_required", `${this.label} needs a newer ompweb to use creation identity`);
       }
     }
+    // A pure join (expectedChannel) starts nothing, so it is neither refused nor flagged.
+    const sharing = options?.expectedChannel === undefined && this.id !== LOCAL_HOST_ID
+      && loadHosts().some((host) => host.id === this.id && host.shareCredentials);
+    if (sharing && (link.hostVersion ?? 0) < SHARED_CREDENTIALS_SINCE_VERSION) {
+      throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to share credentials with it`);
+    }
     if (link.shared) {
-      const opening: OpenChannelRequest = { sessionId, launch: spawnRequest, ...options };
+      const opening: OpenChannelRequest = { sessionId, launch: sharing ? { ...spawnRequest, shareCredentials: true } : spawnRequest, ...options };
       // An open may wait for a cold child's `ready`, which sends nothing meanwhile.
       return await request(this.id, "open", opening, LINK_LIMITS.channelReadyMs + linkTimings.opTimeoutMs, (value) => {
         if (!isOpenResult(value) || (options?.expectedChannel !== undefined && value.ch !== options.expectedChannel)) {

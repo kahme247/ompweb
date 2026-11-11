@@ -145,7 +145,7 @@ test("status/drain/resume consume the real CLI daemon endpoint and SIGTERM remov
           const frame = JSON.parse(line);
           if (frame.type === "hello") {
             hellos += 1;
-            ws.send(JSON.stringify({ type: "welcome", v: 8, hostId: "cli-fixture" }));
+            ws.send(JSON.stringify({ type: "welcome", v: 9, hostId: "cli-fixture" }));
           } else if (typeof frame.seq === "number") ws.send(JSON.stringify({ type: "ack", ack: frame.seq }));
         }
       },
@@ -164,7 +164,7 @@ test("status/drain/resume consume the real CLI daemon endpoint and SIGTERM remov
     status = JSON.parse((await hostCommand(f.env, "status")).stdout);
   }
   assert.equal(status.pid, daemon.child.pid, "the launcher must not leave a wrapper PID");
-  assert.equal(status.protocol, 8);
+  assert.equal(status.protocol, 9);
   assert.equal(status.drained, false);
   assert.equal(hellos, 1);
   assert.equal(JSON.stringify(status).includes("private-cli-fixture-token"), false);

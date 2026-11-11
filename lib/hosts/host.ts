@@ -13,6 +13,10 @@ export function isLinkUp(status: HostStatus): boolean {
 export interface SpawnRequest {
   /** Stable identity of one independent start; retries must preserve its spawn arguments. */
   creationId?: string;
+  /** Hub → daemon (v9): run this process with the opening server's provider logins. */
+  shareCredentials?: true;
+  /** Daemon only: the server URL whose link supplies the credentials. Never trusted from the wire. */
+  credentialsServer?: string;
   cwd: string;
   recordedCwd: string | null;
   sessionFile: string;

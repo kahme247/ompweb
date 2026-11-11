@@ -306,11 +306,11 @@ that upload's file.
   gone; 5: lines over 256 KiB go as `part`s and large results as several binary
   frames, sent fair across channels; 6: composer uploads, with binary down
   frames, `upload_ack` and the `uploadStart`/`uploadAbort`/`uploadAttach`
-  ops). Main links daemons from
-  `MIN_LINK_PROTOCOL_VERSION` (4) up to its own `LINK_PROTOCOL_VERSION` (6);
+  ops; 9: `open.launch.shareCredentials`). Main links daemons from
+  `MIN_LINK_PROTOCOL_VERSION` (4) up to its own `LINK_PROTOCOL_VERSION` (9);
   its `welcome` carries the version the link speaks (see "Protocol versions and
   compatibility"). A hello whose `v` is outside that range (checked on the raw
-  JSON before decoding) gets close 4426 with reason `{"serverVersion":6}`; the
+  JSON before decoding) gets close 4426 with reason `{"serverVersion":9}`; the
   daemon exits 1, telling which side to
   update ("update ompweb on this host", or "this host's ompweb is newer than
   the server's: update ompweb on the server" when `serverVersion` is below its
