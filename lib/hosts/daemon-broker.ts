@@ -21,11 +21,12 @@ const RESPONSE_HEADERS = ["content-type", "etag", "cache-control", "vary"];
 export type BrokerForwarder = { env(serverUrl: string): Promise<Record<string, string>>; stop(): Promise<void> };
 type Deps = { login(serverUrl: string): { url: string; token: string } | null; log(message: string): void };
 
+const codeOf = (value: unknown) => (value && typeof value === "object" && "code" in value && typeof value.code === "string" ? value.code : undefined);
+
 /** What failed, for the log: the system error code when there is one, never a message (it can carry a URL). */
 function describe(error: unknown): string {
   if (!(error instanceof Error)) return "error";
-  const { cause } = error;
-  return cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string" ? cause.code : error.name;
+  return codeOf(error) ?? codeOf(error.cause) ?? error.name;
 }
 
 function reply(res: ServerResponse, status: number, error: string) {
@@ -74,7 +75,8 @@ async function forward(req: IncomingMessage, res: ServerResponse, secret: Buffer
       const value = req.headers[name];
       if (typeof value === "string") headers.set(name, value);
     }
-    upstream = await fetch(target, { method: req.method, headers, body: req.method === "GET" || req.method === "HEAD" ? undefined : body, signal: controller.signal });
+    // A redirect would carry the link token on to whatever it names, on the same origin too: it is a failure, not a hop.
+    upstream = await fetch(target, { method: req.method, headers, body: req.method === "GET" || req.method === "HEAD" ? undefined : body, signal: controller.signal, redirect: "error" });
   } catch (error) {
     if (controller.signal.aborted) return; // the client left, or stop() closed it
     deps.log(`broker forward failed (${describe(error)})`);
@@ -109,6 +111,8 @@ export function startBrokerForwarder(deps: Deps): BrokerForwarder {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
+      // From here an error event has no promise to reject and, unhandled, would throw out of the daemon.
+      server.on("error", (error) => deps.log(`broker listener error (${describe(error)})`));
       const { port } = server.address() as AddressInfo; // a TCP listener reports an address object, not a pipe path
       resolve({ server, origin: `http://127.0.0.1:${port}` });
     });
@@ -140,8 +144,10 @@ export function startBrokerForwarder(deps: Deps): BrokerForwarder {
 export async function credentialsEnv(launch: SpawnRequest, deps: { forwarder: BrokerForwarder; ompVersion(): Promise<string | null> }): Promise<Record<string, string> | undefined> {
   if (!launch.credentialsServer) return undefined;
   const version = await deps.ompVersion();
-  // isNewerVersion is false for a version it cannot parse, and that must refuse: omp would fall back to the host's own logins.
-  if (version === null || !isNewerVersion(version, "0.0.0") || isNewerVersion(MIN_SHARED_CREDENTIALS_OMP, version)) {
+  // `omp --version` prints "omp/<version>": the prefix is not part of the version. A version that does not parse refuses too
+  // (isNewerVersion is false for it): omp would fall back to the host's own logins.
+  const bare = version?.replace(/^omp\//, "") ?? null;
+  if (bare === null || !isNewerVersion(bare, "0.0.0") || isNewerVersion(MIN_SHARED_CREDENTIALS_OMP, bare)) {
     throw new HostOpError(409, "host_omp_too_old", `Shared credentials need omp ${MIN_SHARED_CREDENTIALS_OMP} or newer on this host (found ${version ?? "unknown"})`);
   }
   return deps.forwarder.env(launch.credentialsServer);
