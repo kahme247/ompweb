@@ -5,8 +5,8 @@ import { openEventStream } from "@/lib/event-stream";
 import type { HostRow } from "@/lib/hosts/hub";
 import type { HostPool } from "@/lib/hosts/pools";
 
-/** Live host status plus retained pool configuration from the authenticated snapshot.
- * Hosts-only SSE frames cannot erase the configured logical targets. */
+/** Live host status plus pool configuration: the authenticated snapshot, then each SSE frame that carries it.
+ * A frame without pools cannot erase the configured logical targets. */
 export function useHostRows(): { hosts: HostRow[] | null; pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; failed: boolean } {
   const [hosts, setHosts] = useState<HostRow[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -32,11 +32,12 @@ export function useHostRows(): { hosts: HostRow[] | null; pools: HostPool[]; poo
     const stream = openEventStream({ kind: "hosts" });
     stream.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data) as { hosts?: HostRow[] };
+        const data = JSON.parse(event.data) as { hosts?: HostRow[]; pools?: HostPool[] };
         if (Array.isArray(data.hosts)) {
           setHosts(data.hosts);
           setFailed(false);
         }
+        if (Array.isArray(data.pools)) setPools(data.pools);
       } catch {
         // A malformed frame is skipped; the next change sends a full list.
       }

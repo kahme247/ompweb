@@ -46,6 +46,7 @@ import {
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
 import { confirmPooledChild, pooledStartForChild } from "./pool-starts";
+import { loadPools, type HostPool } from "./pools";
 import { validateHostTools } from "./shared-requests";
 import type { HostSoftwareUpdate, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
 import { isUpdateDisabled } from "../update-policy";
@@ -1670,8 +1671,9 @@ export interface LocalHostRow {
 
 export type HostRow = LocalHostRow | LinkedHostRow;
 
-/** Settings → Hosts payload (`GET /api/hosts` and the `hosts` channel): this machine first, then linked hosts. This machine's status is its daemon link's. */
-export function hostsSnapshot(): { hosts: HostRow[] } {
+/** Settings → Hosts payload (`GET /api/hosts` and the `hosts` channel): this machine first, then linked hosts. This machine's status is its daemon link's.
+ * `pools` is left out while pools.json cannot be read: a client keeps the last it had. */
+export function hostsSnapshot(): { hosts: HostRow[]; pools?: HostPool[] } {
   const link = hub().links.get(LOCAL_HOST_ID);
   const local: LocalHostRow = {
     id: "local",
@@ -1687,7 +1689,13 @@ export function hostsSnapshot(): { hosts: HostRow[] } {
     serverPlatform: process.platform,
     daemonManaged: process.env.NODE_ENV !== "development",
   };
-  return { hosts: [local, ...listHosts()] };
+  let pools: HostPool[] | undefined;
+  try {
+    pools = loadPools();
+  } catch {
+    // Left out; see above.
+  }
+  return { hosts: [local, ...listHosts()], ...(pools && { pools }) };
 }
 
 /** Tell `hosts` subscribers the registry changed (rename, toggle, revoke); link changes notify on their own. */
