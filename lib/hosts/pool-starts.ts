@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, posix, win32 } from "node:path";
+import { dirname, join } from "node:path";
 import { getAgentDir } from "../omp/paths";
 import { RpcCommandError } from "../omp/rpc-process";
 import type { PreparedPoolProject } from "../pooled-projects";
@@ -10,7 +10,7 @@ import type { ProjectLaunchConfig } from "../types";
 import type { Host } from "./host";
 import { adoptedChild, getHost, getHostCapacity, getHostLinkProtocol, reconcilePooledChild } from "./hub";
 import { CREATION_ID_RE, HostOpError, type HelloChannel } from "./link-protocol";
-import { loadPools, selectPoolHost, type PoolHostSnapshot } from "./pools";
+import { loadPools, pathApi, selectPoolHost, type PoolHostSnapshot } from "./pools";
 
 export interface PoolCreateInput {
   creationId: string;
@@ -88,7 +88,6 @@ function canonical(value: unknown): string {
   throw new PoolStartError(400, "invalid_creation_intent", "Creation intent must contain only JSON values");
 }
 function fingerprint(value: unknown): string { return createHash("sha256").update("ompweb:pool-creation:v1:").update(canonical(value)).digest("hex"); }
-function pathApi(path: string): typeof posix { return win32.isAbsolute(path) && !posix.isAbsolute(path) ? win32 : posix; }
 function absolute(path: unknown): path is string { return typeof path === "string" && !path.includes("\0") && pathApi(path).isAbsolute(path) && pathApi(path).normalize(path) === path; }
 function creationCwd(cloneRoot: string, creationId: string): string {
   const path = pathApi(cloneRoot);
