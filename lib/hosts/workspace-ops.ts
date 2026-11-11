@@ -22,6 +22,7 @@ import { WorkspaceReads } from "./workspace-reads";
 import { WorkspaceWatches } from "./workspace-watch";
 import { getGitFileDiff, getGitStatus } from "../git-changes";
 import { resolveGithubRepo } from "../github-repo";
+import { repositoryKey } from "../git-clone";
 import { createChildProcessEnvironment } from "../project-command-env";
 import { addWorktree, findCurrentWorktreePath, listWorktrees, removeWorktree, resolveProject, type WorktreeInfo } from "../worktree";
 import { projectIdentityKey } from "../paths";
@@ -43,6 +44,11 @@ async function result<T>(action: () => Promise<T>): Promise<OpResult<T>> {
 }
 
 const MAX_GIT_ORIGIN_PATHS = 500;
+const MAX_GIT_ORIGIN_PATH_LENGTH = 4096;
+const MAX_GIT_ORIGIN_LENGTH = 2048;
+const NO_GIT_ORIGIN = { origin: null, mainCheckout: false } as const;
+/** Tests shorten the budget. */
+export const gitOriginLimits = { concurrency: 8, budgetMs: 20_000 };
 const execFileAsync = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await execFileAsync("git", ["-C", cwd, ...args], {
   encoding: "utf8", timeout: 5_000, windowsHide: true, env: createChildProcessEnvironment({ LC_ALL: "C" }),
@@ -57,9 +63,11 @@ async function gitOrigin(requested: string): Promise<Omit<GitOrigin, "path">> {
     const mainCheckout = !!dotGit?.isDirectory() && topLevel === path.resolve(directory);
     const urls = await git(directory, "config", "--null", "--get-all", "remote.origin.url").catch(() => "");
     const values = urls.split("\0").slice(0, -1);
-    return { origin: values.length === 1 ? values[0] : null, mainCheckout };
+    const [value] = values;
+    // Only a plain repository URL (no credentials, no local path) of sane length is reported.
+    return { origin: values.length === 1 && value.length <= MAX_GIT_ORIGIN_LENGTH && repositoryKey(value) !== null ? value : null, mainCheckout };
   } catch {
-    return { origin: null, mainCheckout: false };
+    return NO_GIT_ORIGIN;
   }
 }
 
@@ -190,9 +198,18 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
     }),
     githubRepo: (cwd) => result(async () => ({ repo: await resolveGithubRepo(await authorizeWorkspaceDirectory(cwd)) })),
     gitOrigins: (paths) => result(async () => {
-      if (!Array.isArray(paths) || paths.length > MAX_GIT_ORIGIN_PATHS) throw invalid();
-      const origins: GitOrigin[] = [];
-      for (const requested of paths) origins.push({ path: requested, ...await gitOrigin(requested) });
+      if (!Array.isArray(paths) || paths.length > MAX_GIT_ORIGIN_PATHS
+        || !paths.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= MAX_GIT_ORIGIN_PATH_LENGTH)) throw invalid();
+      const deadline = Date.now() + gitOriginLimits.budgetMs;
+      const origins: GitOrigin[] = new Array(paths.length);
+      let next = 0;
+      // A path whose turn starts after the budget is spent answers like a plain folder, so the op outlasts neither a stalled mount nor the link deadline.
+      const worker = async () => {
+        for (let index = next++; index < paths.length; index = next++) {
+          origins[index] = { path: paths[index], ...(Date.now() < deadline ? await gitOrigin(paths[index]) : NO_GIT_ORIGIN) };
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(gitOriginLimits.concurrency, paths.length) }, worker));
       return { origins };
     }),
     listWorktrees: (cwd) => result(async () => {
