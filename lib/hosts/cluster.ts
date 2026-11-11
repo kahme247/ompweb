@@ -9,6 +9,8 @@ import type { HostPool, PoolProject } from "./pools";
 export const CLUSTER_ID = "cluster";
 export const CLUSTER_LABEL = "Cluster";
 export const CLUSTER_PROJECTS_DIR = "ompweb-cluster";
+/** The first link protocol whose daemons can be cluster members; they also need the `gitOrigins` operation. */
+export const CLUSTER_SINCE_VERSION = 9;
 
 export class ClusterError extends Error {
   readonly name = "ClusterError";

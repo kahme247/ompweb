@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, ClusterError, isClusterMember, joinCluster, leaveCluster, type HostProjectFacts } from "@/lib/hosts/cluster";
+import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, CLUSTER_SINCE_VERSION, ClusterError, isClusterMember, joinCluster, leaveCluster, type HostProjectFacts } from "@/lib/hosts/cluster";
 import type { Host } from "@/lib/hosts/host";
 import { getHost, getHostLinkProtocol, notifyHostsChange } from "@/lib/hosts/hub";
 import { HostOpError } from "@/lib/hosts/link-protocol";
@@ -16,8 +16,6 @@ import { isRecord } from "@/lib/type-guards";
 import type { GitOrigin } from "@/lib/workspace-types";
 
 type Context = { params: Promise<{ id: string }> };
-/** The first link protocol whose daemons can be cluster members. */
-const CLUSTER_SINCE_VERSION = 9;
 /** gitOrigins' input bounds: it refuses the whole call beyond them. */
 const MAX_ORIGIN_PATHS = 500;
 const MAX_ORIGIN_PATH_LENGTH = 4096;

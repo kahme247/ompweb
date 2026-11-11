@@ -1,13 +1,15 @@
 "use client";
 
-import { useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
 import { Copy, Pencil, Plus, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/field";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
+import { CLUSTER_PROJECTS_DIR, CLUSTER_SINCE_VERSION, clusterOf, isClusterMember } from "@/lib/hosts/cluster";
 import type { HostRow } from "@/lib/hosts/hub";
+import type { HostPool } from "@/lib/hosts/pools";
 import { useI18n } from "@/lib/i18n";
 import { useHostRows } from "@/hooks/useHostRows";
 import { HOST_STATUS_COLOR, hostName, hostStatusText, isLocalRow, localInstallCommand } from "./host-status";
@@ -111,10 +113,79 @@ function HostDialog({ dialog, onClose }: { dialog: NonNullable<Dialogs>; onClose
   );
 }
 
-function HostCard({ host, onRename, onRevoke, onShare }: { host: HostRow; onRename: () => void; onRevoke: () => void; onShare: () => void }) {
+/** The folder on the joining host where the cluster keeps the checkouts it creates. Without a home folder it starts empty and stays required. */
+function JoinDialog({ host, onClose }: { host: HostRow; onClose: () => void }) {
+  const { t } = useI18n();
+  const name = hostName(t, host);
+  const [folder, setFolder] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const errorId = useId();
+
+  useEffect(() => {
+    let current = true;
+    void call("GET", `/api/home?hostId=${encodeURIComponent(host.id)}`)
+      .then(({ home }) => {
+        if (current && typeof home === "string" && home) setFolder((typed) => typed || `${home}${home.includes("\\") ? "\\" : "/"}${CLUSTER_PROJECTS_DIR}`);
+      })
+      .catch(() => {});
+    return () => { current = false; };
+  }, [host.id]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const projectsRoot = folder.trim();
+    // POSIX, drive-letter or UNC; the server applies its own rules too.
+    if (!/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(projectsRoot)) return setError(t("errors.path_must_be_absolute"));
+    setBusy(true);
+    setError(null);
+    try {
+      await call("PUT", `/api/hosts/${encodeURIComponent(host.id)}/cluster`, { projectsRoot });
+      onClose();
+    } catch (failed) {
+      setError(failed instanceof Error ? failed.message : String(failed));
+      setBusy(false);
+    }
+  };
+
+  const title = t("hostsConfig.joinTitle", { name });
+  const noteStyle = { margin: 0, fontSize: 13, lineHeight: 1.5, color: "var(--text-muted)" } as const;
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
+      <DialogContent ariaLabel={title} style={{ width: 520, maxWidth: "min(92vw, 520px)", padding: 22 }}>
+        <DialogTitle>{title}</DialogTitle>
+        <form onSubmit={(event) => void submit(event)} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, fontWeight: 500, color: "var(--text-muted)" }}>
+            {t("hostsConfig.joinFolder", { name })}
+            <input autoFocus value={folder} aria-invalid={error !== null} aria-describedby={error ? errorId : undefined} onChange={(event) => setFolder(event.target.value)} style={inputStyle} />
+          </label>
+          <p style={noteStyle}>{t("hostsConfig.joinProjectsNote", { name })}</p>
+          <p style={noteStyle}>{t("hostsConfig.joinCredentialsNote", { name })}</p>
+          {error && <div id={errorId} role="alert" style={{ fontSize: 12, color: "var(--status-error)" }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button type="button" className="ui-focus-ring" style={buttonStyle} disabled={busy} onClick={onClose}>{t("hostsConfig.cancel")}</button>
+            <button type="submit" className="ui-focus-ring" style={{ ...primaryStyle, opacity: busy || !folder.trim() ? 0.7 : 1 }} disabled={busy || !folder.trim()}>{t("hostsConfig.joinConfirm")}</button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+type ClusterState = { pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean };
+
+function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave }: { host: HostRow; cluster: ClusterState; onRename: () => void; onRevoke: () => void; onShare: () => void; onJoin: () => void; onLeave: () => void }) {
   const { t } = useI18n();
   const name = hostName(t, host);
   const linked = "allowAgentStart" in host ? host : null;
+  const member = isClusterMember(cluster.pools, host.id);
+  // Unknown membership (pools not loaded) disables every switch. Otherwise only a non-member needs a ready host: leaving always works.
+  const joinReason = !cluster.poolsLoaded ? (cluster.poolsFailed ? "poolsUnavailable" : null)
+    : member ? null
+      : host.status !== "online" ? "joinOffline"
+        : linked && ((host.hostVersion ?? 0) < CLUSTER_SINCE_VERSION || !host.workspaceOps.includes("gitOrigins")) ? "joinUpgrade" : null;
+  const reasonId = useId();
+  const forcedId = useId();
   const details = [
     host.platform,
     host.hostVersion !== null && host.status !== "needs-upgrade" && t("hostsConfig.protocol", { version: host.hostVersion }),
@@ -140,6 +211,20 @@ function HostCard({ host, onRename, onRevoke, onShare }: { host: HostRow; onRena
         )}
       </div>
       <div className="settings-card-control" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", flexShrink: 1, maxWidth: "100%" }}>
+        {isLocalRow(host) && clusterOf(cluster.pools) && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("hostsConfig.clusterMaster")}</span>}
+        {linked && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: "100%", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.inCluster")}</span>
+            <ToggleSwitch
+              checked={member}
+              disabled={!cluster.poolsLoaded || joinReason !== null}
+              aria-label={t("hostsConfig.inClusterAria", { name })}
+              aria-describedby={joinReason ? reasonId : undefined}
+              onChange={(joining) => (joining ? onJoin() : onLeave())}
+            />
+            {joinReason && <span id={reasonId} style={{ fontSize: 11, color: "var(--text-dim)", maxWidth: 200 }}>{t(`hostsConfig.${joinReason}`)}</span>}
+          </div>
+        )}
         {linked && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: "100%" }}>
             <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.allowAgentStart")}</span>
@@ -151,13 +236,16 @@ function HostCard({ host, onRename, onRevoke, onShare }: { host: HostRow; onRena
           </div>
         )}
         {linked && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: "100%" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: "100%", flexWrap: "wrap" }}>
             <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.shareCredentials")}</span>
             <ToggleSwitch
-              checked={linked.shareCredentials}
+              checked={linked.shareCredentials || member}
+              disabled={member}
               aria-label={t("hostsConfig.shareCredentialsAria", { name })}
+              aria-describedby={member ? forcedId : undefined}
               onChange={(shareCredentials) => { if (shareCredentials) onShare(); else void call("PATCH", "/api/hosts", { id: host.id, shareCredentials }).catch(failure); }}
             />
+            {member && <span id={forcedId} style={{ fontSize: 11, color: "var(--text-dim)", maxWidth: 200 }}>{t("hostsConfig.shareForced")}</span>}
           </div>
         )}
         <button type="button" className="ui-focus-ring" aria-label={t("hostsConfig.renameAria", { name })} style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5 }} onClick={onRename}>
@@ -176,10 +264,12 @@ function HostCard({ host, onRename, onRevoke, onShare }: { host: HostRow; onRena
 
 export function HostsConfig() {
   const { t } = useI18n();
-  const { hosts, failed: loadFailed } = useHostRows();
+  const { hosts, pools, poolsLoaded, poolsFailed, failed: loadFailed } = useHostRows();
   const [dialog, setDialog] = useState<Dialogs>(null);
   const [revoking, setRevoking] = useState<HostRow | null>(null);
   const [sharing, setSharing] = useState<HostRow | null>(null);
+  const [joining, setJoining] = useState<HostRow | null>(null);
+  const [leaving, setLeaving] = useState<HostRow | null>(null);
   const [busy, setBusy] = useState(false);
 
   const share = async () => {
@@ -188,6 +278,19 @@ export function HostsConfig() {
     try {
       await call("PATCH", "/api/hosts", { id: sharing.id, shareCredentials: true });
       setSharing(null);
+    } catch (error) {
+      failure(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const leave = async () => {
+    if (!leaving) return;
+    setBusy(true);
+    try {
+      await call("DELETE", `/api/hosts/${encodeURIComponent(leaving.id)}/cluster`);
+      setLeaving(null);
     } catch (error) {
       failure(error);
     } finally {
@@ -226,12 +329,23 @@ export function HostsConfig() {
       ) : (
         <ul aria-label={t("hostsConfig.title")} style={{ margin: 0, padding: 0 }}>
           {hosts.map((host) => (
-            <HostCard key={host.id} host={host} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} onShare={() => setSharing(host)} />
+            <HostCard key={host.id} host={host} cluster={{ pools, poolsLoaded, poolsFailed }} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} onShare={() => setSharing(host)} onJoin={() => setJoining(host)} onLeave={() => setLeaving(host)} />
           ))}
           {hosts.length === 1 && <li style={{ listStyle: "none", fontSize: 12, color: "var(--text-dim)" }}>{t("hostsConfig.empty")}</li>}
         </ul>
       )}
       {dialog && <HostDialog dialog={dialog} onClose={() => setDialog(null)} />}
+      {joining && <JoinDialog host={joining} onClose={() => setJoining(null)} />}
+      <ConfirmDialog
+        open={leaving !== null}
+        onOpenChange={(open) => { if (!open) setLeaving(null); }}
+        title={t("hostsConfig.leaveTitle", { name: leaving?.label ?? "" })}
+        description={t("hostsConfig.leaveDescription", { name: leaving?.label ?? "" })}
+        confirmLabel={t("hostsConfig.leaveConfirm")}
+        cancelLabel={t("hostsConfig.cancel")}
+        busy={busy}
+        onConfirm={() => void leave()}
+      />
       <ConfirmDialog
         open={revoking !== null}
         onOpenChange={(open) => { if (!open) setRevoking(null); }}
