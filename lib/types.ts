@@ -193,6 +193,11 @@ export type ExtensionUiRequest =
       method: "select";
       title: string;
       options: string[];
+      /** omp's checkbox list (ask multi-select): `checkedIndices` is the authoritative checked state. */
+      selectionMarker?: "radio" | "checkbox";
+      checkedIndices?: number[];
+      /** Leading options that get a marker; the rest are actions such as Other and Done. */
+      markableCount?: number;
       timeout?: number;
       expiresAt?: number;
     }

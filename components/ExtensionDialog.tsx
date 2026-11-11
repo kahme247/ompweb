@@ -415,8 +415,10 @@ export function ExtensionDialog({
           )}
           {request.method === "select" && (
             <div style={{ display: "grid", gap: 8 }}>
-              {request.options.map((option) => {
+              {request.options.map((option, index) => {
                 const selected = selectedOption === option;
+                const checkbox = request.selectionMarker === "checkbox" && index < (request.markableCount ?? request.options.length);
+                const checked = checkbox && (request.checkedIndices?.includes(index) ?? false);
                 return (
                   <button
                     key={option}
@@ -438,7 +440,9 @@ export function ExtensionDialog({
                     onMouseEnter={attached ? undefined : (e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
                     onMouseLeave={attached ? undefined : (e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
                   >
+                    {checkbox && <span aria-hidden="true" style={{ marginRight: 6, color: checked ? "var(--accent)" : "var(--text-dim)" }}>{checked ? "☑" : "☐"}</span>}
                     {option}
+                    {checkbox && <span className="sr-only">, {t(checked ? "chatWindow.optionChecked" : "chatWindow.optionUnchecked")}</span>}
                   </button>
                 );
               })}
