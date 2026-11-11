@@ -138,8 +138,11 @@ function writeJournal(journal: Journal): void {
     fsyncSync(fd);
     closeSync(fd); fd = undefined;
     renameSync(temporary, file);
-    fd = openSync(dirname(file), "r");
-    fsyncSync(fd);
+    // Windows cannot open directories for fsync; the synced file is already committed by rename.
+    if (process.platform !== "win32") {
+      fd = openSync(dirname(file), "r");
+      fsyncSync(fd);
+    }
   } catch { throw unavailable(); }
   finally {
     if (fd !== undefined) closeSync(fd);
