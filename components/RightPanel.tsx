@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useState, type Ref, type RefObject } from "react";
+import { memo, useCallback, useEffect, useState, type Ref, type RefObject } from "react";
 import {
   AtSign,
   ChevronsDownUp,
@@ -45,6 +45,7 @@ interface Props {
   revealPath: string | null;
   onRevealDone: () => void;
   explorerCwd: string | null;
+  sourceSessionId?: string | null;
   hostId: string;
   /** Active Git workspace's worktrees (null when it is not a Git top-level repo). */
   worktrees: WorktreeContext | null;
@@ -100,6 +101,7 @@ export const RightPanel = memo(function RightPanel({
   revealPath,
   onRevealDone,
   explorerCwd,
+  sourceSessionId,
   hostId,
   worktrees,
   connectionDiagnosticsOn,
@@ -134,8 +136,11 @@ export const RightPanel = memo(function RightPanel({
   onRightPanelResizeKey,
 }: Props) {
   const { t } = useI18n();
+  const openWorkspaceFile = useCallback((filePath: string, fileName: string) => {
+    onOpenFile(filePath, fileName, { hostId, sessionId: sourceSessionId ?? null, cwd: explorerCwd });
+  }, [onOpenFile, hostId, sourceSessionId, explorerCwd]);
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
-  const activeFileSameHost = activeFileTab?.hostId === hostId;
+  const activeFileMatchesSource = activeFileTab?.hostId === hostId && (activeFileTab?.sourceSessionId ?? null) === (sourceSessionId ?? null);
   const gitBadge = explorerIsRepo ? explorerGitCount : 0;
   const unreadNotifications = useUnreadNotificationCount();
   const [visitedViews, setVisitedViews] = useState<Set<RightPanelView>>(() => new Set(["explorer"]));
@@ -290,10 +295,10 @@ export const RightPanel = memo(function RightPanel({
             <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={activeFileTab.filePath}>
               <button
                 onClick={onMentionActiveFile}
-                disabled={!activeFileSameHost}
-                title={t(activeFileSameHost ? "appShell.mentionFileInChat" : "hosts.fileOtherHost")}
+                disabled={!activeFileMatchesSource}
+                title={t("appShell.mentionFileInChat")}
                 aria-label={t("appShell.mentionFileInChat")}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: activeFileSameHost ? "var(--accent)" : "var(--text-dim)", cursor: activeFileSameHost ? "pointer" : "not-allowed", opacity: activeFileSameHost ? 1 : 0.5 }}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--accent)", cursor: activeFileMatchesSource ? "pointer" : "default", opacity: activeFileMatchesSource ? 1 : 0.45 }}
                 onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
               >
@@ -311,10 +316,10 @@ export const RightPanel = memo(function RightPanel({
               </button>
               <button
                 onClick={onRevealActiveFile}
-                disabled={!activeFileSameHost}
-                title={t(activeFileSameHost ? "appShell.revealInExplorer" : "hosts.fileOtherHost")}
+                disabled={!activeFileMatchesSource}
+                title={t(activeFileMatchesSource ? "appShell.revealInExplorer" : "appShell.revealSourceSession")}
                 aria-label={t("appShell.revealInExplorer")}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: revealPath ? "var(--bg-hover)" : "none", border: "none", borderRadius: "var(--radius-control)", color: revealPath ? "var(--accent)" : "var(--text-dim)", cursor: activeFileSameHost ? "pointer" : "not-allowed", opacity: activeFileSameHost ? 1 : 0.5 }}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: revealPath ? "var(--bg-hover)" : "none", border: "none", borderRadius: "var(--radius-control)", color: revealPath ? "var(--accent)" : "var(--text-dim)", cursor: activeFileMatchesSource ? "pointer" : "not-allowed", opacity: activeFileMatchesSource ? 1 : 0.5 }}
                 onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.color = revealPath ? "var(--accent)" : "var(--text-dim)"; e.currentTarget.style.background = revealPath ? "var(--bg-hover)" : "none"; }}
               >
@@ -409,11 +414,12 @@ export const RightPanel = memo(function RightPanel({
               </div>
               <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
                 <FileExplorer
+                  key={`${hostId}:${sourceSessionId ?? ""}:${explorerCwd}`}
                   ref={fileExplorerRef}
-                  key={hostId}
                   hostId={hostId}
                   cwd={explorerCwd}
-                  onOpenFile={(path, name) => onOpenFile(path, name, { hostId, cwd: explorerCwd, sessionId: null })}
+                  sourceSessionId={sourceSessionId}
+                  onOpenFile={openWorkspaceFile}
                   refreshKey={explorerRefreshKey}
                   onAtMention={onAtMention}
                   onAtMentions={onAtMentions}
@@ -421,7 +427,7 @@ export const RightPanel = memo(function RightPanel({
                   onRefreshDone={onExplorerRefreshDone}
                   fileSearchOpen={fileSearchOpen}
                   onFileSearchOpenChange={onFileSearchOpenChange}
-                  activeFilePath={activeFileSameHost ? activeFileTab?.filePath ?? null : null}
+                  activeFilePath={activeFileMatchesSource ? activeFileTab?.filePath ?? null : null}
                   revealPath={revealPath}
                   onRevealDone={onRevealDone}
                   onGitStatusChange={onExplorerGitStatus}
@@ -440,11 +446,12 @@ export const RightPanel = memo(function RightPanel({
         <div id="workspace-file-panel-git" role="tabpanel" aria-label={t("tabBar.git")} style={{ display: rightView === "git" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {visitedViews.has("git") && (explorerCwd ? (
             <GitChangesPanel
-              key={`${hostId}:${explorerCwd}`}
+              key={`${hostId}:${sourceSessionId ?? ""}:${explorerCwd}`}
               hostId={hostId}
               cwd={explorerCwd}
+              sourceSessionId={sourceSessionId}
               refreshKey={explorerRefreshKey}
-              onOpenFile={(path, name) => onOpenFile(path, name, { hostId, cwd: explorerCwd, sessionId: null })}
+              onOpenFile={openWorkspaceFile}
               onAtMention={onAtMention}
               onRefreshDone={onExplorerRefreshDone}
             />
@@ -479,9 +486,7 @@ export const RightPanel = memo(function RightPanel({
                 sourceSessionId={tab.sourceSessionId}
                 gitRefreshKey={explorerRefreshKey}
                 active={tab.id === activeFileTabId && rightPanelOpen && rightView === "file"}
-                onMentionLines={tab.hostId === hostId && tab.id === activeFileTabId && rightPanelOpen && rightView === "file"
-                  ? (path, start, end) => onMentionLines(tab.sourceCwd === explorerCwd ? path : tab.filePath, start, end)
-                  : undefined}
+                onMentionLines={tab.id === activeFileTabId && rightPanelOpen && rightView === "file" && activeFileMatchesSource ? onMentionLines : undefined}
                 onOpenFile={(filePath) => onOpenFile(
                   filePath,
                   getFileName(filePath),

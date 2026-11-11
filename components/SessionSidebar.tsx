@@ -10,7 +10,7 @@ import { ProviderUsageBar } from "./ProviderUsageBar";
 import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
-import { LOCAL_HOST_ID, foldedHostProjectKey, groupProjectsByHost, groupSessionsByProject, hostProjectKey, nextPinOrder, orderProjects, projectActivityCounts, remoteHostId, type ProjectSortMode } from "@/lib/project-ordering";
+import { LOCAL_HOST_ID, foldedHostProjectKey, groupProjectsByHost, groupSessionsByProject, hostProjectKey, projectIdentity, projectTargetId, nextPinOrder, orderProjects, projectActivityCounts, remoteHostId, type ProjectSortMode } from "@/lib/project-ordering";
 import { isLinkUp } from "@/lib/hosts/host";
 import { useHostRows } from "@/hooks/useHostRows";
 import { HOST_STATUS_COLOR, hostName, hostStatusText } from "./host-status";
@@ -72,7 +72,7 @@ interface Props {
   /** The active session can exist in memory before its JSONL file is flushed. */
   optimisticSession?: SessionInfo | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
-  onNewSession?: (sessionId: string, cwd: string, hostId: string) => void;
+  onNewSession?: (sessionId: string, cwd: string | null, hostId?: string, project?: ManagedProject) => void;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: () => void;
@@ -81,7 +81,8 @@ interface Props {
   selectedCwd?: string | null;
   /** Host `selectedCwd` lives on (this machine when absent). */
   selectedHostId?: string | null;
-  onCwdChange?: (cwd: string | null, projectRoot: string | null, hostId: string) => void;
+  selectedLogicalProjectKey?: string | null;
+  onCwdChange?: (cwd: string | null, projectRoot: string | null, hostId: string, project?: ManagedProject) => void;
   onWorkspaceOptionsChange?: (projects: ManagedProject[], selectedProject: string | null, cwd: string | null, hostId: string) => void;
   /** The active Git workspace's worktrees and actions (null when the active
    *  workspace is not a Git top-level repo); rendered by the file panel. */
@@ -125,6 +126,9 @@ interface Props {
 
 /** The host a project or session belongs to: this machine unless it says otherwise. */
 const hostOf = (item: { hostId?: string }): string => item.hostId ?? LOCAL_HOST_ID;
+const projectRequestTarget = (project: ManagedProject) => project.poolId && project.projectId
+  ? { poolId: project.poolId, projectId: project.projectId }
+  : { cwd: project.path, hostId: remoteHostId(project.hostId) };
 const THIS_MACHINE = { id: LOCAL_HOST_ID, label: "" };
 const COLLAPSED_HOSTS_STORAGE_KEY = "omp-web:collapsed-hosts";
 
@@ -137,7 +141,7 @@ function loadCollapsedHosts(): Set<string> {
   }
 }
 
-export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, selectedHostId: selectedHostIdProp, onCwdChange, onWorkspaceOptionsChange, onWorktreeContextChange, addProjectOpen, addProjectHostId = LOCAL_HOST_ID, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, navigation, updateAvailable, settingsOpen = false, onClose, onSearchQueryChange, onOpenSearchMatch }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, selectedHostId: selectedHostIdProp, selectedLogicalProjectKey, onCwdChange, onWorkspaceOptionsChange, onWorktreeContextChange, addProjectOpen, addProjectHostId = LOCAL_HOST_ID, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, navigation, updateAvailable, settingsOpen = false, onClose, onSearchQueryChange, onOpenSearchMatch }: Props) {
 
 
   const { t } = useI18n();
@@ -147,10 +151,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   // Host of selectedCwd: the same path can be a workspace on several hosts.
   const [selectedHostId, setSelectedHostId] = useState<string>(LOCAL_HOST_ID);
+  const [selectedPoolKey, setSelectedPoolKey] = useState<string | null>(null);
+  const { hosts, pools, poolsLoaded, poolsFailed } = useHostRows();
+  const hostList = useMemo(() => {
+    // Physical groups keep existing owner-bound work visible; only creation controls filter members.
+    return [...(hosts ?? [THIS_MACHINE]), ...pools.map((pool) => ({ id: `pool:${pool.id}`, label: pool.label }))];
+  }, [hosts, pools]);
   const selectedWorkspaceRef = useRef("");
   selectedWorkspaceRef.current = hostProjectKey(selectedHostId, selectedCwd ?? "");
-  const { hosts } = useHostRows();
-  const hostList = useMemo(() => hosts ?? [THIS_MACHINE], [hosts]);
   // Host group headers only exist once a remote host is linked.
   const showHostGroups = hostList.some((host) => host.id !== LOCAL_HOST_ID);
   // The server renders no groups; collapse state is read after mount.
@@ -176,6 +184,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, [hosts, t]);
   // Managed + session-discovered projects (server-merged, hidden excluded).
   const [projects, setProjects] = useState<ManagedProject[]>([]);
+  const selectedPoolProject = projects.find((project) => project.poolId && projectIdentity(project) === selectedPoolKey);
   const [draggedProject, setDraggedProject] = useState<ManagedProject | null>(null);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   // Add-project picker state.
@@ -542,7 +551,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     // Fall back to the project registry, then to session cwd→root matches, so
     // a session whose projectKey was normalized server-side still resolves to
     // the registry's case-preserved path — the caller gets a canonical value.
-    const registered = projects.find((p) => hostOf(p) === hostId && comparableProjectPath(p.path) === comparableProjectPath(cwd));
+    const registered = projects.find((p) => !p.poolId && hostOf(p) === hostId && comparableProjectPath(p.path) === comparableProjectPath(cwd));
     if (registered) return registered.path;
     const foldedCwd = comparableProjectPath(cwd);
     const match = allSessions.find((s) => hostOf(s) === hostId && comparableProjectPath(s.cwd) === foldedCwd);
@@ -574,7 +583,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, []);
 
   const toggleProjectExpanded = useCallback((project: ManagedProject) => {
-    const key = foldedHostProjectKey(project.hostId, project.path);
+    const key = foldedHostProjectKey(project.hostId, workspaceKeyOf(project));
     setExpandedProjects((prev) => {
       const next = new Set(prev ?? []);
       if (next.has(key)) next.delete(key);
@@ -588,20 +597,22 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
    *  opening a session. */
   const activateProject = useCallback((project: ManagedProject) => {
     provisionalSelectionRef.current = false;
-    setSelectedCwd(project.path);
-    setSelectedHostId(hostOf(project));
-    expandProject(project.path, hostOf(project));
+    setSelectedPoolKey(project.poolId ? projectIdentity(project) : null);
+    setSelectedCwd(project.poolId ? null : project.path);
+    setSelectedHostId(projectTargetId(project));
+    expandProject(workspaceKeyOf(project), projectTargetId(project));
   }, [expandProject]);
 
   // Notify parent only when the effective cwd actually changes (not when
   // projectRootFor identity changes due to session/worktree refreshes).
   const lastNotifiedCwdRef = useRef<string | null>(null);
   useEffect(() => {
-    const notifyKey = selectedCwd === null ? null : hostProjectKey(selectedHostId, selectedCwd);
+    const notifyKey = selectedPoolKey ?? (selectedCwd === null ? null : hostProjectKey(selectedHostId, selectedCwd));
     if (lastNotifiedCwdRef.current === notifyKey) return;
+    if (selectedPoolKey && !selectedPoolProject) return;
     lastNotifiedCwdRef.current = notifyKey;
-    onCwdChange?.(selectedCwd, projectRootFor(selectedCwd, selectedHostId), selectedHostId);
-  }, [selectedCwd, selectedHostId, onCwdChange, projectRootFor]);
+    onCwdChange?.(selectedPoolProject ? null : selectedCwd, selectedPoolProject ? selectedPoolKey : projectRootFor(selectedCwd, selectedHostId), selectedHostId, selectedPoolProject);
+  }, [selectedCwd, selectedHostId, selectedPoolKey, selectedPoolProject, onCwdChange, projectRootFor]);
 
   // Sync the worktree switcher to the selected session's cwd. Sessions of all
   // worktrees in a project share one list, so clicking a session from another
@@ -611,6 +622,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // their containing project.
   const lastSyncedCwdPropRef = useRef<string | null>(null);
   useEffect(() => {
+    if (selectedLogicalProjectKey?.startsWith("pool:")) {
+      if (lastSyncedCwdPropRef.current !== selectedLogicalProjectKey) {
+        lastSyncedCwdPropRef.current = selectedLogicalProjectKey;
+        setSelectedPoolKey(selectedLogicalProjectKey);
+        if (selectedCwdProp) setSelectedCwd(selectedCwdProp);
+        setSelectedHostId(selectedHostIdProp ?? LOCAL_HOST_ID);
+        expandProject(selectedLogicalProjectKey);
+      }
+      return;
+    }
     // A withdrawn command must not swallow the next one: without this reset,
     // re-commanding a cwd the sidebar already synced (A -> sidebar B -> A)
     // stays stuck on B.
@@ -624,11 +645,12 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       provisionalSelectionRef.current = false;
       lastSyncedCwdPropRef.current = syncKey;
       setSelectedCwd(selectedCwdProp);
+      setSelectedPoolKey(null);
       setSelectedHostId(hostId);
       const project = projectRootFor(selectedCwdProp, hostId);
       if (project) expandProject(project, hostId);
     }
-  }, [selectedCwdProp, selectedHostIdProp, projectRootFor, expandProject]);
+  }, [selectedCwdProp, selectedHostIdProp, selectedLogicalProjectKey, projectRootFor, expandProject]);
 
   // Load worktrees/branch data for the repository containing the current
   // effective cwd. Results are cached in worktreeStateByProject keyed by the
@@ -655,7 +677,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     });
   }, []);
   useLayoutEffect(() => {
-    if (!selectedCwd) return;
+    if (!selectedCwd || selectedPoolKey) return;
     let cancelled = false;
     const requestedCwd = selectedCwd;
     const requestedHost = selectedHostId;
@@ -664,7 +686,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       .then((d) => { if (!cancelled) storeWorktreeState(requestedCwd, requestedHost, d); })
       .catch((error: unknown) => { if (!cancelled) storeWorktreeState(requestedCwd, requestedHost, { error: error instanceof Error ? error.message : String(error) }); });
     return () => { cancelled = true; };
-  }, [selectedCwd, selectedHostId, wtRefreshKey, refreshKey, storeWorktreeState]);
+  }, [selectedCwd, selectedHostId, selectedPoolKey, wtRefreshKey, refreshKey, storeWorktreeState]);
 
   // Keep a just-created session and its project visible while omp is still
   // flushing the JSONL file. The server list remains authoritative once it
@@ -675,7 +697,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const optimisticProjectRoot = (() => {
     if (!optimisticSession) return null;
     if (optimisticSession.projectRoot) return optimisticSession.projectRoot;
-    if (optimisticSession.projectKey) return optimisticSession.projectKey;
+    if (optimisticSession.projectKey && !optimisticSession.poolId) return optimisticSession.projectKey;
     const cw = optimisticSession.cwd ?? "";
     if (!cw) return null;
     const reg = projects.find((p) => hostOf(p) === hostOf(optimisticSession) && comparableProjectPath(p.path) === comparableProjectPath(cw));
@@ -686,16 +708,17 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const placeholderTsRef = useRef<Map<string, string>>(new Map());
   useEffect(() => {
     if (optimisticSession?.id && optimisticSession.cwd) {
-      const { id, cwd, hostId } = optimisticSession;
-      knownRunningPlacesRef.current.set(id, { cwd, hostId });
-      setRunningSessionPlaces((prev) => (prev[id]?.cwd === cwd && prev[id]?.hostId === hostId ? prev : { ...prev, [id]: { cwd, hostId } }));
+      const { id, cwd, hostId, poolId, projectId, projectKey } = optimisticSession;
+      const place = { cwd, hostId, poolId, projectId, projectKey };
+      knownRunningPlacesRef.current.set(id, place);
+      setRunningSessionPlaces((prev) => ({ ...prev, [id]: place }));
     }
   }, [optimisticSession]);
   const visibleSessions = useMemo(() => {
     let base = allSessions;
     if (optimisticSession && !base.some((session) => session.id === optimisticSession.id)) {
       const stableRoot = optimisticProjectRoot ?? optimisticSession.cwd;
-      const stableKey = stableRoot ? comparableProjectPath(stableRoot) : undefined;
+      const stableKey = optimisticSession.poolId ? workspaceKeyOf(optimisticSession) : stableRoot ? comparableProjectPath(stableRoot) : undefined;
       base = [...base, { ...optimisticSession, projectRoot: stableRoot ?? optimisticSession.cwd, ...(stableKey ? { projectKey: stableKey } : {}) }];
     }
     // A running session's JSONL may not exist yet (first turn still
@@ -730,7 +753,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         messageCount: 1,
         firstMessage: "",
         projectRoot: phRoot,
-        ...(phKey ? { projectKey: phKey } : {}),
+        ...(place.poolId && place.projectId ? { poolId: place.poolId, projectId: place.projectId, projectKey: workspaceKeyOf(place) } : phKey ? { projectKey: phKey } : {}),
         ...(hostId ? { hostId } : {}),
       });
     }
@@ -750,20 +773,21 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, [allSessions, optimisticSession, optimisticProjectRoot, runningSessionIds, runningSessionPlaces, exitedSessions, projectRootFor, selectedCwd, selectedHostId]);
   const visibleProjects = useMemo(() => {
     let base = projects;
-    const hasOpt = optimisticProjectRoot ? base.some((p) => foldedHostProjectKey(p.hostId, p.path) === foldedHostProjectKey(optimisticSession?.hostId, optimisticProjectRoot)) : false;
-    if (optimisticProjectRoot && !hasOpt) {
+    const hasOpt = optimisticSession ? base.some((p) => projectIdentity(p) === hostProjectKey(optimisticSession.hostId, workspaceKeyOf(optimisticSession))) : false;
+    if (optimisticProjectRoot && !hasOpt && !optimisticSession?.poolId) {
       base = [...base, { path: optimisticProjectRoot, ...(optimisticSession?.hostId ? { hostId: optimisticSession.hostId } : {}) }];
     }
     // Running placeholders may belong to a project not yet in the managed list
     // (new session's cwd wasn't registered as a project). Keep that workspace
     // visible so the placeholder row has a bucket to render in.
-    const knownFolded = new Set(base.map((p) => foldedHostProjectKey(p.hostId, p.path)));
+    const knownFolded = new Set(base.map((p) => foldedHostProjectKey(p.hostId, workspaceKeyOf(p))));
     const visibleLiveIds = new Set(runningSessionIds);
     for (const id of exitedSessions.keys()) visibleLiveIds.add(id);
     for (const id of visibleLiveIds) {
       if (allSessions.some((s) => s.id === id)) continue;
       const isOptimistic = optimisticSession?.id === id;
       const place = livePlace(id, optimisticSession, runningSessionPlaces, exitedSessions, knownRunningPlacesRef.current, { cwd: selectedCwd ?? "", hostId: selectedHostId });
+      if (place.poolId) continue;
       const hostId = remoteHostId(place.hostId);
       const resolvedRoot = isOptimistic
         ? (optimisticProjectRoot ?? optimisticSession.projectRoot ?? optimisticSession.cwd)
@@ -779,7 +803,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, [optimisticProjectRoot, projects, runningSessionIds, runningSessionPlaces, exitedSessions, allSessions, optimisticSession, projectRootFor, selectedCwd, selectedHostId]);
 
   // ---- Derived project list ---------------------------------------------------
-  const selectedProject = useMemo(() => projectRootFor(selectedCwd, selectedHostId), [projectRootFor, selectedCwd, selectedHostId]);
+  const selectedProject = useMemo(() => selectedPoolKey ?? projectRootFor(selectedCwd, selectedHostId), [selectedPoolKey, projectRootFor, selectedCwd, selectedHostId]);
   // While a fresh optimistic/placeholder is pending (JSONL not yet on disk),
   // freeze ordering so the new project row does not flicker optimistic ->
   // confirmed position. New projects are allowed to append at the end. A
@@ -792,21 +816,21 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // Only "Last updated" reads sessions; other modes must not re-sort on every session refresh.
   const orderingSessions = projectSortMode === "updated" ? visibleSessions : NO_SESSIONS;
   const sortedProjectsBase = useMemo(
-    () => orderProjects(visibleProjects, projectSortMode, orderingSessions, (project) => project.alias ?? projectLabel(project.path)),
+    () => orderProjects(visibleProjects, projectSortMode, orderingSessions, (project) => project.alias ?? project.name ?? projectLabel(project.path)),
     [visibleProjects, projectSortMode, orderingSessions],
   );
   const orderingKey = useMemo(
-    () => [projectSortMode, ...projects.map((p) => `${hostProjectKey(p.hostId, p.path)}\t${p.sortOrder ?? ""}\t${p.pinOrder ?? ""}`)].join("\n"),
+    () => [projectSortMode, ...projects.map((p) => `${projectIdentity(p)}\t${p.sortOrder ?? ""}\t${p.pinOrder ?? ""}`)].join("\n"),
     [projectSortMode, projects],
   );
   const sortedProjectsRef = useRef<{ key: string; list: ManagedProject[] } | null>(null);
   const sortedProjects = useMemo(() => {
     const prev = sortedProjectsRef.current;
     if (hasPendingNewSession && prev && prev.key === orderingKey) {
-      const fresh = new Map(sortedProjectsBase.map((p) => [foldedHostProjectKey(p.hostId, p.path), p]));
-      const next = prev.list.map((p) => fresh.get(foldedHostProjectKey(p.hostId, p.path)) ?? p);
-      const prevKeys = new Set(prev.list.map((p) => foldedHostProjectKey(p.hostId, p.path)));
-      for (const p of sortedProjectsBase) if (!prevKeys.has(foldedHostProjectKey(p.hostId, p.path))) next.push(p);
+      const fresh = new Map(sortedProjectsBase.map((p) => [projectIdentity(p), p]));
+      const next = prev.list.map((p) => fresh.get(projectIdentity(p)) ?? p);
+      const prevKeys = new Set(prev.list.map(projectIdentity));
+      for (const p of sortedProjectsBase) if (!prevKeys.has(projectIdentity(p))) next.push(p);
       return next;
     }
     return sortedProjectsBase;
@@ -906,11 +930,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     const serverScores = currentTranscriptSearch?.scores;
     const entries: { project: ManagedProject; hostId?: string; sessions: SessionInfo[]; scores?: Map<string, number>; rank: number }[] = [];
     for (const project of sortedProjects) {
-      let list = sessionsByProject.get(hostProjectKey(project.hostId, project.path)) ?? [];
+      let list = sessionsByProject.get(projectIdentity(project)) ?? [];
       if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id) || effectiveRecentCompletedSet.has(s.id));
       if (!query) {
         if (list.length === 0 && runningOnly) continue;
-        entries.push({ project, hostId: project.hostId, sessions: list, rank: 0 });
+        entries.push({ project, hostId: projectTargetId(project), sessions: list, rank: 0 });
         continue;
       }
       const scores = new Map<string, number>();
@@ -924,9 +948,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       list = list.filter((s) => scores.has(s.id));
       // Label/alias-only matches surface as empty workspaces; without this
       // a custom workspace name would be unfindable by search.
-      const labelScore = scoreSearchFields([searchField(projectLabel(project.path), TITLE_WEIGHT), searchField(project.alias ?? "", TITLE_WEIGHT)], query);
+      const labelScore = scoreSearchFields([searchField(project.name ?? projectLabel(project.path), TITLE_WEIGHT), searchField(project.alias ?? "", TITLE_WEIGHT)], query);
       if (list.length === 0 && (runningOnly || labelScore === null)) continue;
-      entries.push({ project, hostId: project.hostId, sessions: list, scores, rank: Math.max(labelScore ?? 0, ...scores.values()) });
+      entries.push({ project, hostId: projectTargetId(project), sessions: list, scores, rank: Math.max(labelScore ?? 0, ...scores.values()) });
     }
     // Best match first; ties keep the workspace order (stable sort).
     if (query) entries.sort((a, b) => b.rank - a.rank);
@@ -935,7 +959,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
   const treesByProject = useMemo(() => {
     const m = new Map<string, ReturnType<typeof buildSessionTree>>();
-    for (const { project, sessions, scores } of visibleProjectEntries) m.set(hostProjectKey(project.hostId, project.path), buildSessionTree(sessions, scores));
+    for (const { project, sessions, scores } of visibleProjectEntries) m.set(projectIdentity(project), buildSessionTree(sessions, scores));
     return m;
   }, [visibleProjectEntries]);
 
@@ -944,8 +968,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // the first project fetch — an empty list mid-load must never wipe storage.
   useEffect(() => {
     if (expandedProjects === null || !projectsLoadedRef.current) return;
-    const known = new Set(sortedProjects.map((p) => foldedHostProjectKey(p.hostId, p.path)));
-    const stale = [...expandedProjects].filter((path) => !known.has(comparableProjectPath(path)));
+    const known = new Set(sortedProjects.map((p) => foldedHostProjectKey(p.hostId, workspaceKeyOf(p))));
+    const stale = [...expandedProjects].filter((path) => !known.has(path.startsWith("pool:") ? path : comparableProjectPath(path)));
     if (stale.length === 0) return;
     setExpandedProjects((prev) => {
       if (!prev) return prev;
@@ -987,6 +1011,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         restoreRetryRef.current = 0;
         restoredRef.current = true;
         setSelectedCwd(target.cwd);
+        setSelectedPoolKey(target.poolId ? workspaceKeyOf(target) : null);
         setSelectedHostId(hostOf(target));
         expandProject(workspaceKeyOf(target), hostOf(target));
         onSelectSession(target, true);
@@ -1013,15 +1038,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     // Session and Explorer have a context. When projects have not loaded yet
     // the ordering is provisional — re-pick once they arrive, unless the user
     // already activated a project by hand.
-    if (selectedCwd !== null && !provisionalSelectionRef.current) return;
+    if ((selectedCwd !== null || selectedPoolKey !== null) && !provisionalSelectionRef.current) return;
     // Only this machine's projects: a remote host may be offline.
-    const top = sortedProjects.find((project) => hostOf(project) === LOCAL_HOST_ID);
+    const top = sortedProjects.find((project) => project.poolId || hostOf(project) === LOCAL_HOST_ID);
     if (!top) return;
-    setSelectedCwd(top.path);
-    setSelectedHostId(LOCAL_HOST_ID);
-    expandProject(top.path);
+    setSelectedPoolKey(top.poolId ? projectIdentity(top) : null);
+    setSelectedCwd(top.poolId ? null : top.path);
+    setSelectedHostId(projectTargetId(top));
+    expandProject(workspaceKeyOf(top), projectTargetId(top));
     provisionalSelectionRef.current = allSessions.length === 0;
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, sortedProjects, expandProject, loadSessions]);
+  }, [allSessions, selectedCwd, selectedPoolKey, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, sortedProjects, expandProject, loadSessions]);
 
   // Default expansion: when the user has never stored an expansion choice,
   // expand only the active project.
@@ -1044,7 +1070,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: path, launchConfig, hostId: remoteHostId(addProjectHostId) }),
+        body: JSON.stringify(addProjectHostId.startsWith("pool:")
+          ? { poolId: addProjectHostId.slice(5), origin: path, launchConfig }
+          : { cwd: path, launchConfig, hostId: remoteHostId(addProjectHostId) }),
       });
       const data = await res.json().catch(() => ({})) as { project?: ManagedProject; error?: string; code?: string };
       if (!res.ok || data.error || !data.project) {
@@ -1053,20 +1081,18 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       }
       await loadProjects();
       // Activate + expand the newly added project and close the picker.
-      setSelectedCwd(data.project.path);
-      setSelectedHostId(addProjectHostId);
-      expandProject(data.project.path, addProjectHostId);
+      activateProject(data.project);
       setAddProjectOpen(false);
     } catch (e) {
       setAddProjectError(e instanceof Error ? e.message : String(e));
     } finally {
       setAddProjectBusy(false);
     }
-  }, [addProjectBusy, addProjectHostId, loadProjects, expandProject, setAddProjectOpen]);
+  }, [addProjectBusy, addProjectHostId, loadProjects, activateProject, setAddProjectOpen]);
 
   const handleUpdateProjectPresentation = useCallback(async (project: ManagedProject, updates: { alias?: string | null; sortOrder?: number | null; pinOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => {
     try {
-      const response = await fetch("/api/projects", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: project.path, hostId: remoteHostId(hostOf(project)), ...updates }) });
+      const response = await fetch("/api/projects", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...projectRequestTarget(project), ...updates }) });
       if (!response.ok) {
         const body = await response.json().catch(() => ({})) as { error?: string; code?: string };
         throw new Error(body.error || body.code ? formatApiError(body) : t("projects.updateFailed"));
@@ -1082,7 +1108,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
    *  in manual mode, only the pinned ones while a sort is active (the rest
    *  follow the sort). Order and pins are per host. */
   const reorderableProjects = useCallback(
-    (hostId: string) => sortedProjects.filter((project) => hostOf(project) === hostId && (!pinsActive || project.pinOrder !== undefined)),
+    (hostId: string) => sortedProjects.filter((project) => projectTargetId(project) === hostId && (!pinsActive || project.pinOrder !== undefined)),
     [pinsActive, sortedProjects],
   );
 
@@ -1101,7 +1127,13 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       const response = await fetch("/api/projects", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hostId: remoteHostId(hostId), updates: next.map((project, index) => ({ cwd: project.path, ...(pinsActive ? { pinOrder: index } : { sortOrder: index }) })) }),
+        body: JSON.stringify({
+          ...(hostId.startsWith("pool:") ? { poolId: hostId.slice(5) } : { hostId: remoteHostId(hostId) }),
+          updates: next.map((project, index) => ({
+            ...(project.poolId ? { projectId: project.projectId } : { cwd: project.path }),
+            ...(pinsActive ? { pinOrder: index } : { sortOrder: index }),
+          })),
+        }),
       });
       if (!response.ok) throw new Error(t("projects.reorderFailed"));
       await loadProjects();
@@ -1116,34 +1148,34 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     const source = draggedProject;
     setDraggedProject(null);
     // Order is per host: a drop onto another host's project means nothing.
-    if (!source || hostOf(source) !== hostOf(target)) return;
-    const next = [...reorderableProjects(hostOf(target))];
-    const from = next.findIndex((project) => project.path === source.path);
-    const to = next.findIndex((project) => project.path === target.path);
+    if (!source || projectTargetId(source) !== projectTargetId(target)) return;
+    const next = [...reorderableProjects(projectTargetId(target))];
+    const from = next.findIndex((project) => projectIdentity(project) === projectIdentity(source));
+    const to = next.findIndex((project) => projectIdentity(project) === projectIdentity(target));
     if (from < 0 || to < 0 || from === to) return;
     const [moved] = next.splice(from, 1);
     if (!moved) return;
     next.splice(to, 0, moved);
-    await persistProjectOrder(next, hostOf(target));
+    await persistProjectOrder(next, projectTargetId(target));
   }, [draggedProject, reorderableProjects, persistProjectOrder]);
 
   /** Keyboard-accessible reorder: move one project up/down the list. */
   const handleMoveProject = useCallback(async (project: ManagedProject, delta: -1 | 1) => {
-    const next = [...reorderableProjects(hostOf(project))];
-    const index = next.findIndex((candidate) => candidate.path === project.path);
+    const next = [...reorderableProjects(projectTargetId(project))];
+    const index = next.findIndex((candidate) => projectIdentity(candidate) === projectIdentity(project));
     const target = index + delta;
     if (index < 0 || target < 0 || target >= next.length) return;
     const [moved] = next.splice(index, 1);
     if (!moved) return;
     next.splice(target, 0, moved);
-    await persistProjectOrder(next, hostOf(project));
+    await persistProjectOrder(next, projectTargetId(project));
   }, [reorderableProjects, persistProjectOrder]);
 
   /** Pin to the end of the pinned group, or unpin. */
   const handleTogglePin = useCallback(async (project: ManagedProject) => {
     if (orderWriteBusyRef.current) return;
     orderWriteBusyRef.current = true;
-    const pinOrder = project.pinOrder !== undefined ? null : nextPinOrder(sortedProjects.filter((other) => hostOf(other) === hostOf(project)));
+    const pinOrder = project.pinOrder !== undefined ? null : nextPinOrder(sortedProjects.filter((other) => projectTargetId(other) === projectTargetId(project)));
     try {
       await handleUpdateProjectPresentation(project, { pinOrder });
     } catch {
@@ -1161,13 +1193,13 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
   const handleRemoveProject = useCallback(async (project: ManagedProject) => {
     if (removeProjectKey) return;
-    const removedKey = hostProjectKey(project.hostId, project.path);
+    const removedKey = projectIdentity(project);
     setRemoveProjectKey(removedKey);
     try {
       const res = await fetch("/api/projects", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: project.path, hostId: remoteHostId(hostOf(project)) }),
+        body: JSON.stringify(projectRequestTarget(project)),
       });
       const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string; code?: string };
       if (!res.ok || !data.success) {
@@ -1178,20 +1210,19 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       // most-relevant project so New Session and Explorer stay usable.
       // Compare case-folded — the selected cwd can spell the project path
       // with different casing than this row (Windows/NTFS).
-      if (selectedProject !== null && selectedHostId === hostOf(project) && comparableProjectPath(selectedProject) === comparableProjectPath(project.path)) {
-        // Another host's workspace only if that host is reachable.
-        const next = sortedProjects.find((p) => hostProjectKey(p.hostId, p.path) !== removedKey && !hostUnavailableReason(hostOf(p)));
-        setSelectedCwd(next ? next.path : null);
-        if (next) setSelectedHostId(hostOf(next));
+      if (selectedProject !== null && (project.poolId ? selectedProject === removedKey : !selectedPoolKey && selectedHostId === hostOf(project) && comparableProjectPath(selectedProject) === comparableProjectPath(project.path))) {
+        const next = sortedProjects.find((p) => projectIdentity(p) !== removedKey && (p.poolId || !hostUnavailableReason(hostOf(p))));
+        if (next) activateProject(next);
+        else { setSelectedCwd(null); setSelectedPoolKey(null); }
       }
-      collapseProject(project.path, hostOf(project));
+      collapseProject(workspaceKeyOf(project), projectTargetId(project));
       await loadProjects();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setRemoveProjectKey(null);
     }
-  }, [removeProjectKey, selectedProject, selectedHostId, sortedProjects, hostUnavailableReason, collapseProject, loadProjects]);
+  }, [removeProjectKey, selectedProject, selectedHostId, selectedPoolKey, sortedProjects, hostUnavailableReason, activateProject, collapseProject, loadProjects]);
 
   // Create/remove operate against the active repo's own cached Git state —
   // never a globally stored path, so the branch lands in the correct repo.
@@ -1286,6 +1317,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
     provisionalSelectionRef.current = false;
     if (s.cwd) setSelectedCwd(s.cwd);
+    setSelectedPoolKey(s.poolId ? workspaceKeyOf(s) : null);
     setSelectedHostId(hostOf(s));
     expandProject(workspaceKeyOf(s), hostOf(s));
     onSelectSession(s);
@@ -1297,16 +1329,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, [handleSelectSessionFromList, onOpenSearchMatch, hostUnavailableReason]);
 
   const handleNewSession = useCallback(() => {
-    if (!selectedCwd || hostUnavailableReason(selectedHostId)) return;
+    if ((!selectedCwd && !selectedPoolProject) || (!selectedPoolProject && hostUnavailableReason(selectedHostId))) return;
     // Generate a temporary UUID client-side — no backend call needed.
     // Pi will be spawned lazily when the user sends the first message.
     const tempId = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-    onNewSession?.(tempId, selectedCwd, selectedHostId);
-  }, [selectedCwd, selectedHostId, onNewSession, hostUnavailableReason]);
-  const newSessionBlockedReason = hostUnavailableReason(selectedHostId);
-  const newSessionEnabled = Boolean(selectedCwd) && newSessionBlockedReason === null;
+    onNewSession?.(tempId, selectedPoolProject ? null : selectedCwd, selectedPoolProject ? undefined : selectedHostId, selectedPoolProject);
+  }, [selectedCwd, selectedHostId, selectedPoolProject, onNewSession, hostUnavailableReason]);
+  const newSessionBlockedReason = selectedPoolProject ? null : hostUnavailableReason(selectedHostId);
+  const newSessionEnabled = Boolean(selectedCwd || selectedPoolProject) && newSessionBlockedReason === null;
 
   const [importing, setImporting] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -1344,7 +1376,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // The active repo's own cached Git state, selected by repository root — never
   // a single sidebar-wide variable, so it is always the state belonging to the
   // repo the user currently has active.
-  const activeGitState = selectedProject
+  const activeGitState = selectedProject && !selectedPoolKey
     ? worktreeStateByProject[hostProjectKey(selectedHostId, normalizeProjectKey(selectedProject))]
     : undefined;
 
@@ -1399,6 +1431,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         <DirectoryPicker
           key={addProjectHostId}
           host={{ id: addProjectHostId, name: hostName(t, hostList.find((host) => host.id === addProjectHostId) ?? { id: addProjectHostId, label: addProjectHostId }) }}
+          pool={pools.find((pool) => `pool:${pool.id}` === addProjectHostId)}
           busy={addProjectBusy}
           error={addProjectError}
           onCancel={() => {
@@ -1410,7 +1443,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       )}
       {launchConfigProject && (
         <ProjectLaunchConfigDialog
-          projectPath={launchConfigProject.path}
+          projectPath={launchConfigProject.poolId ? launchConfigProject.name ?? launchConfigProject.origin ?? "" : launchConfigProject.path}
           initialConfig={launchConfigProject.launchConfig}
           onClose={() => setLaunchConfigProject(null)}
           onSave={async (launchConfig) => {
@@ -1518,11 +1551,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         />
         <button
           onClick={handleNewSession}
-          disabled={!selectedCwd}
+          disabled={!selectedCwd && !selectedPoolProject}
           aria-disabled={newSessionEnabled ? undefined : true}
           aria-describedby={newSessionBlockedReason ? "sidebar-new-session-reason" : undefined}
           className="sidebar-new-session"
-          title={newSessionBlockedReason ?? (selectedCwd ? t("sessionSidebar.newSessionIn", { cwd: selectedCwd }) : t("sessionSidebar.selectProjectFirst"))}
+          title={newSessionBlockedReason ?? (selectedPoolProject ? t("sessionSidebar.newSessionIn", { cwd: selectedPoolProject.alias ?? selectedPoolProject.name ?? selectedPoolProject.origin ?? "" }) : selectedCwd ? t("sessionSidebar.newSessionIn", { cwd: selectedCwd }) : t("sessionSidebar.selectProjectFirst"))}
           style={{
             width: "100%",
             height: 38,
@@ -1626,7 +1659,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           label={t("projects.add")}
           title={t("projects.addTitle")}
           onClick={() => {
-            setAddProjectOpen(true, LOCAL_HOST_ID);
+            setAddProjectOpen(true, selectedPoolProject ? projectTargetId(selectedPoolProject) : LOCAL_HOST_ID);
             setAddProjectError(null);
           }}
         >
@@ -1702,6 +1735,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
               <div aria-hidden="true" className="skeleton" style={{ width: "68%", height: 30 }} />
             </div>
           )}
+          {poolsFailed && (
+            <div role="alert" style={{ padding: "10px 4px", color: "var(--status-error)", fontSize: 12 }}>
+              {t("projects.poolConfigUnavailable")}
+            </div>
+          )}
           {projectsError && (
             <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 4px", color: "var(--status-error)", fontSize: 12 }}>
               <span>{projectsError}</span>
@@ -1729,22 +1767,22 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             // A search or running filter hides hosts that have no match.
             if (showHostGroups && filtersActive && entries.length === 0) return null;
             const rows = entries.map(({ project, sessions }) => {
-              const projectKey = hostProjectKey(project.hostId, project.path);
+              const projectKey = projectIdentity(project);
               const tree = treesByProject.get(projectKey) ?? buildSessionTree(sessions);
               // Sessions group under a project through the case-folded comparable
               // form (see groupSessionsByProject), so the active highlight must
               // use the same comparison: a session whose cwd/projectRoot spells
               // the project folder with different casing (Windows/NTFS) lands in
               // this row — the row must light up for it too.
-              const isActive = selectedProject !== null && selectedHostId === hostOf(project) && comparableProjectPath(selectedProject) === comparableProjectPath(project.path);
+              const isActive = selectedProject !== null && (project.poolId ? selectedProject === projectKey : !selectedPoolKey && selectedHostId === hostOf(project) && comparableProjectPath(selectedProject) === comparableProjectPath(project.path));
               return (
                 <ProjectRow
                   key={projectKey}
                   project={project}
                   isActive={isActive}
-                  activity={projectActivity.get(foldedHostProjectKey(project.hostId, project.path))}
+                  activity={projectActivity.get(foldedHostProjectKey(project.hostId, workspaceKeyOf(project)))}
                   tree={tree}
-                  isExpanded={expandedProjectKeys.has(foldedHostProjectKey(project.hostId, project.path))}
+                  isExpanded={expandedProjectKeys.has(foldedHostProjectKey(project.hostId, workspaceKeyOf(project)))}
                   hiddenCount={filtersActive ? 0 : Math.max(0, tree.length - MAX_PROJECT_SESSIONS)}
                   selectedSessionId={selectedSessionId}
                   runningSessionIds={runningSessionIds}
@@ -1762,7 +1800,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                   onMoveProject={(target, delta) => void handleMoveProject(target, delta)}
                   pinnable={pinsActive}
                   onTogglePin={handleTogglePin}
-                  isDragTarget={draggedProject !== null && hostOf(draggedProject) === hostOf(project) && hostProjectKey(draggedProject.hostId, draggedProject.path) !== projectKey && (!pinsActive || project.pinOrder !== undefined)}
+                  isDragTarget={draggedProject !== null && projectTargetId(draggedProject) === projectTargetId(project) && projectIdentity(draggedProject) !== projectKey && (!pinsActive || project.pinOrder !== undefined)}
                   removeBusy={removeProjectKey === projectKey}
                   onSelectSession={handleSelectSessionFromList}
                   searchQuery={trimmedSearchQuery || undefined}
@@ -1774,6 +1812,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             });
             if (!showHostGroups) return rows;
             const row = hosts?.find((candidate) => candidate.id === host.id);
+            const member = pools.some((pool) => pool.members.some((member) => member.hostId === host.id));
+            if (member && entries.length === 0) return null;
+            const canAdd = host.id.startsWith("pool:") || (!member && (host.id === LOCAL_HOST_ID || poolsLoaded));
             return (
               <HostGroup
                 key={host.id}
@@ -1783,10 +1824,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 unavailableReason={hostUnavailableReason(host.id)}
                 collapsed={collapsedHosts.has(host.id)}
                 onToggle={() => toggleHostCollapsed(host.id)}
-                onAdd={() => {
+                onAdd={canAdd ? () => {
                   setAddProjectOpen(true, host.id);
                   setAddProjectError(null);
-                }}
+                } : undefined}
                 empty={entries.length === 0 ? t("projects.noProjects") : null}
               >
                 {rows}

@@ -49,7 +49,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pat
       if (!Array.isArray(files) || files.length === 0 || files.length > 1000 || !files.every((file) => isRecord(file) && typeof file.id === "string" && typeof file.name === "string")) return Response.json({ error: "Invalid uploads", code: "invalid_uploads" }, { status: 400 });
       names = files.map((file) => file.name as string);
     }
-    const inspection = await host.workspaceOps.inspectUploads(directory, names);
+    const inspection = await host.workspaceOps.inspectUploads(directory, names, resolved.owner);
     if (!inspection.ok) return opErrorResponse(inspection);
     if (type === "upload-check") return Response.json(inspection.value);
     const strategy = parseUploadConflictStrategy(searchParams.get("conflict"));
@@ -59,7 +59,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pat
     let failureStatus = 200;
     for (const file of files as Array<{ id: string; name: string }>) {
       try {
-        const result = await publishWorkspaceUpload(file.id, requestOwner(request), host.id, directory, file.name, strategy);
+        const result = await publishWorkspaceUpload(file.id, requestOwner(request), host.id, directory, file.name, strategy, resolved.owner);
         (result.skipped ? skipped : uploaded).push(result.name);
       } catch (error) {
         const response = uploadErrorResponse(error);
@@ -144,7 +144,7 @@ export async function GET(
     const resolved = await resolveWorkspaceHost(searchParams.get("hostId") ?? undefined, searchParams.get("sessionId"));
     if ("response" in resolved) return resolved.response;
     const { host } = resolved;
-    const input = { segments, sessionId: resolved.sessionId, sessionFile: resolved.sessionFile };
+    const input = { segments, sessionId: resolved.sessionId, sessionFile: resolved.sessionFile, owner: resolved.owner };
     if (type === "list") {
       const result = await host.workspaceOps.listFilesInRoot(input, searchParams.get("root"));
       return result.ok ? Response.json(result.value) : opErrorResponse(result);
@@ -173,7 +173,7 @@ export async function GET(
     }
     disableIdleTimeout();
     if (type === "preview") {
-      const buffer = await readWorkspaceBytes(host, opened.value, DOCX_PREVIEW_MAX_BYTES);
+      const buffer = await readWorkspaceBytes(host, opened.value, DOCX_PREVIEW_MAX_BYTES, request.signal);
       const result = await mammoth.convertToHtml({ buffer }, { externalFileAccess: false, convertImage: mammoth.images.dataUri });
       return new Response(wrapDocxPreviewHtml(result.value, info.name), { headers: {
         "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache",
@@ -181,7 +181,7 @@ export async function GET(
         "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
       } });
     }
-    return streamWorkspaceFile(host, opened.value, image ?? audio ?? document ?? "application/octet-stream", request.headers.get("range"), type === "download");
+    return streamWorkspaceFile(host, opened.value, image ?? audio ?? document ?? "application/octet-stream", request.headers.get("range"), type === "download", request.signal);
   } catch (error) {
     return apiErrorResponse(error);
   }

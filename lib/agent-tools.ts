@@ -30,7 +30,7 @@ export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
   {
     name: "new_session",
     description:
-      "Start a new omp-web session. The new session appears in the omp-web sidebar like any other session. Returns its session ID.",
+      "Start an independent omp-web session. Registered pooled projects receive an isolated worktree on an eligible worker. Set shareWorkspace to keep unpublished parent workspace dependencies on the calling session's owner. Returns its session ID.",
     parameters: {
       type: "object",
       properties: {
@@ -40,7 +40,8 @@ export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
         provider: { type: "string", description: "Model provider, used with modelId instead of model." },
         modelId: { type: "string", description: "Model ID, used with provider instead of model." },
         name: { type: "string", description: "Display name for the new session." },
-        host: { type: "string", description: "Host id or label from list_sessions; defaults to the calling session's host." },
+        host: { type: "string", description: "Explicit host id or label from list_sessions. Omit to place independent pooled work automatically; standalone projects stay on the calling session's host." },
+        shareWorkspace: { type: "boolean", description: "Keep the new session on the calling session's host and exact directory when it depends on unpublished parent work. Defaults to false." },
       },
     },
   },
@@ -108,6 +109,8 @@ export interface AgentToolHost {
 export interface AgentToolCreateSessionInput {
   cwd: string;
   hostId: string;
+  explicitHost: boolean;
+  shareWorkspace: boolean;
   /** Already sender-attributed by executeAgentTool, or null for an idle session. */
   prompt: string | null;
   provider?: string;
@@ -138,7 +141,8 @@ export interface AgentToolDeliverResult {
 export interface AgentToolSessionOps {
   listSessions(): Promise<AgentToolSessionRow[]>;
   listHosts(): AgentToolHost[];
-  createSession(input: AgentToolCreateSessionInput): Promise<{ sessionId: string }>;
+  /** Authorize the actual physical owner before any preparation or spawn. */
+  createSession(input: AgentToolCreateSessionInput, authorize: (host: AgentToolHost) => Promise<boolean>): Promise<{ sessionId: string }>;
   deliver(input: AgentToolDeliverInput): Promise<AgentToolDeliverResult>;
   /** The host a session lives on; null when no host has it. */
   sessionHostId(sessionId: string): Promise<string | null>;
@@ -146,6 +150,8 @@ export interface AgentToolSessionOps {
 
 export interface AgentToolContext {
   sourceSessionId: string;
+  /** Native host_tool_call identity, retained unchanged across replay. */
+  sourceRequestId: string;
   sourceCwd: string;
   /** The host the calling session runs on; "local" is this machine. */
   sourceHostId: string;
@@ -346,25 +352,31 @@ export async function executeAgentTool(
   if (toolName === "new_session") {
     ctx.guard.checkRate(ctx.sourceSessionId);
     const depth = ctx.guard.checkChainDepth(ctx.sourceSessionId);
+    if (record.shareWorkspace !== undefined && typeof record.shareWorkspace !== "boolean") {
+      throw new Error('Agent tool argument "shareWorkspace" must be a boolean.');
+    }
+    const shareWorkspace = record.shareWorkspace === true;
     const cwd = optionalString(record, "cwd") ?? ctx.sourceCwd;
+    if (shareWorkspace && cwd !== ctx.sourceCwd) throw new Error("shareWorkspace requires the calling session's directory.");
     if (!cwd) throw new Error("Agent tool argument \"cwd\" is required when the calling session has no directory.");
     const prompt = optionalString(record, "prompt");
     if (prompt) checkMessageLength(prompt, "prompt");
     const { provider, modelId } = parseModel(record);
     const name = optionalString(record, "name");
     if (name && name.length > 200) throw new Error("Agent tool argument \"name\" exceeds 200 characters.");
-    const host = resolveHost(ops.listHosts(), optionalString(record, "host") ?? ctx.sourceHostId);
-    if (!startsUnasked(host, ctx.sourceHostId) && !(await ctx.confirm(`Start a session on ${host.label} in ${cwd}?`))) {
-      throw new Error(`The user declined to start a session on ${host.label}.`);
-    }
+    const requestedHost = optionalString(record, "host");
+    const host = resolveHost(ops.listHosts(), requestedHost ?? ctx.sourceHostId);
+    if (shareWorkspace && host.id !== ctx.sourceHostId) throw new Error("shareWorkspace requires the calling session's host.");
     const created = await ops.createSession({
       cwd,
       hostId: host.id,
+      explicitHost: requestedHost !== undefined,
+      shareWorkspace,
       prompt: prompt ? formatAttributedMessage(ctx.sourceSessionId, prompt) : null,
       provider,
       modelId,
       name,
-    });
+    }, async (target) => startsUnasked(target, ctx.sourceHostId) || ctx.confirm(`Start a session on ${target.label} in ${cwd}?`));
     ctx.guard.setDepth(created.sessionId, depth);
     return { sessionId: created.sessionId };
   }

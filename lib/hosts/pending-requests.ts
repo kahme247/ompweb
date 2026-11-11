@@ -7,7 +7,7 @@ import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 
 // A line without one of these types cannot matter: skips JSON-parsing streamed output.
-const STDOUT_TYPES = /"(?:rpc_chunk|host_tool_call|host_tool_cancel|host_uri_request|host_uri_cancel|extension_ui_request|get_state)"/;
+const STDOUT_TYPES = /"(?:rpc_chunk|agent_start|agent_end|host_tool_call|host_tool_cancel|host_uri_request|host_uri_cancel|extension_ui_request|get_state)"/;
 const STDIN_TYPES = /"(?:host_tool_result|host_uri_result|extension_ui_response)"/;
 
 /** Raw lines, or null once they no longer fit under the cap. */
@@ -19,6 +19,10 @@ export class PendingRequests {
   /** The raw `rpc_chunk` lines of the frame being reassembled (null: over the cap); undefined between frames. */
   private chunk: Kept | undefined;
   private bytes = 0;
+  private turning = false;
+
+  /** Executing an agent turn, not merely holding an idle child process open. */
+  get activeTurn(): boolean { return this.turning; }
 
   /** `sessionId`: the session the child was started on, until a successful `get_state` names
    * another (a new session's first one, a switch or a fork); null for one main could not adopt. */
@@ -50,9 +54,12 @@ export class PendingRequests {
       return;
     }
     this.free(kept);
+    if (frame.type === "agent_start") this.turning = true;
+    else if (frame.type === "agent_end") this.turning = false;
     if (frame.type === "response" && frame.command === "get_state" && frame.success === true && isRecord(frame.data)) {
       const { sessionId } = frame.data;
       this.sessionId = typeof sessionId === "string" && isValidSessionId(sessionId) ? sessionId : null;
+      if (typeof frame.data.isStreaming === "boolean") this.turning = frame.data.isStreaming;
       return;
     }
     const cancel = frame.type === "host_tool_cancel" || frame.type === "host_uri_cancel"

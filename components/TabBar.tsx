@@ -10,8 +10,9 @@ export interface Tab {
   label: string;
   filePath: string;
   hostId: string;
-  sourceCwd: string | null;
   sourceSessionId?: string | null;
+  /** Original workspace context; selecting another conversation must not rebase this tab. */
+  sourceCwd: string | null;
 }
 
 interface Props {

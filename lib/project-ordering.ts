@@ -23,10 +23,10 @@ export function remoteHostId(hostId: string | null | undefined): string | undefi
   return hostId && hostId !== LOCAL_HOST_ID ? hostId : undefined;
 }
 
-/** Identity of a project across hosts: the bare path on this machine, so keys
- *  stored before hosts existed (expanded set, last-open memory) stay valid,
- *  and `<hostId>:<path>` on a remote host. A missing hostId is this machine. */
+/** Local paths keep their legacy key; remote paths are host-prefixed.
+ * Logical pool keys are already domain-separated and never acquire an owner prefix. */
 export function hostProjectKey(hostId: string | undefined, path: string): string {
+  if (path.startsWith("pool:")) return path;
   return hostId === undefined || hostId === LOCAL_HOST_ID ? path : `${hostId}:${path}`;
 }
 
@@ -38,13 +38,22 @@ export function newChatDraftKey(cwd: string, hostId: string | undefined): string
 
 /** `hostProjectKey` over the case-folded comparable path (how sessions find their project). */
 export function foldedHostProjectKey(hostId: string | undefined, path: string): string {
-  return hostProjectKey(hostId, comparableProjectPath(path));
+  return path.startsWith("pool:") ? path : hostProjectKey(hostId, comparableProjectPath(path));
+}
+
+/** Logical project keys remain case-sensitive and independent of physical ownership. */
+export function projectIdentity(project: ManagedProject): string {
+  return hostProjectKey(project.hostId, workspaceKeyOf(project));
+}
+
+export function projectTargetId(project: { poolId?: string; hostId?: string }): string {
+  return project.poolId ? `pool:${project.poolId}` : project.hostId ?? LOCAL_HOST_ID;
 }
 
 /** Projects per host for the sidebar: this machine first, then the other
  *  hosts by label. Every known host gets a group, empty or not, so it can
  *  still be added to; projects of a host that is not listed are dropped. */
-export function groupProjectsByHost<T extends { hostId?: string }>(
+export function groupProjectsByHost<T extends { hostId?: string; poolId?: string }>(
   projects: T[],
   hosts: { id: string; label: string }[],
 ): { host: { id: string; label: string }; projects: T[] }[] {
@@ -54,7 +63,7 @@ export function groupProjectsByHost<T extends { hostId?: string }>(
   });
   return ordered.map((host) => ({
     host,
-    projects: projects.filter((project) => (project.hostId ?? LOCAL_HOST_ID) === host.id),
+    projects: projects.filter((project) => projectTargetId(project) === host.id),
   }));
 }
 
@@ -109,7 +118,7 @@ export function orderProjects(
       const time = Date.parse(session.lastMessageAt ?? session.modified);
       if (time > (updated.get(folded) ?? 0)) updated.set(folded, time);
     }
-    rest.sort((a, b) => (updated.get(foldedHostProjectKey(b.hostId, b.path)) ?? 0) - (updated.get(foldedHostProjectKey(a.hostId, a.path)) ?? 0));
+    rest.sort((a, b) => (updated.get(foldedHostProjectKey(b.hostId, workspaceKeyOf(b))) ?? 0) - (updated.get(foldedHostProjectKey(a.hostId, workspaceKeyOf(a))) ?? 0));
   }
   return [...pinned, ...rest];
 }
@@ -146,14 +155,9 @@ export function projectActivityCounts(
   return result;
 }
 
-/** Group sessions under their project. Every project in `projects` gets an
- *  entry (possibly empty) so empty managed projects render their empty state.
- *  Buckets are keyed by the exact project path for callers; sessions are
- *  matched through a case-folded lookup (Windows/NTFS is case-insensitive and
- *  session-file cwds can carry different casing than the registered path), so
- *  casing-only differences land in the right bucket instead of silently
- *  dropping the session from the sidebar. Hosts are separate namespaces: the
- *  same path on two hosts is two projects, keyed by `hostProjectKey`. */
+/** Group sessions by logical project identity, or by host-bound physical path.
+ * Every managed project gets a bucket, including empty projects. Physical paths
+ * compare case-insensitively on Windows; logical IDs stay case-sensitive. */
 export function groupSessionsByProject(
   projects: ManagedProject[],
   sessions: SessionInfo[],
@@ -162,8 +166,8 @@ export function groupSessionsByProject(
   const bucketByKey = new Map<string, SessionInfo[]>();
   for (const project of projects) {
     const bucket: SessionInfo[] = [];
-    grouped.set(hostProjectKey(project.hostId, project.path), bucket);
-    bucketByKey.set(foldedHostProjectKey(project.hostId, project.path), bucket);
+    grouped.set(projectIdentity(project), bucket);
+    bucketByKey.set(foldedHostProjectKey(project.hostId, workspaceKeyOf(project)), bucket);
   }
   for (const session of sessions) {
     const key = workspaceKeyOf(session);

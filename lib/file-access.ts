@@ -10,6 +10,7 @@ import { HostOpError } from "./hosts/link-protocol";
 
 export { isWindowsAbsolutePath } from "./paths";
 
+
 // Allowed roots — in-memory plus session-derived, globalThis for hot-reload.
 declare global {
   var __piAllowedRootsCache: { roots: Set<string>; expiresAt: number } | undefined;
@@ -286,6 +287,7 @@ function comparablePath(filePath: string): string {
   const normalized = (process.platform === "win32" ? normalizeSlashes(filePath) : filePath).replace(/\/+$/, "");
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
+
 
 export async function getAllowedFileRoots(): Promise<Set<string>> {
   const now = Date.now();

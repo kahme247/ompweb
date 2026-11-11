@@ -247,7 +247,7 @@ export function areMessageViewPropsEqual(prev: Props, next: Props): boolean {
 
 export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond }: Props) {
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onEdit={onEdit} editing={editing} editDisabled={editDisabled} />;
+    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onEdit={onEdit} editing={editing} editDisabled={editDisabled} />;
   }
   if (message.role === "assistant") {
     return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} />;
@@ -262,12 +262,12 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
       return null;
     }
     if (custom.customType === "compaction") {
-      return <CompactionMessageView message={custom} />;
+      return <CompactionMessageView message={custom} sessionId={sessionId} />;
     }
     if (custom.display === false) {
-      return <HiddenExtensionView message={custom} cwd={cwd} onOpenFile={onOpenFile} />;
+      return <HiddenExtensionView message={custom} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} />;
     }
-    return <CustomMessageView message={custom} cwd={cwd} onOpenFile={onOpenFile} />;
+    return <CustomMessageView message={custom} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} />;
   }
   if (message.role === "bashExecution") {
     return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} entryId={entryId} />;
@@ -346,10 +346,11 @@ function ForkSessionButton({ entryId, editPrompt, onFork, forking, forkDisabled 
     </>
   );
 }
-function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, forkDisabled, onEdit, editing, editDisabled }: {
+function UserMessageView({ message, cwd, onOpenFile, sessionId, entryId, onFork, forking, forkDisabled, onEdit, editing, editDisabled }: {
   message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  sessionId?: string;
   entryId?: string;
   onFork?: (entryId: string, editPrompt: boolean) => void;
   forking?: boolean;
@@ -444,7 +445,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
               })}
             </div>
           )}
-          {content && <div data-message-text data-entry-id={entryId}><SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</SafeMarkdownBody></div>}
+          {content && <div data-message-text data-entry-id={entryId}><SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile} sourceSessionId={sessionId}>{content}</SafeMarkdownBody></div>}
         </div>
         {/* Expanding removes the cap, so the bubble stops overflowing; keep the toggle to collapse it again.
             Collapsing restores the cap: assume overflow until the next measurement so the focused toggle stays mounted. */}
@@ -915,7 +916,7 @@ function AssistantMessageView({
 
 function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolCallsDefaultCollapsed, expandThinkingByDefault }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolCallsDefaultCollapsed: boolean; expandThinkingByDefault: boolean }) {
   if (block.type === "text") {
-    return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} />;
+    return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} />;
   }
   if (block.type === "thinking") {
     return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} expandByDefault={expandThinkingByDefault} />;
@@ -924,7 +925,7 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} defaultCollapsed={toolCallsDefaultCollapsed} onOpenFile={onOpenFile} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} defaultCollapsed={toolCallsDefaultCollapsed} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} />;
   }
   return null;
 }
@@ -934,14 +935,15 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
 // instead of object identity: finished blocks of the streaming message then
 // skip their ReactMarkdown re-parse and only the actively growing block
 // re-renders per frame.
-const TextBlock = memo(function TextBlock({ block, isStreaming, cwd, onOpenFile, entryId }: { block: TextContent; isStreaming?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void; entryId?: string }) {
+const TextBlock = memo(function TextBlock({ block, isStreaming, cwd, onOpenFile, sessionId, entryId }: { block: TextContent; isStreaming?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string }) {
   // data-entry-id: search hits are located per message (useChatSearchHighlights).
-  return <div data-message-text data-entry-id={entryId}><SafeMarkdownBody autoCharts isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody></div>;
+  return <div data-message-text data-entry-id={entryId}><SafeMarkdownBody autoCharts isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} sourceSessionId={sessionId}>{block.text}</SafeMarkdownBody></div>;
 }, (prev, next) => (
   prev.block.text === next.block.text
   && prev.isStreaming === next.isStreaming
   && prev.cwd === next.cwd
   && prev.onOpenFile === next.onOpenFile
+  && prev.sessionId === next.sessionId
   && prev.entryId === next.entryId
 ));
 
@@ -1071,6 +1073,8 @@ const ToolCallBlock = memo(function ToolCallBlock({
   duration,
   isStreaming,
   defaultCollapsed = true,
+  cwd,
+  sessionId,
   onOpenFile,
 }: {
   block: ToolCallContent;
@@ -1080,6 +1084,7 @@ const ToolCallBlock = memo(function ToolCallBlock({
   defaultCollapsed?: boolean;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  sessionId?: string;
 }) {
   const { t } = useI18n();
   const openAgentLink = useContext(AgentLinkContext);
@@ -1294,7 +1299,7 @@ const ToolCallBlock = memo(function ToolCallBlock({
               </div>
             )}
             <TaskResultPanel details={result?.details} />
-            <HubResultPanel input={block.input} result={result} />
+            <HubResultPanel input={block.input} result={result} cwd={cwd} onOpenFile={onOpenFile} sourceSessionId={sessionId} />
             {isRunning && (resultText ?? "").trim() === "" ? (
               // No output yet: say so instead of the "(no output)" marker that
               // would claim the tool finished with nothing.
@@ -1351,9 +1356,11 @@ const ToolCallBlock = memo(function ToolCallBlock({
   && prev.duration === next.duration
   && prev.defaultCollapsed === next.defaultCollapsed
   && prev.onOpenFile === next.onOpenFile
+  && prev.cwd === next.cwd
+  && prev.sessionId === next.sessionId
 ));
 
-function CompactionMessageView({ message }: { message: CustomMessage }) {
+function CompactionMessageView({ message, sessionId }: { message: CustomMessage; sessionId?: string }) {
   const { t, locale } = useI18n();
   const summary = getMessageText(message.content);
   const parsedSummary = useMemo(() => parseCompactionSummary(summary), [summary]);
@@ -1392,7 +1399,7 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
             </div>
           )}
           <div style={{ marginTop: 3, marginBottom: 10, color: "var(--text)", fontSize: 14, lineHeight: 1.5 }}>{t("messageView.compactionDescription")}</div>
-          {parsedSummary.body ? <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("messageView.noSummary")}</span>}
+          {parsedSummary.body ? <MarkdownBody className="markdown-compaction-message" sourceSessionId={sessionId}>{parsedSummary.body}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("messageView.noSummary")}</span>}
           <CompactionFileMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
         </div>
       </div>
@@ -1495,7 +1502,7 @@ function friendlyHiddenLabel(customType: string, t: (key: string) => string): st
   return customType.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+function HiddenExtensionView({ message, cwd, onOpenFile, sessionId }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string }) {
   const { t, locale } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -1584,7 +1591,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
                 </div>
               )}
               {cleanText ? (
-                <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>
+                <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile} sourceSessionId={sessionId}>
                   {cleanText}
                 </MarkdownBody>
               ) : (
@@ -1684,7 +1691,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
   );
 }
 
-function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+function CustomMessageView({ message, cwd, onOpenFile, sessionId }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string }) {
   const { t, locale } = useI18n();
   // Reminders and job notices are activity, as in the TUI: start collapsed to
   // their first line; the header toggles them like a tool call.
@@ -1795,7 +1802,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
                 {displayText}
               </pre>
             ) : (
-              <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{displayText}</MarkdownBody>
+              <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile} sourceSessionId={sessionId}>{displayText}</MarkdownBody>
             )}
           </div>
         ) : (

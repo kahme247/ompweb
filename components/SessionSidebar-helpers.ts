@@ -210,6 +210,9 @@ function buildSessionTree(sessions: SessionInfo[], scores?: Map<string, number>)
 interface LivePlace {
   cwd: string;
   hostId?: string;
+  poolId?: string;
+  projectId?: string;
+  projectKey?: string;
 }
 
 /** Where a live session the session list lacks gets its placeholder row: the

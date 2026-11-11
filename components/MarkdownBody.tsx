@@ -21,6 +21,7 @@ export interface MarkdownBodyProps {
   className?: string;
   isStreaming?: boolean;
   cwd?: string;
+  sourceSessionId?: string | null;
   onOpenFile?: (filePath: string) => void;
   suppressImages?: boolean;
   autoCharts?: boolean;
@@ -36,7 +37,7 @@ export interface MarkdownBodyRendering {
 }
 
 /** Builds omp-web's markdown rendering setup (links, images, tables, code) so any renderer can reuse it. */
-export function useMarkdownBodyRendering({ children, isStreaming, cwd, onOpenFile, suppressImages = false, autoCharts = false }: Omit<MarkdownBodyProps, "className">): MarkdownBodyRendering {
+export function useMarkdownBodyRendering({ children, isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages = false, autoCharts = false }: Omit<MarkdownBodyProps, "className">): MarkdownBodyRendering {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   const fileSource = useContext(WorkspaceFileContext);
   const { remarkPlugins: baseRemarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
@@ -60,7 +61,7 @@ export function useMarkdownBodyRendering({ children, isStreaming, cwd, onOpenFil
       if (suppressImages) return alt ?? null;
       const filePath = typeof src === "string" ? resolveLocalFileHref(src, cwd) : null;
       const imageSrc = filePath
-        ? getFileApiUrl(filePath, "read", fileSource?.hostId ?? "local", fileSource?.sessionId)
+        ? getFileApiUrl(filePath, "read", fileSource?.hostId ?? (sourceSessionId ? undefined : "local"), sourceSessionId ?? fileSource?.sessionId)
         : src;
       // Dynamic local paths are served directly by the file API.
       return <ClickableImage src={imageSrc} alt={alt ?? ""} loading="lazy" {...imgProps} />;
@@ -172,7 +173,7 @@ export function useMarkdownBodyRendering({ children, isStreaming, cwd, onOpenFil
       );
     },
     };
-  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink, autoCharts, fileSource]);
+  }, [isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages, openAgentLink, autoCharts, fileSource]);
 
   return { markdown: normalizedMarkdown, remarkPlugins, rehypePlugins, components, urlTransform };
 }

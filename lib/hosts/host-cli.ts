@@ -1,9 +1,12 @@
+import { createHostControlServer, requestHostControl } from "./host-control";
+import type { HostDaemon } from "./daemon";
+
 // `ompweb host`: link this machine to web servers through ./daemon.
 // Loaded by Node/jiti and the compiled binary: no `@/` imports.
 // Tokens are read from stdin, never from argv.
 import { addHostLink, loginHost, readHostLinks, removeHostLink } from "./host-login";
 
-const USAGE = "Usage: ompweb host login [--add] --url <server url>   (the host token is read from stdin)\n       ompweb host logout --url <server url>\n       ompweb host [--allow-http]";
+const USAGE = "Usage: ompweb host login [--add] --url <server url>   (the host token is read from stdin)\n       ompweb host logout --url <server url>\n       ompweb host [--allow-http]\n       ompweb host status|drain|resume";
 
 /** A host token is 43 characters; anything this long is not one. */
 const MAX_TOKEN_LINE_BYTES = 4096;
@@ -50,6 +53,12 @@ async function main(argv: string[]): Promise<number> {
     }
     return 0;
   }
+  if (argv.length === 1 && (argv[0] === "status" || argv[0] === "drain" || argv[0] === "resume")) {
+    // Local controls never load or start a second daemon.
+    console.log(JSON.stringify(await requestHostControl(argv[0])));
+    return 0;
+  }
+
 
   if (argv.some((arg) => arg !== "--allow-http")) {
     console.error(USAGE);
@@ -61,9 +70,24 @@ async function main(argv: string[]): Promise<number> {
   }
   // Login/logout need none of the daemon, which jiti would otherwise transpile on every run.
   const { runHostDaemon } = await import("./daemon");
-  const daemon = runHostDaemon({ allowHttp: argv.includes("--allow-http") });
-  for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => void daemon.stop());
-  return daemon.done;
+  let daemon: HostDaemon | undefined;
+  // Windows ordinary standalone hosts retain their existing startup path.
+  const endpoint = process.platform === "win32" ? null : await createHostControlServer((command) => {
+    if (!daemon) throw new Error("The host daemon is starting");
+    return daemon.control(command);
+  });
+  try {
+    daemon = runHostDaemon({ allowHttp: argv.includes("--allow-http") });
+    // Worker cutover starts fail-closed; ordinary hosts have no maintenance environment.
+    if (process.env.OMP_WEB_HOST_DRAINED === "1") daemon.control("drain");
+    const stop = () => void daemon!.stop();
+    for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, stop);
+    try { return await daemon.done; }
+    finally { for (const signal of ["SIGINT", "SIGTERM"] as const) process.removeListener(signal, stop); }
+  } finally {
+    await daemon?.stop();
+    await endpoint?.close();
+  }
 }
 
 /** `ompweb host <argv>`: the exit code; errors are printed, never thrown. */

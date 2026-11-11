@@ -51,6 +51,7 @@ export class ChannelLifecycle {
   }
 
   get isRunning(): boolean { return this.running || this.unsettled; }
+  get activeTurn(): boolean { return this.running; }
   get isIdle(): boolean {
     if (this.disposed || this.startup || this.isRunning || this.compacting || this.commands.size > 0 || this.requests.size > 0
       || this.awaitingStart.size > 0 || this.awaitingQueue.size > 0 || this.queuePresent) return false;

@@ -2,6 +2,7 @@
 // machine's lists (from its daemon) plus each linked host's, cached per host.
 // No `next/*` or `@/` imports.
 import { createHash } from "node:crypto";
+import { comparableProjectPath } from "../comparable-path";
 import { mergeProjects, type ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
 import type { ManagedProject, SessionInfo } from "../types";
@@ -9,6 +10,7 @@ import { isLinkUp, type Host } from "./host";
 import { HostOpError } from "./link-protocol";
 import { getHost, listHosts, onHostHello } from "./hub";
 import { LOCAL_HOST_ID } from "./registry";
+import { loadPools, poolManagedProject, poolProjectBindings, poolProjectKey } from "./pools";
 
 /** Same TTL as the daemon's own session-list cache. */
 const LIST_TTL_MS = 30_000;
@@ -83,6 +85,7 @@ export async function hostSessions(hostId: string, refresh = false): Promise<Ses
 /** Every host's sessions, each with its `hostId`. An id on several hosts is
  * listed once: under this machine if it is here, else under the first host by label. */
 export async function listSessionsAllHosts(): Promise<SessionInfo[]> {
+  const bindings = poolProjectBindings(loadPools());
   const lists = await Promise.all(hostIds().map((id) => hostSessions(id)));
   const merged: SessionInfo[] = [];
   const seen = new Set<string>();
@@ -90,7 +93,11 @@ export async function listSessionsAllHosts(): Promise<SessionInfo[]> {
     for (const session of sessions) {
       if (seen.has(session.id)) continue;
       seen.add(session.id);
-      merged.push(session);
+      const binding = bindings.get(session.hostId!)?.get(comparableProjectPath(session.projectRoot ?? session.cwd));
+      merged.push(binding ? {
+        ...session, poolId: binding.pool.id, projectId: binding.project.id,
+        projectKey: poolProjectKey(binding.pool.id, binding.project.id),
+      } : session);
     }
   }
   return merged;
@@ -148,6 +155,8 @@ export function invalidateLocalSessionLists(sessionFile?: string): void {
 
 /** Each host's projects (its registry plus session-discovered ones), this machine first, tagged with `hostId`. */
 export async function listProjectsAllHosts(): Promise<ManagedProject[]> {
+  const pools = loadPools();
+  const bindings = poolProjectBindings(pools);
   const perHost = await Promise.all(hostIds().map(async (id) => {
     const host = getHost(id);
     const lists = hostLists(id);
@@ -162,7 +171,11 @@ export async function listProjectsAllHosts(): Promise<ManagedProject[]> {
     // Only this machine's paths resolve here; another host's are never resolved on this machine.
     return mergeProjects({ version: 1, projects: lists.projects }, discovered, id === LOCAL_HOST_ID ? undefined : (path) => path).map((project) => ({ ...project, hostId: id }));
   }));
-  return perHost.flat();
+  const standalone = perHost.flat().filter((project) =>
+    !bindings.get(project.hostId!)?.has(comparableProjectPath(project.path)),
+  );
+  const logical = pools.flatMap((pool) => pool.projects.filter((project) => !project.hidden).map((project) => poolManagedProject(pool, project)));
+  return [...standalone, ...logical];
 }
 
 /** An image from the first online host whose bytes hash to `hash`. */

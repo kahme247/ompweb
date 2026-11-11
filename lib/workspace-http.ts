@@ -3,16 +3,34 @@ import { getStreamSecurityHeaders } from "./file-types";
 import type { Host } from "./hosts/host";
 import { HostOpError, LINK_LIMITS } from "./hosts/link-protocol";
 import type { WorkspaceRead } from "./workspace-types";
+import { isLinkUp } from "./hosts/host";
 
-export function workspaceReadStream(host: Host, read: WorkspaceRead, start = 0, end = read.info.size - 1): ReadableStream<Uint8Array> {
+export function workspaceReadStream(host: Host, read: WorkspaceRead, start = 0, end = read.info.size - 1, signal?: AbortSignal): ReadableStream<Uint8Array> {
   let offset = start;
   let closed = false;
+  let detachStatus = () => {};
   const close = async () => {
     if (closed) return;
     closed = true;
+    detachStatus();
+    signal?.removeEventListener("abort", abort);
     await host.workspaceOps.closeFile(read.id).catch(() => {});
   };
+  let streamController: ReadableStreamDefaultController<Uint8Array>;
+  const fail = (error: Error) => {
+    if (closed) return;
+    streamController.error(error);
+    void close();
+  };
+  const abort = () => fail(new Error("The file request was cancelled"));
   return new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller;
+      detachStatus = host.onStatus(status => { if (!isLinkUp(status)) fail(new HostOpError(503, "host_offline", "The file owner is offline")); });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      else if (!isLinkUp(host.status())) fail(new HostOpError(503, "host_offline", "The file owner is offline"));
+    },
     async pull(controller) {
       if (closed) return;
       if (offset > end) { await close(); controller.close(); return; }
@@ -26,21 +44,20 @@ export function workspaceReadStream(host: Host, read: WorkspaceRead, start = 0, 
         controller.enqueue(chunk.value);
         if (offset > end) { await close(); controller.close(); }
       } catch (error) {
-        await close();
-        controller.error(error);
+        fail(error instanceof Error ? error : new Error(String(error)));
       }
     },
     cancel: close,
   }, { highWaterMark: 0 });
 }
 
-export function streamWorkspaceFile(host: Host, read: WorkspaceRead, contentType: string, rangeHeader: string | null, download = false): Response {
+export function streamWorkspaceFile(host: Host, read: WorkspaceRead, contentType: string, rangeHeader: string | null, download = false, signal?: AbortSignal): Response {
   const headers = {
     "Content-Type": contentType, "Cache-Control": "no-cache", "Accept-Ranges": "bytes",
     "Content-Disposition": getContentDisposition(read.info.name, !download, "download"),
     ...getStreamSecurityHeaders(contentType),
   };
-  if (!rangeHeader) return new Response(workspaceReadStream(host, read), { headers: { ...headers, "Content-Length": String(read.info.size) } });
+  if (!rangeHeader) return new Response(workspaceReadStream(host, read, 0, read.info.size - 1, signal), { headers: { ...headers, "Content-Length": String(read.info.size) } });
   const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
   let start = match?.[1] ? Number(match[1]) : 0;
   let end = match?.[2] ? Number(match[2]) : read.info.size - 1;
@@ -50,17 +67,17 @@ export function streamWorkspaceFile(host: Host, read: WorkspaceRead, contentType
     return new Response(null, { status: 416, headers: { ...headers, "Content-Range": `bytes */${read.info.size}` } });
   }
   end = Math.min(end, read.info.size - 1);
-  return new Response(workspaceReadStream(host, read, start, end), { status: 206, headers: {
+  return new Response(workspaceReadStream(host, read, start, end, signal), { status: 206, headers: {
     ...headers, "Content-Length": String(end - start + 1), "Content-Range": `bytes ${start}-${end}/${read.info.size}`,
   } });
 }
 
-export async function readWorkspaceBytes(host: Host, read: WorkspaceRead, limit: number): Promise<Buffer> {
+export async function readWorkspaceBytes(host: Host, read: WorkspaceRead, limit: number, signal?: AbortSignal): Promise<Buffer> {
   try {
     if (read.info.size > limit) throw new HostOpError(413, "file_too_large_preview", "File too large for preview");
     const bytes = Buffer.allocUnsafe(read.info.size);
     let offset = 0;
-    const reader = workspaceReadStream(host, read).getReader();
+    const reader = workspaceReadStream(host, read, 0, read.info.size - 1, signal).getReader();
     try {
       for (;;) {
         const { done, value } = await reader.read();

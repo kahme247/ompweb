@@ -50,6 +50,7 @@ function runGitClone(url: string, target: string, signal: AbortSignal, output: (
 /** Jobs survive a web/link restart; only an unobserved job or daemon stop cancels them. */
 export class WorkspaceClones {
   private readonly jobs = new Map<string, Job>();
+  busy(): boolean { return [...this.jobs.values()].some(job => !job.terminal); }
 
   async start(id: string, parent: string, url: string): Promise<{id: string}> {
     if (typeof id !== "string" || !ID.test(id) || typeof parent !== "string" || typeof url !== "string") throw new HostOpError(400, "invalid_request", "Invalid clone request");
