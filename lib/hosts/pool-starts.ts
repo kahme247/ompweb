@@ -9,7 +9,7 @@ import { isRecord } from "../type-guards";
 import type { ProjectLaunchConfig } from "../types";
 import { sharesCredentials } from "./cluster";
 import type { Host } from "./host";
-import { adoptedChild, getHost, getHostCapacity, getHostLinkProtocol, hostOwnsLifecycle, reconcilePooledChild } from "./hub";
+import { adoptedChild, getHost, getHostCapacity, getHostLinkProtocol, hostOwnsLifecycle, isHostConfigCurrent, reconcilePooledChild } from "./hub";
 import { CREATION_ID_RE, HostOpError, SHARED_CREDENTIALS_SINCE_VERSION, type HelloChannel } from "./link-protocol";
 import { loadPools, pathApi, selectPoolHost, type PoolHostSnapshot } from "./pools";
 
@@ -325,7 +325,8 @@ export function startPooledSession(input: PoolCreateInput, start: Start, authori
         // A cluster member always runs on the server's logins; without a link that honours that, spawnRpc would refuse it after preparation.
         if (sharesCredentials({ id: member.hostId, shareCredentials: false }, pools)
           && (!hostOwnsLifecycle(member.hostId) || linkProtocol < SHARED_CREDENTIALS_SINCE_VERSION)) continue;
-        if (host) snapshots.set(member.hostId, { status: host.status(), linkProtocol, capacity: getHostCapacity(member.hostId) });
+        // A cluster member behind the master's configuration stays in the map, marked, so selection skips it before any preparation.
+        if (host) snapshots.set(member.hostId, { status: host.status(), linkProtocol, configCurrent: isHostConfigCurrent(member.hostId), capacity: getHostCapacity(member.hostId) });
       }
       const pending = new Map<string, number>();
       for (const current of journal.starts) {
@@ -334,7 +335,13 @@ export function startPooledSession(input: PoolCreateInput, start: Start, authori
         if (current.reserved) pending.set(current.hostId, (pending.get(current.hostId) ?? 0) + 1);
       }
       const hostId = selectPoolHost(pool, snapshots, pending, performance.now());
-      if (!hostId) throw new PoolStartError(503, "pool_unavailable", "No pool worker currently has eligible capacity");
+      if (!hostId) {
+        // Only when members would be eligible but for the configuration: every otherwise-eligible one was skipped for that alone.
+        const caughtUp = new Map([...snapshots].map(([id, snapshot]) => [id, { ...snapshot, configCurrent: true }]));
+        throw new PoolStartError(503, "pool_unavailable", selectPoolHost(pool, caughtUp, pending, performance.now()) === null
+          ? "No pool worker currently has eligible capacity"
+          : "The pool's workers are still receiving the cluster's configuration");
+      }
       const member = pool.members.find((candidate) => candidate.hostId === hostId)!;
       const cloneRoot = project.clonePaths[hostId] ?? pathApi(member.projectsRoot).join(member.projectsRoot, project.id);
       const ref = input.ref ?? project.defaultRef;

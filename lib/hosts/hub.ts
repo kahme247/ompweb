@@ -1890,6 +1890,14 @@ export function getHostLinkProtocol(hostId: string): number | null {
   return hub().links.get(hostId)?.hostVersion ?? null;
 }
 
+/** Whether placement may use this host: `local` and hosts outside the cluster always; a cluster member only once it
+ * reports this server's current configuration (`clusterConfig.current`), so a v9 link or no report yet is not. */
+export function isHostConfigCurrent(hostId: string): boolean {
+  if (hostId === LOCAL_HOST_ID || !isClusterMember(loadPools(), hostId)) return true;
+  const link = hub().links.get(hostId);
+  return link !== undefined && configCurrent(link);
+}
+
 export function onHostsChange(listener: () => void): () => void {
   const listeners = hub().changeListeners;
   listeners.add(listener);
