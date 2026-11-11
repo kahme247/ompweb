@@ -73,6 +73,32 @@ test("question selection survives request replay but is cleared for the next que
   }
 });
 
+test("omp's checkbox select shows which options are already checked", async () => {
+  const request = {
+    type: "extension_ui_request",
+    id: "jobs-1",
+    method: "select",
+    title: "(2 selected) Choose enabled jobs",
+    options: ["pytest", "go-quality", "lint", "Other (type your own)", "✓ Done selecting"],
+    selectionMarker: "checkbox",
+    checkedIndices: [0, 1],
+    markableCount: 3,
+  };
+  const view = render(React.createElement(ExtensionDialog, { request, onRespond: () => {} }));
+  try {
+    const names = screen.getAllByRole("button").map((button) => button.textContent);
+    assert.deepEqual(names.slice(0, 5), [
+      "☑pytest, checked",
+      "☑go-quality, checked",
+      "☐lint, not checked",
+      "Other (type your own)",
+      "✓ Done selecting",
+    ]);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("ExtensionDialog masks sensitive input and toggles visibility", async () => {
   const request = {
     type: "extension_ui_request",
