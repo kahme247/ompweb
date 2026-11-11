@@ -108,7 +108,7 @@ app/api/
   hosts/broker/[...path]/route.ts allow-listed forwarding of an omp auth broker's endpoints for a host that shares credentials (`sharesCredentials`: its `shareCredentials` flag or cluster membership); authenticated by the host token, outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Shared credentials"
   hosts/cluster-config/manifest/route.ts GET the master's mirrored-configuration manifest (`{ version, files, agentEnv, plugins }`) for a cluster member; host token, members only (`admitClusterMember`: 401 unknown token, 403 `local`/not a member, 503 unreadable `hosts.json`/`pools.json`), 409 `{ error, code }` when the configuration cannot be built (`ClusterConfigError`); outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Cluster configuration"
   hosts/cluster-config/file/[hash]/route.ts GET one file of the current manifest by its sha256 (404 for any other hash, an older version's included); same admission and gate as the manifest
-  hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`; this machine is added too by any join while it is not a member; the host needs link protocol 10; 409 `host_in_other_cluster` when it holds another server's configuration), then sends the host its configuration (`clusterConfigOp` `apply`) | DELETE leave, then `restore`; the body carries `restoreError` when the host could not put its own configuration back; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
+  hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`; this machine is added too by any join while it is not a member; the host needs link protocol 10; 409 `host_in_other_cluster` when it holds another server's configuration), then sends the host its configuration (`clusterConfigOp` `apply`) | DELETE leave, then `restore` (none to a daemon below protocol 10, which never applied one); the body carries `restoreError` when the host could not put its own configuration back; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -627,7 +627,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     in the `hosts` snapshot). `currentClusterConfig` rebuilds only when its fingerprint changes
     (stat of every file, agent environment, plugin list, which is read at most every 30 s and keeps the
     last good list when `omp plugin list` fails: a member removes the plugins the manifest lacks).
-    `startClusterConfigSync` (`instrumentation.node.ts`) runs `syncClusterConfig` at start and every 30 s:
+    `startClusterConfigSync` (`instrumentation.node.ts`) runs `syncClusterConfig` at start, every 30 s, and
+    whenever `masterConfigVersion` finds a new version after a known one (a member start reads it too):
     `clusterConfig apply` to each online v10 member that is not `configCurrent`, `restore` to an online
     host outside the cluster that still reports a configuration of this server; never while one of that
     link's ops is unanswered. Join sends `apply` after it saves `pools.json`, leave `restore`
@@ -647,13 +648,15 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   - **Daemon.** Per version: manifest, then each file the member lacks by hash from the link's server
     (`<agent dir>/omp-web/cluster-config/objects/`, verified by hash), then one transaction: files are
     staged, the member's own entries move aside (first apply: `own-config/`, with `plugins.json`,
-    `agent-env.json`, `absent.json` and `server.json`; later: `trash/`), the staged ones move in, the agent
+    `agent-env.json`, `absent.json`, `server.json` and `settings.yml`, a plain copy of its own `config.yml`
+    or `config.yaml` read through a link, which later applies merge from; later: `trash/`), the staged ones move in, the agent
     environment and `state.json` are written; any failure puts everything back and the previous
     version stays. Renames move links as links and cannot cross filesystems (`EXDEV` fails with both
     directories named); a link above an entry (`~/.agents`) is refused. Every request to the master,
     its body included, must finish within 30 s (`clusterConfigTimings.fetchMs`). Plugins run after the
     files in the same queue without the start waiting (`syncPlugins`, `omp plugin`; npm pinned by
-    version, a marketplace plugin has no pin); a failure keeps `plugins: "failed"` and is retried at most
+    version, a marketplace plugin has no pin); a new version with the same plugin list keeps `plugins: "current"`
+    while the step re-checks it; a failure keeps `plugins: "failed"` and is retried at most
     every 30 s (`pluginRetryMs`). Applies, restores and plugin jobs run one at a time.
   - **Ownership.** `own-config/server.json` records the server whose configuration the host holds: one
     server at a time. Another server's `ensure`/`apply` is refused while the recorded one is still in
@@ -661,7 +664,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     in `config_state` and in the op's answer is `holds(link server)`. A join of a host that reports
     another server's configuration is 409 `host_in_other_cluster`. A server's `restore` leaves another
     server's configuration alone (the answer says `owned: false`), and a session start sent before that server's restore is refused
-    after it (`left`), as is any start while a restore runs.
+    after it (`left`), as is any start while a restore runs. A link that ends `"revoked"` while its server
+    `holds` the configuration awaits `restore` before the daemon shuts down: no other server could put it back.
   - **Placement.** `isHostConfigCurrent`: `local` and hosts outside the cluster always; a member only when it reports
     this server's version, `files` and `plugins` current. `selectPoolHost` skips a member that is not;
     `startPooledSession` says why: "still receiving the configuration" or "Update
@@ -670,7 +674,7 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   - **Upgrade.** Every cluster member needs a daemon at protocol 10 (`CLUSTER_CONFIG_SINCE_VERSION`; also the
     join rule `CLUSTER_SINCE_VERSION`). Until then starts there are refused and placement skips it.
   - **Settings.** Rows carry `clusterConfig { …state, owned, current }` (`listHosts`); the member line shows
-    current, updating, failed (reason), held by another server, needs update (below v10), and the MCP commands
+    current, updating (none while `masterConfigError` is set), failed (reason), held by another server, needs update (below v10), and the MCP commands
     missing there. For a cluster session on another member (`isClusterTarget` with a member host) the MCP,
     Skills, Plugins and Agents panels use no cwd and no session (the user-level routes above); MCP alone keeps
     the session for `?attach=1`, read-only (`McpConfig liveOnly`).

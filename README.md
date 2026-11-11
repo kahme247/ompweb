@@ -348,7 +348,8 @@ the cluster keeps its own configuration, managed on that machine.
   30 s, body included; a 5 MiB file needs roughly 1.4 Mbit/s, and a member on a slower link
   does not update.
 - **When a member applies it:** after joining; when it is behind this machine's version
-  (checked every 30 s); and before every session start on the member, which waits for it. The
+  (checked every 30 s and at each cluster session start on a member; a new version found
+  either way is sent to every member at once); and before every session start on the member, which waits for it. The
   files are written whole or not at all: a failure leaves the previous version in place. Every
   cluster session start carries this machine's version, and a start that must run on that
   member (a resumed session, a project pinned to its node) is refused with the reason when the
@@ -361,13 +362,17 @@ the cluster keeps its own configuration, managed on that machine.
   (this needs `bun` and network access on the member), uninstall what this machine does not
   have, and match each plugin's enabled state. npm plugins
   are pinned to this machine's version; a marketplace plugin has no version pin in omp, so one
-  already installed counts as matching. This does not delay a session start. A failed install
+  already installed counts as matching. A session start does not wait for its own version's
+  plugins, but a start that needs a new version waits behind a plugin job that is still running
+  (up to 5 minutes for each install). A new version with the same plugins keeps the member
+  current while its plugins are checked again. A failed install
   leaves the member not current, so placement skips it; it is retried about every 30 s and
   Settings shows omp's message.
 - **Joining:** needs link protocol 10 on the host. Before the first apply, the host's own
   version of every mirrored file and directory moves to `<agent dir>/omp-web/own-config/` on
-  the host, with its plugin list and agent environment variables; the join dialog says its
-  configuration is replaced until it leaves. A host holds one ompweb server's configuration at
+  the host, with its plugin list and agent environment variables; the join dialog says the host
+  receives this machine's configuration, API keys and environment values included, in place of
+  its own until it leaves. A host holds one ompweb server's configuration at
   a time: a host already in another server's cluster cannot join (409 `host_in_other_cluster`)
   and must leave that cluster first. If the host also runs sessions for another ompweb server
   (as a standalone host there), they run on this server's configuration for as long as the host
@@ -380,14 +385,17 @@ the cluster keeps its own configuration, managed on that machine.
   its agent environment variables, and reinstalls its own plugins as far as omp allows. Its own
   `config.yml` is its own file again. If putting its configuration back fails, Settings says so
   and the restore is retried while the host is linked, also for a host that was offline when it
-  left. A session start that races a leave is refused. This machine is the master: nothing is
+  left. A member that is revoked gets its own omp configuration back from its daemon: at once if
+  the daemon is connected, otherwise the next time it reaches this machine (and is refused). A session start
+  that races a leave is refused. This machine is the master: nothing is
   mirrored to it and nothing of it is backed up.
 - **Settings:** each member's line in **Settings → Hosts** shows *same as the master*,
   *updating…*, *failed* with the reason, *held by another ompweb server*, or that the host needs
   an update, and the MCP server commands in the mirrored files that are not installed there.
-  When this machine's configuration cannot be mirrored, one message names the file. For a
-  session or project of the cluster, the Models, settings, MCP, Skills, Plugins and Agents
-  screens say that changes apply to every member. For a session on another member they act on
+  When this machine's configuration cannot be mirrored, one message names the file, and no
+  member line says *updating…*. For a session or project of the cluster, the Models, settings, MCP, Skills, Plugins and Agents
+  screens say that changes apply to every member, and so does **Settings → System** next to the
+  agent environment variables. For a session on another member they act on
   this machine's user-level configuration, which the member runs; that session's and project's
   own configuration is not shown there. MCP shows that session's live status, read from the
   process where it runs, and cannot change it; MCP toggles, reload and Skills diagnostics for
