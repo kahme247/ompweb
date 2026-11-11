@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { authorizeFileAccess } from "../file-authorization";
 import { existingPathWithinRootsChecker, isAbsoluteFileRequestPath, isExistingFilePathAllowed, isFilePathAllowed } from "../file-access";
 import { resolveDirentIsDirectory } from "../file-dirent";
@@ -12,7 +14,7 @@ import { documentPreviewKind, getAudioMime, getDocumentMime, getFileLanguage, ge
 import { MAX_INLINE_BASH_OUTPUT_BYTES, openRegularFileNoFollow, readUtf8FileWithinLimit, resolveBashOutputPath } from "../bash-output";
 import { isBashOutputPathReferencedBySession } from "../session-file-references";
 import { isRecord } from "../type-guards";
-import type { WorkspaceFileEvent, WorkspaceFileInfo, WorkspaceFileRequest, WorkspaceOps } from "../workspace-types";
+import type { GitOrigin, WorkspaceFileEvent, WorkspaceFileInfo, WorkspaceFileRequest, WorkspaceOps } from "../workspace-types";
 import { HostOpError } from "./link-protocol";
 import type { OpResult } from "./session-ops";
 import { authorizeWorkspaceDirectory, getWorkspaceRoots } from "./workspace-roots";
@@ -20,6 +22,7 @@ import { WorkspaceReads } from "./workspace-reads";
 import { WorkspaceWatches } from "./workspace-watch";
 import { getGitFileDiff, getGitStatus } from "../git-changes";
 import { resolveGithubRepo } from "../github-repo";
+import { createChildProcessEnvironment } from "../project-command-env";
 import { addWorktree, findCurrentWorktreePath, listWorktrees, removeWorktree, resolveProject, type WorktreeInfo } from "../worktree";
 import { projectIdentityKey } from "../paths";
 import { invalidateSessionListCache } from "../session-reader";
@@ -36,6 +39,27 @@ async function result<T>(action: () => Promise<T>): Promise<OpResult<T>> {
   catch (error) {
     if (error instanceof HostOpError) return { ok: false, status: error.status, code: error.code, error: error.message };
     throw error;
+  }
+}
+
+const MAX_GIT_ORIGIN_PATHS = 500;
+const execFileAsync = promisify(execFile);
+const git = async (cwd: string, ...args: string[]) => (await execFileAsync("git", ["-C", cwd, ...args], {
+  encoding: "utf8", timeout: 5_000, windowsHide: true, env: createChildProcessEnvironment({ LC_ALL: "C" }),
+})).stdout;
+
+/** Unauthorized, missing and non-repository paths answer the same as a plain folder. */
+async function gitOrigin(requested: string): Promise<Omit<GitOrigin, "path">> {
+  try {
+    const directory = await authorizeWorkspaceDirectory(requested);
+    const topLevel = path.resolve((await git(directory, "rev-parse", "--show-toplevel")).trim());
+    const dotGit = fs.lstatSync(path.join(directory, ".git"), { throwIfNoEntry: false });
+    const mainCheckout = !!dotGit?.isDirectory() && topLevel === path.resolve(directory);
+    const urls = await git(directory, "config", "--null", "--get-all", "remote.origin.url").catch(() => "");
+    const values = urls.split("\0").slice(0, -1);
+    return { origin: values.length === 1 ? values[0] : null, mainCheckout };
+  } catch {
+    return { origin: null, mainCheckout: false };
   }
 }
 
@@ -165,6 +189,12 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
       return getGitFileDiff(directory, checked.filePath);
     }),
     githubRepo: (cwd) => result(async () => ({ repo: await resolveGithubRepo(await authorizeWorkspaceDirectory(cwd)) })),
+    gitOrigins: (paths) => result(async () => {
+      if (!Array.isArray(paths) || paths.length > MAX_GIT_ORIGIN_PATHS) throw invalid();
+      const origins: GitOrigin[] = [];
+      for (const requested of paths) origins.push({ path: requested, ...await gitOrigin(requested) });
+      return { origins };
+    }),
     listWorktrees: (cwd) => result(async () => {
       const directory = await authorizeWorkspaceDirectory(cwd);
       const project = await resolveProject(directory);
