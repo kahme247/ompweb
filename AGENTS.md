@@ -69,6 +69,9 @@ Shared foundations in `lib/omp/`:
   `lib/hosts/hub.ts` for a remote one).
 - `auth-gateway.ts` — shared, idle-killed `omp auth-gateway stdio` child:
   omp's own credentials and models behind JSON-line gateway requests.
+- `auth-broker.ts` — idle-stopped `omp auth-broker serve` child of the web
+  server (started on the first forwarded request, stopped after 5 minutes with
+  none in flight): `brokerFetch`, `abortBrokerRequests`.
 
 ---
 
@@ -100,8 +103,9 @@ app/api/
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
   events/link/route.ts            GET WebSocket upgrade: the browser link (lib/browser-link.ts), bound to the request's web session; gated like every API route, 426 without an upgrade
   transport-metrics/route.ts      GET { now } (the SSE clock probe) | POST { samples } → <agent dir>/omp-web/transport-metrics.jsonl
-  hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart? } (`local`: label only, empty resets to "This machine") | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
+  hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart?, shareCredentials? } (`local`: label only, empty resets to "This machine"; `shareCredentials` on `local` is 400) | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
   hosts/link/route.ts             GET WebSocket upgrade (the `ompweb host` daemon; bearer checked before the upgrade, skipped by the `proxy.ts` gate) | POST 426 for pre-WebSocket daemons
+  hosts/broker/[...path]/route.ts allow-listed forwarding of an omp auth broker's endpoints for a host with `shareCredentials`; authenticated by the host token, outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Shared credentials"
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -148,6 +152,7 @@ lib/
     hub.ts             main side: the link's upgrade and `websocket` handler (`handleLinkUpgrade`, `hostLinkSocket`), `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
     daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
     pending-requests.ts daemon side: `PendingRequests`, a channel's still-open blocking requests and current session id for the hello
+    daemon-broker.ts   daemon side: the loopback forwarder that gives a sharing host's omp processes `OMP_AUTH_BROKER_URL`/`OMP_AUTH_BROKER_TOKEN` (`credentialsEnv`); forwards to the link's server with the link's host token
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
     update-types.ts    shared per-host software status and operation contract
@@ -449,10 +454,12 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   v6 (uploads: hub → daemon binary frames, `upload_ack`, `uploadStart`/
   `uploadAbort`/`uploadAttach`) keeps v4 and v5. v7 adds multi-server joins,
   host-owned lifecycle, callback routing and channel/list discovery:
-  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 7 (literal
+  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 9 (literal
   one-liners: the deploy script parses them with `sed`); a v4 daemon gets no
   `part`, whole lines and no unacked window (`link.sender.parts`); a v4/v5
-  daemon gets 426 for uploads. Main keeps at least N-1, and
+  daemon gets 426 for uploads. v8 (host pool) adds `capacity` reports, `creationId`
+  and `preparePoolProject`; v9 adds `open.launch.shareCredentials` (see "Shared
+  credentials" below). Main keeps at least N-1, and
   dropping one is an explicit decision (a hello
   outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
   daemon's POST gets 426). Once the WebSocket experiments end, the first version
@@ -520,11 +527,41 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   session resumes after its host's hello (`resumeOnHostLink`,
   `lib/session-resume.ts`), once, after the orphan's exit.
 - **Proxy exclusion.** The `proxy.ts` gate lets exactly `/api/hosts/link` through
-  (the `UNGATED` pattern names that path, no subpaths): the daemon has no
+  (the `UNGATED` pattern names that path, no subpaths) and the prefix
+  `/api/hosts/broker/` (below): the daemon has no
   session cookie, so it authenticates with its bearer token instead. The hub
   verifies the `Authorization: Bearer <host token>` header before the upgrade
   (401 unknown token, 503 unreadable `hosts.json` or frozen server). Keep
-  `/api/hosts` itself behind the proxy.
+  `/api/hosts` itself behind the proxy. `/api/hosts/broker/` is the second
+  ungated path (the `UNGATED` pattern names that prefix): the daemon
+  authenticates there with its host token too. A reverse proxy must pass it
+  without its own authentication, without response buffering (the snapshot
+  stream stays open) and without redirects.
+- **Shared credentials** (`docs/specs/2026-11-10-shared-credentials-design.md`).
+  A linked host's `shareCredentials` (default off; `local` never has it) makes the
+  omp processes its daemon spawns use the credentials of the server machine
+  through `omp auth-broker serve`; ompweb still never reads `agent.db`.
+  - **Route.** `app/api/hosts/broker/[...path]/route.ts` checks the host token
+    before reading a body (401 unknown token, 403 `local` or sharing off, 503
+    unreadable `hosts.json` or no broker), then forwards only an allow-list of
+    broker endpoints (snapshot, its stream, health, `refresh`, `disable`,
+    `block`, `blocks`, usage), body at most 1 MiB, with a handful of request
+    and response headers. Everything else answers 404, `POST /v1/credential`
+    included: a host cannot upload a credential. It turns the idle timeout off
+    after authenticating. Turning sharing off or revoking the host calls
+    `abortBrokerRequests` for it and later requests get 403 or 401.
+  - **Daemon.** `open.launch.shareCredentials` (link v9) makes the daemon start omp
+    with the loopback forwarder's URL and a secret it generates at each start. The
+    host token never enters an omp environment: the forwarder adds the link's
+    current token to each request, sends it to that link's server and refuses
+    redirects.
+  - **No fallback.** The hub answers 426 `host_upgrade_required` for a sharing
+    host on a v4–v8 daemon, and the daemon refuses to spawn on an omp older than
+    15.13.1. Starting a session is refused; it never uses the host's own stored
+    logins. Joining a running session is never refused.
+  - **Scope.** The host can read current access tokens and stored API keys;
+    refresh tokens stay on the server. Not shared: `models.yml` custom providers,
+    environment-variable API keys, omp settings.
 - **Remote paths never reach `allowFileRoot`** or any other main-side
   filesystem check: they mean nothing on main. `startNewRpcSession` calls
   `allowFileRoot` and the local session-list invalidation only for the local
@@ -1556,6 +1593,7 @@ during the wait.
 
 ### Auth and model config
 - Auth flows go through RPC commands (`get_login_providers`, `login`, `get_logout_accounts`, `logout`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which omp-web never touches directly. `/api/auth/accounts/[provider]` lists stored accounts and removes one by `credentialId`; omp without those commands reports `supported: false` and the UI falls back to the read-only `omp usage` account list.
+- Linked hosts with `shareCredentials` read this machine's credentials through `lib/omp/auth-broker.ts`, the `omp auth-broker serve` child (the token comes from `omp auth-broker token` and stays in the server process; a refused token stops the child and the next request starts a new one). The broker reloads the store on every snapshot, so a login or logout in Settings reaches the hosts.
 - The Models panel reads and writes `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback).
 - API-key status endpoints must never return the raw key.
 
