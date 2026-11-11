@@ -86,14 +86,12 @@ test("omp's checkbox select shows which options are already checked", async () =
   };
   const view = render(React.createElement(ExtensionDialog, { request, onRespond: () => {} }));
   try {
-    const names = screen.getAllByRole("button").map((button) => button.textContent);
-    assert.deepEqual(names.slice(0, 5), [
-      "☑pytest, checked",
-      "☑go-quality, checked",
-      "☐lint, not checked",
-      "Other (type your own)",
-      "✓ Done selecting",
-    ]);
+    // Accessible names carry the state; the visible glyph is aria-hidden.
+    for (const name of ["pytest, checked", "go-quality, checked", "lint, not checked", "Other (type your own)", "✓ Done selecting"]) {
+      screen.getByRole("button", { name });
+    }
+    assert.equal(screen.getByRole("button", { name: "pytest, checked" }).textContent, "☑pytest, checked");
+    assert.equal(screen.getByRole("button", { name: "lint, not checked" }).textContent, "☐lint, not checked");
   } finally {
     view.unmount();
   }
