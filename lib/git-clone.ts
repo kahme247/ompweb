@@ -25,21 +25,26 @@ export function cloneDirectoryName(url: string): string | null {
   return DIRECTORY_NAME.test(name) && name !== "." && name !== ".." ? name : null;
 }
 
-const SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
-const SCP_HOST = /^((?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+):/;
+const USER = String.raw`[A-Za-z0-9._-]+`;
+const HOST = String.raw`[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?`;
+const PORT = String.raw`(?::\d{1,5})?`;
+const SEGMENT = String.raw`(?!\.{1,2}(?:/|$))[A-Za-z0-9._~+-]+`;
+const PATH = String.raw`${SEGMENT}(?:/${SEGMENT})*/?`;
+const HTTPS_KEY = new RegExp(String.raw`^https://(${HOST})${PORT}/(${PATH})$`);
+const SSH_KEY = new RegExp(String.raw`^ssh://(?:${USER}@)?(${HOST})${PORT}/(${PATH})$`);
+const SCP_KEY = new RegExp(String.raw`^(?:${USER}@)?(${HOST}):/?(${PATH})$`);
 
-/** Same-repository identity `<host>/<path>`: host lower-cased; user, scheme and port ignored;
- *  scp-like `host:path` read as `ssh://host/path`; trailing `/` and `.git` removed; path case-sensitive.
- *  Null exactly where cloneDirectoryName is. */
+/** Same-repository identity `<host>/<path>`, or null. Strict allow-list: the whole trimmed URL must be
+ *  `https://HOST[:PORT]/PATH`, `ssh://[USER@]HOST[:PORT]/PATH` or `[USER@]HOST:PATH`, with no other characters.
+ *  Host lower-cased; user and port ignored; the path keeps its case, loses one leading `/` (scp),
+ *  one trailing `/` and one `.git`. Null wherever cloneDirectoryName is null. */
 export function repositoryKey(url: string): string | null {
   if (cloneDirectoryName(url) === null) return null;
   const trimmed = url.trim();
-  const rest = SCHEME.test(trimmed) ? trimmed.replace(SCHEME, "") : trimmed.replace(SCP_HOST, "$1/");
-  const slash = rest.indexOf("/");
-  const authority = slash < 0 ? rest : rest.slice(0, slash);
-  const path = slash < 0 ? "" : rest.slice(slash + 1);
-  const host = authority.slice(authority.lastIndexOf("@") + 1).replace(/:\d*$/, "").toLowerCase();
-  return `${host}/${path.replace(/\/+$/, "").replace(/\.git$/, "")}`;
+  const match = HTTPS_KEY.exec(trimmed) ?? SSH_KEY.exec(trimmed) ?? SCP_KEY.exec(trimmed);
+  if (!match) return null;
+  const path = match[2].replace(/\/$/, "").replace(/\.git$/, "");
+  return path ? `${match[1].toLowerCase()}/${path}` : null;
 }
 
 const MAX_PROGRESS_LINES = 200;
