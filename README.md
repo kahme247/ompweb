@@ -185,6 +185,8 @@ Forward WebSocket upgrades on `/api/events/link` (browsers) and `/api/hosts/link
 
 Hosts that [use the server's provider logins](#use-the-servers-provider-logins-on-a-host) also call `/api/hosts/broker/`, authenticated by their host token. That path must reach ompweb without the proxy's own authentication (a proxy login page or `auth_request` would block the daemon), without response buffering (it carries a long-lived event stream; in nginx, `proxy_buffering off;`) and without redirects.
 
+Cluster members also fetch this machine's omp configuration from `/api/hosts/cluster-config/manifest` and `/api/hosts/cluster-config/file/<hash>` (exactly these paths, like the broker's), authenticated by their host token and answering members only. Like the broker's, they must reach ompweb without the proxy's own authentication and without redirects.
+
 ### Two services: the web server and the local daemon
 
 ompweb runs this machine's `omp` sessions through a small daemon, `ompweb host`,
@@ -236,7 +238,7 @@ remains an explicit user action.
 **Joining and leaving.** Each linked host has an **In the cluster** switch in **Settings →
 Hosts**. Turning it on asks for a folder on that host for the checkouts the cluster creates
 (default `<home>/ompweb-cluster`) and shows what changes. It needs the host online, its daemon
-on link protocol 9 and the `gitOrigins` operation; otherwise the disabled switch asks for an
+on link protocol 10 and the `gitOrigins` operation; otherwise the disabled switch asks for an
 update or shows the host's unavailable status. While this machine is not a member yet, its own
 daemon needs the same, and the switch asks to restart the host service on this machine.
 
@@ -264,10 +266,10 @@ daemon needs the same, and the switch asks to restart the host service on this m
   says; Settings shows it on and disabled. This is computed from membership, so leaving brings
   the host's own setting back. A member can read this machine's access tokens and stored API
   keys. Cluster placement skips a member that cannot take these logins (daemon below link
-  protocol 9, or a link that does not share) before preparing a checkout there. Only provider
-  logins are shared: `models.yml` custom providers, environment-variable API keys and omp
-  settings are not mirrored to members yet, so the models a cluster session can use depend on
-  the member it runs on.
+  protocol 9, or a link that does not share) before preparing a checkout there. The rest of
+  this machine's omp configuration (`models.yml`, settings, MCP servers, skills, plugins and
+  more) is mirrored to members too; see [Cluster members use this machine's omp
+  configuration](#cluster-members-use-this-machines-omp-configuration).
 - **Limits:** a host that is too slow to report its Git remotes within the time limit keeps
   the remaining projects on its node; leaving and joining again retries them. Only Linux hosts
   report capacity, so a macOS or Windows master never runs cluster sessions itself: its Git
@@ -288,12 +290,114 @@ updating, remove a host that should not receive the logins from the first pool u
 `PUT /api/hosts` or editing `~/.omp/agent/omp-web/pools.json`; the old version has no
 membership switch.
 
+**Upgrade note (configuration).** Joining the cluster, and every cluster session on a member,
+now need an ompweb host daemon at link protocol 10 on that member. Until a member's daemon is
+updated, session starts there are refused ("Update ompweb on the host…"), cluster placement
+skips it, and Settings → Hosts says it needs an update. An updated member receives this
+machine's configuration within about a minute, and its own is replaced until it leaves (see
+below). Update the web server first, then the members.
+
 Creation retries reuse the same intent and creation identity. Once a real session is known,
 its owner remains authoritative for resume, files, terminal, uploads, artifacts, rename, and
 delete, even if pool membership changes. An unavailable owner does not trigger replacement
 on another worker or on the Mac. Dirty files and unpublished work remain on that owner;
 there is no live migration or unpublished-work failover. After an uncertain response,
 inspect the retained session before explicitly retrying a command that may have run.
+
+### Cluster members use this machine's omp configuration
+
+A cluster session can run on any member, and each member runs it with this machine's omp
+configuration: the models, MCP servers, skills, task agents, rules and plugins do not depend on
+the member chosen. A change made here, in Settings or on disk, reaches the members within about
+a minute without any action on them, and before every session start on a member. A host outside
+the cluster keeps its own configuration, managed on that machine.
+
+- **What is mirrored:** from this machine's omp agent directory (`~/.omp/agent`): `config.yml`
+  (without the keys below), `models.yml`, `mcp.json`, `.mcp.json`, `AGENTS.md`, `RULES.md`,
+  `SYSTEM.md`, `APPEND_SYSTEM.md`, `TITLE_SYSTEM.md`, `secrets.yml`, `.env`, and the directories
+  `skills/`, `agents/`, `rules/`, `instructions/`, `commands/`, `prompts/`, `hooks/`,
+  `extensions/` and `tools/`. Also `~/.agents/skills/` (where Settings installs skills), the
+  agent environment variables of **Settings → System**, and the set of installed plugins with
+  whether each is enabled. A mirrored directory becomes equal to this machine's: a file that
+  exists only on the member is removed from it (it stays in the member's backup). `node_modules`
+  and `.git` directories are left out.
+- **What is not mirrored:** `lsp.json`, `ssh.json`, themes, key bindings, sessions, history,
+  `agent.db`, caches and `secret-placeholder.key`; configuration inside a repository (`.omp/`
+  travels with the checkout); named omp profiles (a cluster project that names a profile runs
+  with that profile's own files on each member); and programs: an MCP server's command, a
+  language server or a local model engine that exists only on this machine is not installed on
+  members.
+- **Settings that stay the member's own:** `shellPath`, `python.interpreter`, `browser.*`,
+  `worktree.base`, `plan.autosaveDir`, `shellMinimizer.settingsPath`, `mnemopi.dbPath`,
+  `workspace.additionalDirectories`, `skills.customDirectories`, `extensions`, `images.urls.*`,
+  `providers.tinyModelDevice`, `providers.tinyModelDtype`, `tts.*`, `stt.*`, `tui.*`,
+  `terminal.*`, `lsp.*` and `auth.broker.*`. A member keeps its own value for each of them,
+  or none.
+- **Limits:** a file over 5 MiB, or a configuration over 50 MiB in all, is not mirrored at all:
+  this machine serves no configuration, and **Settings → Hosts** names the file that is over.
+  A `config.yml` that is not a YAML map or a file that cannot be read does the same. Each
+  download a member makes (the list of files, and each file) must finish within 30 s, body
+  included; a 5 MiB file needs roughly 1.4 Mbit/s, and a member on a slower link does not
+  update.
+- **When a member applies it:** after joining; when it is behind this machine's version
+  (checked every 30 s); and before every session start on the member, which waits for it. The
+  files are written whole or not at all: a failure leaves the previous version in place. A
+  cluster session is never started with the member's own configuration: a start that must run
+  on that member (a resumed session, a project pinned to its node) is refused with the reason
+  when the files cannot be applied, and new cluster sessions are placed only on members that
+  have this machine's current configuration and plugins. Sessions already running are not
+  restarted. The applied files are readable by the daemon's user only.
+- **Plugins:** after the files, the member runs `omp plugin` itself to install what it lacks,
+  uninstall what this machine does not have, and match each plugin's enabled state. npm plugins
+  are pinned to this machine's version; a marketplace plugin has no version pin in omp, so one
+  already installed counts as matching. This does not delay a session start. A failed install
+  leaves the member not current, so placement skips it; it is retried about every 30 s and
+  Settings shows omp's message.
+- **Joining:** needs link protocol 10 on the host. Before the first apply, the host's own
+  version of every mirrored file and directory moves to `<agent dir>/omp-web/own-config/` on
+  the host, with its plugin list and agent environment variables; the join dialog says its
+  configuration is replaced until it leaves. A host holds one ompweb server's configuration at
+  a time: a host already in another server's cluster cannot join (409 `host_in_other_cluster`)
+  and must leave that cluster first. If the host also runs sessions for another ompweb server
+  (as a standalone host there), they run on this server's configuration for as long as the host
+  is a member here.
+- **Changes made on a member** to a mirrored file are overwritten at the next apply; change the
+  configuration here. An apply is refused when `~/.agents`, or any other directory above a
+  mirrored entry, is a symbolic link on the member: replace it with a real directory. The
+  mirrored directories, the staging area and the backup must be on one filesystem.
+- **Leaving:** the daemon removes the mirrored files, moves its backup into place, puts back
+  its agent environment variables, and reinstalls its own plugins as far as omp allows. Its own
+  `config.yml` is its own file again. If putting its configuration back fails, Settings says so
+  and the restore is retried while the host is linked, also for a host that was offline when it
+  left. A session start that races a leave is refused. This machine is the master: nothing is
+  mirrored to it and nothing of it is backed up.
+- **Settings:** each member's line in **Settings → Hosts** shows *same as the master*,
+  *updating…*, *failed* with the reason, *held by another ompweb server*, or that the host needs
+  an update, and the MCP server commands in the mirrored files that are not installed there.
+  When this machine's configuration cannot be mirrored, one message names the file. For a
+  session or project of the cluster, the Models, settings, MCP, Skills, Plugins and Agents
+  screens say that changes apply to every member. For a session on another member they act on
+  this machine's user-level configuration, which the member runs; that session's and project's
+  own configuration is not shown there. MCP shows that session's live status, read from the
+  process where it runs, and cannot change it; MCP toggles, reload and Skills diagnostics for
+  the session are not available there.
+- **API:** `GET /api/plugins`, `POST /api/plugins`, `GET /api/skills`, `POST /api/skills/check`
+  and `POST /api/skills/update` accept a request without `cwd` and then act on the user level
+  only (a project-scope change still needs a `cwd`). `GET /api/mcp?sessionId=…&attach=1` reads
+  the live MCP status of a session that is already running and never starts one.
+- **Security:** the configuration contains secrets: API keys in `models.yml` and `.env`, MCP
+  server environments and headers, tokens in `config.yml` and the values in `secrets.yml`. They
+  are written to every member's disk, readable by the daemon's user only; a member can already
+  read this machine's provider logins, and this adds the rest. Hooks, extensions, custom tools
+  and plugins are code: this machine's code runs on every member. Nothing flows the other way:
+  a member cannot change this machine's configuration, and the routes only serve members,
+  checked on every request, and stop answering a host the moment it leaves or is revoked.
+- **Differences that remain:** a provider in `models.yml` that points at this machine's own
+  address (for example `http://127.0.0.1:11434`) points at the member's own address there, so a
+  local engine has to run on each member or be given an address they can all reach. An API key
+  written as an environment-variable name or as a `!command` resolves on the member: the
+  variable or command must exist there (variables set in Settings → System or in the mirrored
+  `.env` do). MCP servers started by a command need that command on each member.
 
 
 ### Local worker maintenance (Unix)
@@ -607,7 +711,7 @@ everything else on it: they resume when it wakes, and the link returns then. A
 docked or no-sleep setup keeps running with the lid closed. Revoking a host in
 Settings closes its link and the daemon stops its omp processes.
 
-A reverse proxy must forward the upgrade on `/api/hosts/link`. For hosts that share the server's logins it must also pass `/api/hosts/broker/` without the proxy's own authentication and without response buffering; see [Behind a reverse proxy](#behind-a-reverse-proxy).
+A reverse proxy must forward the upgrade on `/api/hosts/link`. For hosts that share the server's logins it must also pass `/api/hosts/broker/` without the proxy's own authentication and without response buffering; for cluster members, likewise `/api/hosts/cluster-config/manifest` and `/api/hosts/cluster-config/file/<hash>` without the proxy's own authentication. See [Behind a reverse proxy](#behind-a-reverse-proxy).
 
 Update ompweb on the server before its hosts: a host from before this version shows **needs upgrade** until it is updated.
 
@@ -652,7 +756,9 @@ Notes:
   private quarantine and the error gives its location; inspect it before removing
   or restoring anything.
 - **Not available on remote hosts yet:** session archiving and the Skills,
-  Plugins, Agents and MCP settings. Transcript search still scans this machine.
+  Plugins, Agents and MCP settings, for a host outside the cluster (a cluster member uses
+  this machine's: see [above](#cluster-members-use-this-machines-omp-configuration)).
+  Transcript search still scans this machine.
 - **Agent-started sessions:** with agent tools enabled, an agent can pass a `host`
   to `new_session` (it defaults to the agent's own host). A remote host asks for
   confirmation each time unless **Agents can start sessions here without asking**
@@ -665,7 +771,7 @@ By default a host uses its own omp logins. Turn on **Use this server's provider 
 
 - **What is shared:** the provider logins stored on the server (OAuth logins and stored API keys). The server runs `omp auth-broker serve` for this and starts it on the first request; it stops after 5 minutes without one.
 - **When a change reaches a host:** every omp process started after a login or logout on the server uses it. A running process picks it up the next time it is used, because omp stops listening for updates after 20 seconds without activity and resumes on its next use. A running process keeps the access tokens and API keys it has already loaded until it ends.
-- **What is not shared:** custom providers in `models.yml`, API keys set through environment variables (a host's own environment keys still apply there), and omp settings.
+- **What is not shared:** custom providers in `models.yml`, API keys set through environment variables (a host's own environment keys still apply there), and omp settings. A cluster member does get these from this machine: see [Cluster members use this machine's omp configuration](#cluster-members-use-this-machines-omp-configuration).
 - **Requirements:** the server's own `omp` must provide `omp auth-broker`. The host's daemon must speak link protocol 9 and its `omp` must be 15.13.1 or newer; otherwise starting a session on that host is refused with a message naming what to update. It never falls back to the host's own stored logins. Joining a session that is already running is not refused. The setting applies to omp processes started after you change it.
 - **What the host can read:** the current access token of every OAuth login and every stored API key, in full. A process running as the daemon's user can do the same. OAuth refresh tokens never leave the server machine, and the host cannot add or replace a login. It can mark a login disabled or rate-limited for every machine.
 - **Turning it off:** turning sharing off, or revoking the host, aborts the host's open requests to the server and refuses later ones. Access tokens the host already read stay valid until they expire, and API keys until you rotate them at the provider.
