@@ -105,8 +105,8 @@ app/api/
   transport-metrics/route.ts      GET { now } (the SSE clock probe) | POST { samples } → <agent dir>/omp-web/transport-metrics.jsonl
   hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart?, shareCredentials? } (`local`: label only, empty resets to "This machine"; `shareCredentials` on `local` is 400) | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
   hosts/link/route.ts             GET WebSocket upgrade (the `ompweb host` daemon; bearer checked before the upgrade, skipped by the `proxy.ts` gate) | POST 426 for pre-WebSocket daemons
-  hosts/broker/[...path]/route.ts allow-listed forwarding of an omp auth broker's endpoints for a host with `shareCredentials`; authenticated by the host token, outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Shared credentials"
-  hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`; this machine is added with the first host) | DELETE leave; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
+  hosts/broker/[...path]/route.ts allow-listed forwarding of an omp auth broker's endpoints for a host that shares credentials (`sharesCredentials`: its `shareCredentials` flag or cluster membership); authenticated by the host token, outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Shared credentials"
+  hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`; this machine is added too by any join while it is not a member) | DELETE leave; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -584,6 +584,22 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     host's broker requests** (`abortBrokerRequests`): `PUT /api/hosts` and the
     cluster `DELETE`. A flag change or revoke writes `hosts.json` and likewise
     aborts requests when sharing ends.
+  - **Membership, not the confirmation or `enabled`, grants sharing.** A host
+    added to `pools[0]` through `PUT /api/hosts` (or a `pools.json` edit) shares
+    without the join dialog, and so do members of a disabled first pool.
+  - **Placement skips members that cannot share.** `startPooledSession` leaves
+    out a member that `sharesCredentials` forces to share unless its link is
+    shared (`hostOwnsLifecycle`) at `SHARED_CREDENTIALS_SINCE_VERSION`, before
+    preparation; `spawnRpc`'s 426 stays the last guard. Other pools' members
+    keep their own eligibility.
+  - **Join keeps what the host showed.** A created cluster project takes the
+    host project's name, else its folder name (split on `/` and `\`), and its
+    alias; binding a visible checkout un-hides a hidden cluster project.
+    `POST /api/projects` pool registration matches by `repositoryKey` (or the
+    identical text) and keeps the stored origin.
+  - **Not mirrored to members:** `models.yml` custom providers,
+    environment-variable API keys and omp settings; a cluster session's models
+    depend on the member chosen.
   - **Only grouping passes `pools` to `projectTargetId`.** Selection, expand
     keys, reorder, pin and drag use the project's own target.
 - **Remote paths never reach `allowFileRoot`** or any other main-side
