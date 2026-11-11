@@ -1,7 +1,7 @@
 export type UsageTimeRange = "today" | "7d" | "30d" | "90d" | "month" | "all";
 export type UsageGranularity = "daily" | "monthly" | "projects";
 export type UsageMetricView = "cost" | "tokens";
-export type UsageBreakdownView = "model" | "day" | "project";
+export type UsageBreakdownView = "model" | "day" | "project" | "host";
 export type CostQualityTier = "provider_reported" | "model_priced" | "unpriced";
 
 export interface ModelRates {
@@ -112,6 +112,8 @@ export interface DayUsageSummary {
 export interface ProjectUsageSummary {
   project: string; // directory path
   projectName: string; // display folder name
+  hostId: string;
+  hostLabel: string;
   cost: number;
   tokens: number;
   share: number; // 0-100 percentage
@@ -135,6 +137,7 @@ export interface UsageReport {
   modelBreakdown: ModelUsageSummary[];
   dayBreakdown: DayUsageSummary[];
   projectBreakdown: ProjectUsageSummary[];
+  hostBreakdown: HostUsageSummary[];
   scanInfo: UsageReportScanInfo;
 }
 
@@ -145,4 +148,53 @@ export interface UsageQueryOptions {
   from?: number;
   to?: number;
   forceRefresh?: boolean;
+}
+
+/** One transcript as its host last saw it; a changed stamp means it must be read again. */
+export interface UsageTranscriptStamp {
+  path: string;
+  mtimeMs: number;
+  size: number;
+}
+
+export interface UsageSessionStamps {
+  session: string;
+  transcripts: UsageTranscriptStamp[];
+}
+
+export interface UsageTranscriptIndex {
+  parserVersion: number;
+  sessions: UsageSessionStamps[];
+}
+
+export interface UsageReadRequest {
+  session: string;
+  paths: string[];
+}
+
+export interface UsageTranscriptRecords extends UsageTranscriptStamp {
+  records: UsageRecord[];
+}
+
+/** `missing`: gone or not listed by this host; `unread`: did not fit this answer, ask again. */
+export interface UsageRecordsPage {
+  files: UsageTranscriptRecords[];
+  missing: string[];
+  unread: UsageReadRequest[];
+}
+
+export type HostUsageSyncState = "current" | "syncing" | "offline" | "stale" | "unsupported";
+
+export interface HostUsageStatus {
+  hostId: string;
+  label: string;
+  state: HostUsageSyncState;
+  syncedAt: number | null;
+}
+
+export interface HostUsageSummary extends HostUsageStatus {
+  cost: number;
+  tokens: number;
+  share: number; // 0-100 percentage
+  sessionsCount: number;
 }

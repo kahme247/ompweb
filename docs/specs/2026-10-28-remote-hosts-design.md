@@ -468,6 +468,7 @@ parts of those routes stay on main.
 | `spawn {ch, cwd, sessionFile, toolNames, advisor}` | `startRpcSession` spawn |
 | `sessionFileExists {path}` / `invalidateSessionLists {path}` | `AgentSessionWrapper` |
 | `uploadStart {id, name, size, type, attempt}` / `uploadAbort {id}` / `uploadAttach {id, sessionFile, sessionId}` | new in v6: composer uploads (`docs/specs/2026-11-02-file-uploads-design.md`, U3, U5) |
+| `listUsageTranscripts {refresh}` / `readUsageRecords {requests}` | Usage from linked hosts (`lib/hosts/usage-sync.ts`): compatible addition (the link version is unchanged; older daemons answer 501 `unknown_op`, and Usage lists that host as needing an update). The first lists stamps (`path`, `mtimeMs`, `size`) of each session's transcript and artifact transcripts with the host's `parserVersion`; the second parses only paths the host lists itself, priced with the host's `models.yml`, and answers `{files, missing, unread}` (`unread`: did not fit this page, main asks again) |
 | `setUploadRetention {days}` | compatible addition (the link version is unchanged; older daemons answer 501 `unknown_op`, which main ignores): days to keep sent uploads, `null` = for ever; sent on every hello and when the web setting changes (`docs/specs/2026-11-02-file-uploads-design.md`, U6) |
 
 Op timeout: 30 s of silence (each result byte frame that arrives restarts it), then 504 naming the host; `uploadAttach` gets 10 minutes (a 2 GiB copy across file systems).

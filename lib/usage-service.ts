@@ -1,7 +1,7 @@
 import { statSync } from "fs";
 import { basename, join } from "path";
 import { readModelsConfig } from "./omp/models-config";
-import { forEachFileLineSync, invalidateSessionFileListCache, readSessionHeaderSync } from "./omp/session-files";
+import { forEachFileLineSync, readSessionHeaderSync } from "./omp/session-files";
 import { SUBAGENT_ID_RE } from "./subagent-types";
 import { isRecord } from "./type-guards";
 import {
@@ -9,11 +9,8 @@ import {
   calculateUsageCost,
   resolveModelRates,
 } from "./usage-rates";
-import { getUsageReportFromDb } from "./usage-db";
 import type {
-  UsageQueryOptions,
   UsageRecord,
-  UsageReport,
   UsageTimeRange,
 } from "./usage-types";
 
@@ -412,16 +409,4 @@ export function parseSessionUsage(
   });
 
   return records;
-}
-
-/**
- * Generate full usage report over all sessions according to query options.
- * Backed by the persistent local SQLite usage database.
- */
-export async function getUsageReport(options: UsageQueryOptions = {}): Promise<UsageReport> {
-  if (options.forceRefresh) {
-    invalidateUsageCache();
-    invalidateSessionFileListCache();
-  }
-  return getUsageReportFromDb(options);
 }

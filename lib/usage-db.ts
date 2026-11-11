@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, statSync } from "fs";
 import { Database } from "bun:sqlite";
-import { basename, dirname, join } from "path";
+import { dirname, join, posix, win32 } from "path";
+import { LOCAL_HOST_ID } from "./hosts/registry";
 import { readModelsConfig, type ModelsFileConfig } from "./omp/models-config";
 import { getAgentDir, getSessionsDir } from "./omp/paths";
 import { listSessionArtifactTranscripts, listSessionFiles } from "./omp/session-files";
@@ -16,6 +17,8 @@ import {
 import { getProviderColor, getProviderDisplayName } from "./usage-rates";
 import type {
   DayUsageSummary,
+  HostUsageStatus,
+  HostUsageSummary,
   ModelUsageSummary,
   ProjectUsageSummary,
   ProviderUsageSummary,
@@ -24,6 +27,7 @@ import type {
   UsageRecord,
   UsageReport,
   UsageSummary,
+  UsageTranscriptRecords,
 } from "./usage-types";
 
 declare global {
@@ -36,9 +40,10 @@ declare global {
  * older layout is dropped and rebuilt from the transcripts on disk: it is only
  * a cache. v3 adds `entry_id`, `subagent_file`, `session_started` and `parser_version` (v2 was
  * written by a pre-release build of this change with the old layout, so it
- * must be rebuilt too).
+ * must be rebuilt too). v4 adds `host_id` (rows from linked hosts, `lib/hosts/usage-sync.ts`);
+ * `synced_files` is keyed by (host_id, file_path).
  */
-const USAGE_DB_SCHEMA_VERSION = 3;
+const USAGE_DB_SCHEMA_VERSION = 4;
 
 /** Get the path to the usage SQLite database file (~/.omp/agent/usage.db). */
 export function getUsageDbPath(): string {
@@ -70,16 +75,19 @@ function migrateUsageDatabase(db: Database): void {
         DROP TABLE IF EXISTS synced_files;
 
         CREATE TABLE synced_files (
-          file_path TEXT PRIMARY KEY,
+          host_id TEXT NOT NULL DEFAULT 'local',
+          file_path TEXT NOT NULL,
           mtime_ms REAL NOT NULL,
           file_size INTEGER NOT NULL,
           records_count INTEGER NOT NULL,
           synced_at INTEGER NOT NULL,
-          parser_version INTEGER
+          parser_version INTEGER,
+          PRIMARY KEY (host_id, file_path)
         );
 
         CREATE TABLE usage_records (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          host_id TEXT NOT NULL DEFAULT 'local',
           file_path TEXT NOT NULL,
           session_id TEXT NOT NULL,
           session_cwd TEXT NOT NULL,
@@ -101,7 +109,8 @@ function migrateUsageDatabase(db: Database): void {
         );
 
         CREATE INDEX idx_usage_records_timestamp ON usage_records(timestamp);
-        CREATE INDEX idx_usage_records_file_path ON usage_records(file_path);
+        CREATE INDEX idx_usage_records_file_path ON usage_records(file_path, host_id);
+        CREATE INDEX idx_usage_records_host ON usage_records(host_id);
         CREATE INDEX idx_usage_records_provider ON usage_records(provider);
         CREATE INDEX idx_usage_records_session_cwd ON usage_records(session_cwd);
         CREATE INDEX idx_usage_records_entry ON usage_records(entry_id, timestamp);
@@ -183,12 +192,60 @@ export interface SyncStats {
   recordsInserted: number;
 }
 
+/** Statements that write one host's rows; every one takes the host id first. */
+function hostWriteStatements(db: Database) {
+  const insertRecord = db.prepare(`
+    INSERT INTO usage_records (
+      host_id, file_path, session_id, session_cwd, timestamp, provider, model,
+      input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
+      cache_write_tokens, total_tokens, cost, cache_savings, cost_quality,
+      entry_id, subagent_file, session_started
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, ?, ?
+    )
+  `);
+  return {
+    insertRecord: (hostId: string, filePath: string, r: UsageRecord) =>
+      insertRecord.run(
+        hostId,
+        filePath,
+        r.sessionId,
+        r.sessionCwd,
+        r.timestamp,
+        r.provider,
+        r.model,
+        r.input,
+        r.output,
+        r.reasoning,
+        r.cacheRead,
+        r.cacheWrite,
+        r.totalTokens,
+        r.cost,
+        r.cacheSavings,
+        r.costQuality,
+        r.entryId ?? null,
+        r.subagentFile ?? null,
+        r.sessionStarted,
+      ),
+    deleteRecords: db.prepare("DELETE FROM usage_records WHERE host_id = ? AND file_path = ?"),
+    deleteStamp: db.prepare("DELETE FROM synced_files WHERE host_id = ? AND file_path = ?"),
+    upsertStamp: db.prepare(`
+      INSERT OR REPLACE INTO synced_files (host_id, file_path, mtime_ms, file_size, records_count, synced_at, parser_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `),
+  };
+}
+
 /**
- * Incrementally sync session .jsonl files, plus every transcript in each
+ * Incrementally sync this machine's session .jsonl files, plus every transcript in each
  * session's artifacts directory (subagents, advisors, `/tan` clones, extension
  * sub-sessions — each bills its own model usage), into the usage database.
  * Artifact transcripts are attributed to the session they belong to. Only
  * files that are new, changed, or last synced by other parsing rules are parsed.
+ * Rows of linked hosts are left alone.
  */
 export function syncSessionFilesToDb(
   sessionFiles: string[],
@@ -199,7 +256,9 @@ export function syncSessionFilesToDb(
   const now = Date.now();
 
   // 1. Fetch currently synced files from SQLite
-  const syncedRows = db.prepare("SELECT file_path, mtime_ms, file_size, parser_version FROM synced_files").all() as Array<{
+  const syncedRows = db
+    .prepare("SELECT file_path, mtime_ms, file_size, parser_version FROM synced_files WHERE host_id = ?")
+    .all(LOCAL_HOST_ID) as Array<{
     file_path: string;
     mtime_ms: number;
     file_size: number;
@@ -214,26 +273,7 @@ export function syncSessionFilesToDb(
   let filesUpdated = 0;
   let recordsInserted = 0;
 
-  const insertRecordStmt = db.prepare(`
-    INSERT INTO usage_records (
-      file_path, session_id, session_cwd, timestamp, provider, model,
-      input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
-      cache_write_tokens, total_tokens, cost, cache_savings, cost_quality,
-      entry_id, subagent_file, session_started
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      ?, ?, ?
-    )
-  `);
-
-  const deleteRecordsStmt = db.prepare("DELETE FROM usage_records WHERE file_path = ?");
-  const deleteSyncedFileStmt = db.prepare("DELETE FROM synced_files WHERE file_path = ?");
-  const upsertSyncedFileStmt = db.prepare(`
-    INSERT OR REPLACE INTO synced_files (file_path, mtime_ms, file_size, records_count, synced_at, parser_version)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
+  const statements = hostWriteStatements(db);
 
   const currentFilesSet = new Set<string>();
   const transcripts = sessionFiles.flatMap((sessionFile) =>
@@ -275,33 +315,14 @@ export function syncSessionFilesToDb(
       const records: UsageRecord[] = parseSessionUsage(filePath, customModelsConfig, sessionFile);
 
       ensureTransaction();
-      deleteRecordsStmt.run(filePath);
+      statements.deleteRecords.run(LOCAL_HOST_ID, filePath);
 
       for (const r of records) {
-        insertRecordStmt.run(
-          filePath,
-          r.sessionId,
-          r.sessionCwd,
-          r.timestamp,
-          r.provider,
-          r.model,
-          r.input,
-          r.output,
-          r.reasoning,
-          r.cacheRead,
-          r.cacheWrite,
-          r.totalTokens,
-          r.cost,
-          r.cacheSavings,
-          r.costQuality,
-          r.entryId ?? null,
-          r.subagentFile ?? null,
-          r.sessionStarted,
-        );
+        statements.insertRecord(LOCAL_HOST_ID, filePath, r);
         recordsInserted++;
       }
 
-      upsertSyncedFileStmt.run(filePath, stats.mtimeMs, stats.size, records.length, now, USAGE_PARSER_VERSION);
+      statements.upsertStamp.run(LOCAL_HOST_ID, filePath, stats.mtimeMs, stats.size, records.length, now, USAGE_PARSER_VERSION);
       filesUpdated++;
     }
 
@@ -309,8 +330,8 @@ export function syncSessionFilesToDb(
     for (const filePath of syncedMap.keys()) {
       if (!currentFilesSet.has(filePath) || !existsSync(filePath)) {
         ensureTransaction();
-        deleteRecordsStmt.run(filePath);
-        deleteSyncedFileStmt.run(filePath);
+        statements.deleteRecords.run(LOCAL_HOST_ID, filePath);
+        statements.deleteStamp.run(LOCAL_HOST_ID, filePath);
         filesDeleted++;
       }
     }
@@ -329,6 +350,53 @@ export function syncSessionFilesToDb(
   };
 }
 
+export interface HostUsageStamp {
+  mtimeMs: number;
+  size: number;
+  parserVersion: number | null;
+}
+
+/** Transcripts stored for linked host `hostId`, by path, as the host stamped them when they were read. */
+export function hostUsageStamps(db: Database, hostId: string): Map<string, HostUsageStamp> {
+  const rows = db
+    .prepare("SELECT file_path, mtime_ms, file_size, parser_version FROM synced_files WHERE host_id = ?")
+    .all(hostId) as Array<{ file_path: string; mtime_ms: number; file_size: number; parser_version: number | null }>;
+  return new Map(rows.map((row) => [row.file_path, { mtimeMs: row.mtime_ms, size: row.file_size, parserVersion: row.parser_version }]));
+}
+
+/** Replace linked host `hostId`'s rows of each read transcript and drop those of `missing` paths, in one transaction. */
+export function storeHostUsage(
+  db: Database,
+  hostId: string,
+  parserVersion: number,
+  files: UsageTranscriptRecords[],
+  missing: string[],
+): void {
+  if (hostId === LOCAL_HOST_ID) throw new Error("This machine's usage is read from its own transcripts");
+  const statements = hostWriteStatements(db);
+  const now = Date.now();
+  db.transaction(() => {
+    for (const file of files) {
+      statements.deleteRecords.run(hostId, file.path);
+      for (const record of file.records) statements.insertRecord(hostId, file.path, record);
+      statements.upsertStamp.run(hostId, file.path, file.mtimeMs, file.size, file.records.length, now, parserVersion);
+    }
+    for (const path of missing) {
+      statements.deleteRecords.run(hostId, path);
+      statements.deleteStamp.run(hostId, path);
+    }
+  })();
+}
+
+/** Drop the rows of every linked host not in `keepHostIds` (revoked or deleted). */
+export function pruneHostUsage(db: Database, keepHostIds: string[]): void {
+  const keep = JSON.stringify([LOCAL_HOST_ID, ...keepHostIds]);
+  db.transaction(() => {
+    db.prepare("DELETE FROM usage_records WHERE host_id NOT IN (SELECT value FROM json_each(?))").run(keep);
+    db.prepare("DELETE FROM synced_files WHERE host_id NOT IN (SELECT value FROM json_each(?))").run(keep);
+  })();
+}
+
 /**
  * Rebuild `temp.uncounted_usage`: ids of stored rows the report must skip.
  * - Copies. omp copies transcript entries, `task` summaries included, with
@@ -337,13 +405,14 @@ export function syncSessionFilesToDb(
  *   files is one request. The row from the earliest-started owning session
  *   counts — the original, since every copy starts later; a `/tan` clone ties
  *   with its parent and loses on file path — and deleting that session hands
- *   the entry to the next copy. Copies are rare, so they are found with one
- *   sequential scan of the (entry_id, timestamp) index before any row-by-row
- *   comparison.
+ *   the entry to the next copy. This holds across hosts: a session copied to
+ *   another machine is still one request. Copies are rare, so they are found
+ *   with one sequential scan of the (entry_id, timestamp) index before any
+ *   row-by-row comparison.
  * - `task` result summaries whose subagent transcript, next to this summary or
- *   any copy of it, has usage from before the summary: that transcript is
- *   counted in full. A later transcript that merely reuses the subagent id
- *   (possible in a branch, which does not copy artifacts) does not cover it.
+ *   any copy of it on the copy's host, has usage from before the summary: that
+ *   transcript is counted in full. A later transcript that merely reuses the
+ *   subagent id (possible in a branch, which does not copy artifacts) does not cover it.
  * Computed once per report so the report's queries share it.
  */
 function collectUncountedUsage(db: Database): void {
@@ -366,10 +435,10 @@ function collectUncountedUsage(db: Database): void {
       UNION
       SELECT s.id FROM usage_records s
       WHERE s.subagent_file IS NOT NULL AND (
-        EXISTS (SELECT 1 FROM usage_records t WHERE t.file_path = s.subagent_file AND t.timestamp <= s.timestamp)
+        EXISTS (SELECT 1 FROM usage_records t WHERE t.host_id = s.host_id AND t.file_path = s.subagent_file AND t.timestamp <= s.timestamp)
         OR EXISTS (
           SELECT 1 FROM usage_records c
-          JOIN usage_records t ON t.file_path = c.subagent_file AND t.timestamp <= c.timestamp
+          JOIN usage_records t ON t.host_id = c.host_id AND t.file_path = c.subagent_file AND t.timestamp <= c.timestamp
           WHERE c.entry_id = s.entry_id AND c.timestamp = s.timestamp
         )
       );
@@ -379,12 +448,17 @@ function collectUncountedUsage(db: Database): void {
 /** Report filter: rows not listed by {@link collectUncountedUsage}. */
 const COUNTED_ROWS = "id NOT IN (SELECT id FROM temp.uncounted_usage)";
 
+/** This machine when the caller names no hosts. */
+const LOCAL_ONLY: HostUsageStatus[] = [{ hostId: LOCAL_HOST_ID, label: "", state: "current", syncedAt: null }];
+
 /**
  * Execute SQL analytics queries over the SQLite database to generate a full UsageReport.
+ * `hosts` names and orders the machines in `hostBreakdown`; their rows were pulled by `lib/hosts/usage-sync.ts`.
  */
 export async function getUsageReportFromDb(
   options: UsageQueryOptions = {},
   customDb?: Database,
+  hosts: HostUsageStatus[] = LOCAL_ONLY,
 ): Promise<UsageReport> {
   const startTime = Date.now();
   const timeRange = options.range || "30d";
@@ -394,7 +468,8 @@ export async function getUsageReportFromDb(
   const db = customDb || getUsageDatabase();
   if (options.forceRefresh) {
     try {
-      db.exec("DELETE FROM synced_files; DELETE FROM usage_records;");
+      db.prepare("DELETE FROM synced_files WHERE host_id = ?").run(LOCAL_HOST_ID);
+      db.prepare("DELETE FROM usage_records WHERE host_id = ?").run(LOCAL_HOST_ID);
     } catch {
       // Ignore
     }
@@ -722,45 +797,84 @@ export async function getUsageReportFromDb(
     .prepare(
       `
       SELECT
+        host_id AS hostId,
         session_cwd AS project,
         COALESCE(SUM(cost), 0) AS cost,
         COALESCE(SUM(total_tokens), 0) AS tokens,
         COUNT(DISTINCT session_id) AS sessionsCount
       FROM usage_records
       WHERE ${COUNTED_ROWS} AND timestamp >= ? AND timestamp <= ? ${whereProject}
-      GROUP BY session_cwd
+      GROUP BY host_id, session_cwd
       ORDER BY cost DESC, tokens DESC
     `,
     )
     .all(...params) as Array<{
+    hostId: string;
     project: string;
     cost: number;
     tokens: number;
     sessionsCount: number;
   }>;
 
-  const projectBreakdown: ProjectUsageSummary[] = projectRows.map((row) => ({
-    project: row.project || "Default Project",
-    projectName: basename(row.project || "Default Project") || row.project,
-    cost: row.cost,
-    tokens: row.tokens,
-    share:
-      totalCost > 0
-        ? (row.cost / totalCost) * 100
-        : totalTokens > 0
-          ? (row.tokens / totalTokens) * 100
-          : 0,
-    sessionsCount: row.sessionsCount,
-  }));
+  const hostLabels = new Map(hosts.map((host) => [host.hostId, host.label]));
+  const projectBreakdown: ProjectUsageSummary[] = projectRows.map((row) => {
+    const project = row.project || "Default Project";
+    return {
+      project,
+      // A linked host's paths follow its own OS, not this server's.
+      projectName: (project.startsWith("/") ? posix : win32).basename(project) || project,
+      hostId: row.hostId,
+      hostLabel: hostLabels.get(row.hostId) ?? row.hostId,
+      cost: row.cost,
+      tokens: row.tokens,
+      share:
+        totalCost > 0
+          ? (row.cost / totalCost) * 100
+          : totalTokens > 0
+            ? (row.tokens / totalTokens) * 100
+            : 0,
+      sessionsCount: row.sessionsCount,
+    };
+  });
+
+  // 7. Host Breakdown Query
+  const hostRows = db
+    .prepare(
+      `
+      SELECT
+        host_id AS hostId,
+        COALESCE(SUM(cost), 0) AS cost,
+        COALESCE(SUM(total_tokens), 0) AS tokens,
+        COUNT(DISTINCT session_id) AS sessionsCount
+      FROM usage_records
+      WHERE ${COUNTED_ROWS} AND timestamp >= ? AND timestamp <= ? ${whereProject}
+      GROUP BY host_id
+    `,
+    )
+    .all(...params) as Array<{ hostId: string; cost: number; tokens: number; sessionsCount: number }>;
+
+  const hostTotals = new Map(hostRows.map((row) => [row.hostId, row]));
+  const hostBreakdown: HostUsageSummary[] = hosts.map((host) => {
+    const row = hostTotals.get(host.hostId);
+    const cost = row?.cost ?? 0;
+    const tokens = row?.tokens ?? 0;
+    return {
+      ...host,
+      cost,
+      tokens,
+      share: totalCost > 0 ? (cost / totalCost) * 100 : totalTokens > 0 ? (tokens / totalTokens) * 100 : 0,
+      sessionsCount: row?.sessionsCount ?? 0,
+    };
+  });
 
   // Scan info
   const totalSyncedRow = db.prepare("SELECT COUNT(*) as c FROM synced_files").get() as { c: number };
   const inWindowSyncedRow = db
     .prepare(
       `
-      SELECT COUNT(DISTINCT file_path) as c
+      SELECT COUNT(*) as c FROM (SELECT DISTINCT host_id, file_path
       FROM usage_records
-      WHERE timestamp >= ? AND timestamp <= ? ${whereProject}
+      WHERE timestamp >= ? AND timestamp <= ? ${whereProject})
     `,
     )
     .get(...params) as { c: number };
@@ -779,6 +893,7 @@ export async function getUsageReportFromDb(
     modelBreakdown,
     dayBreakdown,
     projectBreakdown,
+    hostBreakdown,
     scanInfo: {
       transcriptsScanned,
       transcriptsOutsideWindow,

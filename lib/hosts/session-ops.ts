@@ -1,6 +1,7 @@
 // Session/project operations shared by API routes and the authenticated host daemon.
-// Session reads take IDs, never paths; pooled preparation takes registered paths
-// derived by server admission, never browser-supplied filesystem authority.
+// Session reads take IDs, never paths; usage reads take only paths this host lists itself
+// (`listSessionFiles` plus each session's artifact transcripts); pooled preparation takes
+// registered paths derived by server admission, never browser-supplied filesystem authority.
 // Live-wrapper work (RPC sends, stopping a child) stays in the routes on main.
 // No `next/*` or `@/` imports: the daemon loads this through plain jiti.
 import { randomUUID } from "crypto";
@@ -9,6 +10,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, re
 import * as fsRuntime from "fs";
 import { homedir, tmpdir } from "os";
 import { basename, dirname, isAbsolute, join, resolve } from "path";
+import { setImmediate as nextTurn } from "timers/promises";
 import { promisify } from "util";
 import { comparableProjectPath } from "../comparable-path";
 import { mediaFilePath } from "../media-cache";
@@ -20,6 +22,9 @@ import {
   listSessionIdsForRestore,
   deleteSessionFileWithArtifacts,
   getLeafEntryId,
+  invalidateSessionFileListCache,
+  listSessionArtifactTranscripts,
+  listSessionFiles,
   loadSessionFile,
   MAX_SESSION_LOAD_BYTES,
   parseTitleSlotLine,
@@ -27,6 +32,8 @@ import {
   setSessionTitle,
   writeSessionFileAtomicSync,
 } from "../omp/session-files";
+import { readModelsConfig } from "../omp/models-config";
+import { getSessionsDir } from "../omp/paths";
 import { preparePoolProject, type PreparedPoolProject } from "../pooled-projects";
 import { projectIdentityKey, sessionPathKey } from "../paths";
 import {
@@ -60,6 +67,8 @@ import { extractSubagentHistory, readCompletionArtifact, readSubagentTranscriptP
 import { SUBAGENT_ID_RE } from "../subagent-types";
 import { isRecord } from "../type-guards";
 import type { ArchivedSessionInfo, ManagedProject, ProjectLaunchConfig, SessionContext, SessionInfo, SessionTitleSource } from "../types";
+import { invalidateUsageCache, parseSessionUsage, USAGE_PARSER_VERSION } from "../usage-service";
+import type { UsageReadRequest, UsageRecordsPage, UsageTranscriptIndex, UsageTranscriptRecords, UsageTranscriptStamp } from "../usage-types";
 import { resolveProject } from "../worktree";
 
 export type OpResult<T> = { ok: true; value: T } | { ok: false; status: number; code: string; error: string };
@@ -132,6 +141,10 @@ export interface SessionOps {
   /** Input origin and cloneRoot must come from the server's registered pool project. */
   preparePoolProject(input: Parameters<typeof preparePoolProject>[0]): Promise<OpResult<PreparedPoolProject>>;
   validateCwd(path: string): Promise<OpResult<{ cwd: string; projectRoot: string; projectKey?: string }>>;
+  /** Every transcript usage is counted from (sessions and their artifact transcripts), stamped; `refresh` drops the caches first. */
+  listUsageTranscripts(refresh: boolean): Promise<OpResult<UsageTranscriptIndex>>;
+  /** Usage records of listed transcripts, as much as fits one answer; the rest comes back as `unread`. */
+  readUsageRecords(requests: UsageReadRequest[]): Promise<OpResult<UsageRecordsPage>>;
 }
 
 const execFileAsync = promisify(execFile);
@@ -293,6 +306,23 @@ function normalizeCwd(cwd: string): string {
   if (cwd === "~") return homedir();
   if (cwd.startsWith("~/")) return resolve(homedir(), cwd.slice(2));
   return isAbsolute(cwd) ? cwd : resolve(cwd);
+}
+
+/** One `readUsageRecords` answer stops growing past either limit; bytes are estimated (256 per file, 512 per record). */
+export const USAGE_PAGE_LIMITS = { bytes: 8 * 1024 * 1024, ms: 10_000 };
+
+function usageStamp(path: string): UsageTranscriptStamp | null {
+  try {
+    const stats = statSync(path);
+    return stats.isFile() && stats.size > 0 ? { path, mtimeMs: stats.mtimeMs, size: stats.size } : null;
+  } catch {
+    return null;
+  }
+}
+
+function isUsageReadRequest(value: unknown): value is UsageReadRequest {
+  return isRecord(value) && typeof value.session === "string"
+    && Array.isArray(value.paths) && value.paths.every((path) => typeof path === "string");
 }
 
 /**
@@ -795,5 +825,54 @@ export const sessionOps: SessionOps = {
       return fail(400, "invalid_request", "Invalid pool project preparation input");
     }
     return preparePoolProject(input);
+  },
+
+  async listUsageTranscripts(refresh) {
+    if (typeof refresh !== "boolean") return fail(400, "invalid_request", "refresh must be a boolean");
+    if (refresh) {
+      invalidateUsageCache();
+      invalidateSessionFileListCache();
+    }
+    const sessions: UsageTranscriptIndex["sessions"] = [];
+    for (const [index, session] of (await listSessionFiles(getSessionsDir())).entries()) {
+      if (index > 0 && index % 50 === 0) await nextTurn();
+      const transcripts = [session, ...listSessionArtifactTranscripts(session)]
+        .map(usageStamp)
+        .filter((stamp): stamp is UsageTranscriptStamp => stamp !== null);
+      if (transcripts.length > 0) sessions.push({ session, transcripts });
+    }
+    return ok({ parserVersion: USAGE_PARSER_VERSION, sessions });
+  },
+
+  async readUsageRecords(requests) {
+    if (!Array.isArray(requests) || !requests.every(isUsageReadRequest)) {
+      return fail(400, "invalid_request", "Usage reads must be a list of { session, paths }");
+    }
+    const started = Date.now();
+    const listed = new Set(await listSessionFiles(getSessionsDir()));
+    const modelsConfig = readModelsConfig();
+    const files: UsageTranscriptRecords[] = [];
+    const missing: string[] = [];
+    let bytes = 0;
+    for (const [index, { session, paths }] of requests.entries()) {
+      const readable = listed.has(session) ? new Set([session, ...listSessionArtifactTranscripts(session)]) : null;
+      for (const [at, path] of paths.entries()) {
+        if (files.length > 0 && (bytes > USAGE_PAGE_LIMITS.bytes || Date.now() - started > USAGE_PAGE_LIMITS.ms)) {
+          const unread = [{ session, paths: paths.slice(at) }, ...requests.slice(index + 1)].filter((request) => request.paths.length > 0);
+          return ok({ files, missing, unread });
+        }
+        // Stamped before parsing: a write that lands during the parse changes the stamp and is read again next time.
+        const stamp = readable?.has(path) ? usageStamp(path) : null;
+        if (!stamp) {
+          missing.push(path);
+          continue;
+        }
+        const records = parseSessionUsage(path, modelsConfig, session);
+        files.push({ ...stamp, records });
+        bytes += 256 + 512 * records.length;
+        await nextTurn();
+      }
+    }
+    return ok({ files, missing, unread: [] });
   },
 };

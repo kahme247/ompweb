@@ -1,5 +1,5 @@
 import { apiErrorResponse } from "@/lib/api-utils";
-import { getUsageReport } from "@/lib/usage-service";
+import { getUsageReport } from "@/lib/usage-report";
 import type { UsageGranularity, UsageTimeRange } from "@/lib/usage-types";
 
 export async function GET(req: Request) {

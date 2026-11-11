@@ -12,6 +12,7 @@ import { appendTransportSamples, transportMetricsPath } from "../transport-metri
 import { isRecord } from "../type-guards";
 import type { HostCapacity } from "./capacity";
 import type { ArchivedSessionInfo, SessionInfo } from "../types";
+import type { CostQualityTier } from "../usage-types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
 import {
   CREATION_ID_RE,
@@ -1059,9 +1060,41 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
     // An unknown answer must not read as "fenced and stopped": the route drops its claim on `running: false`.
     case "restoreFence":
       return isRecord(value) && typeof value.instance === "string" && value.instance !== "" && typeof value.running === "boolean";
+    // Usage rows are stored as sent: every field must have its UsageRecord type.
+    case "listUsageTranscripts":
+      return isRecord(value) && Number.isSafeInteger(value.parserVersion) && Array.isArray(value.sessions)
+        && value.sessions.every((entry) => isRecord(entry) && usagePath(entry.session)
+          && Array.isArray(entry.transcripts) && entry.transcripts.every(usageStamp));
+    case "readUsageRecords":
+      return isRecord(value) && Array.isArray(value.files)
+        && value.files.every((file) => usageStamp(file) && Array.isArray(file.records) && file.records.every(usageRecord))
+        && Array.isArray(value.missing) && value.missing.every(usagePath)
+        && Array.isArray(value.unread) && value.unread.every(usageReadRequest);
     default:
       return true;
   }
+}
+
+const usagePath = (value: unknown) => typeof value === "string" && value !== "";
+const finiteNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+const COST_QUALITY_TIERS: readonly unknown[] = ["provider_reported", "model_priced", "unpriced"] satisfies CostQualityTier[];
+
+function usageStamp(value: unknown): boolean {
+  return isRecord(value) && usagePath(value.path) && finiteNumber(value.mtimeMs)
+    && typeof value.size === "number" && Number.isSafeInteger(value.size) && value.size > 0;
+}
+
+function usageReadRequest(value: unknown): boolean {
+  return isRecord(value) && usagePath(value.session) && Array.isArray(value.paths) && value.paths.every(usagePath);
+}
+
+function usageRecord(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const { sessionId, sessionCwd, provider, model, costQuality, entryId, subagentFile } = value;
+  return [sessionId, sessionCwd, provider, model].every((field) => typeof field === "string")
+    && (["timestamp", "input", "output", "reasoning", "cacheRead", "cacheWrite", "totalTokens", "cost", "cacheSavings", "sessionStarted"] as const)
+      .every((field) => finiteNumber(value[field]))
+    && COST_QUALITY_TIERS.includes(costQuality) && optionalString(entryId) && optionalString(subagentFile);
 }
 
 /** Paths belong to the daemon's OS, which need not be the web server's OS. */

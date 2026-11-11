@@ -100,6 +100,8 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   hideProject: ["path"],
   validateCwd: ["path"],
   preparePoolProject: ["input"],
+  listUsageTranscripts: ["refresh"],
+  readUsageRecords: ["requests"],
 };
 
 /** Unknown additions are answered with 501; pool preparation needs a v8 peer. */
