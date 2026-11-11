@@ -419,11 +419,14 @@ export function ExtensionDialog({
                 const selected = selectedOption === option;
                 const checkbox = request.selectionMarker === "checkbox" && index < (request.markableCount ?? request.options.length);
                 const checked = checkbox && (request.checkedIndices?.includes(index) ?? false);
+                // A checkbox toggle goes out at once even when attached: staging it for Next would let the
+                // next row (often "Done selecting") silently replace it, and a stray toggle is undone by one tap.
+                const stage = attached && !checkbox;
                 return (
                   <button
                     key={option}
-                    onClick={() => attached ? setSelectedOption(option) : respond({ value: option })}
-                    aria-pressed={attached ? selected : undefined}
+                    onClick={() => stage ? setSelectedOption(option) : respond({ value: option })}
+                    aria-pressed={stage ? selected : undefined}
                     style={{
                       width: "100%",
                       padding: "7px 10px",

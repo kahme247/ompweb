@@ -97,6 +97,37 @@ test("omp's checkbox select shows which options are already checked", async () =
   }
 });
 
+test("attached checkbox select sends each toggle at once, so Done cannot replace it", async () => {
+  const request = {
+    type: "extension_ui_request",
+    id: "jobs-2",
+    method: "select",
+    title: "Choose enabled jobs",
+    options: ["pytest", "lint", "✓ Done selecting"],
+    selectionMarker: "checkbox",
+    checkedIndices: [],
+    markableCount: 2,
+  };
+  const responses = [];
+  const view = render(React.createElement(ExtensionDialog, {
+    request,
+    onRespond: (current, response) => responses.push({ id: current.id, ...response }),
+    attached: true,
+  }));
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "lint, not checked" }));
+    assert.deepEqual(responses, [{ id: "jobs-2", value: "lint" }]);
+
+    // The action row still waits for Next.
+    fireEvent.click(screen.getByRole("button", { name: "✓ Done selecting" }));
+    assert.equal(responses.length, 1);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    assert.deepEqual(responses[1], { id: "jobs-2", value: "✓ Done selecting" });
+  } finally {
+    view.unmount();
+  }
+});
+
 test("ExtensionDialog masks sensitive input and toggles visibility", async () => {
   const request = {
     type: "extension_ui_request",
