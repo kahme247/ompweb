@@ -126,10 +126,10 @@ app/api/
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
   web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume, agent tools, agent env, browser transport; a transport change is pushed to every open browser)
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers; `GET ?sessionId=&attach=1` reads a running session's live MCP status and never starts one (a cluster session on another member)
-  plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`); without `cwd`, the user level only (omp runs in the agent directory; a project-scope request is 400 `cwd_required`)
+  plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`); without `cwd`, the user level only (omp runs in the agent directory; a `project` scope POST without `cwd` is 400 `cwd_required`)
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
   projects/clone/route.ts         POST clone a git URL into a new workspace (NDJSON progress) | DELETE cancel
-  skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation; GET without `cwd` lists the user level only (`skills/check` and `skills/update` likewise; a project-scope request needs its `cwd`)
+  skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation; GET without `cwd` lists the user level only (`skills/check` and `skills/update` likewise; project scope needs a `cwd`: 400 `cwd_required` from check, `cwd_package_scope_required` from update)
   skills/install/route.ts         POST install skills through npx skills add
   skills/search/route.ts          GET/POST skills.sh search
   stt/route.ts                    POST audio (+scope) → 202 { jobId } | GET ?scope= live jobs (lib/stt-jobs.ts)
@@ -143,6 +143,7 @@ lib/
   dynamic.tsx          `dynamic()` over `React.lazy` + `Suspense`
   navigation.ts        `useRouter`/`useSearchParams` over the History API
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
+    plugins-cli.ts     `runOmpCli`, `listPlugins` (`omp plugin list --json` as `PluginEntry[]`), `parseJsonLoose`, `ANSI_RE`; loaded by the daemon too (relative imports only); used by `app/api/plugins/route.ts`, `cluster-config-server.ts` and `daemon-cluster-config.ts`
   hosts/               hosts and the local daemon (see "Remote hosts"); none of the daemon-loaded files may import `@/` (the daemon runs on Node through `jiti`)
     host.ts            `Host` interface, `HostStatus`, `isLinkUp`
     local-host.ts      `localHost`, the daemon's side: spawn + file checks on the daemon's machine; `resolveSpawnCwdResult`; `SESSION_EDIT_EXTENSION_PATH` (from the module's own location: the daemon runs in HOME). Never imported by main, nor is `daemon.ts` (`no-direct-local.test.mjs`)
@@ -162,6 +163,7 @@ lib/
     cluster-config.ts  pure, daemon-safe: what a cluster member mirrors from the master (`MIRRORED`, `LOCAL_SETTINGS`, `CONFIG_LIMITS`), `buildManifest`, `stripLocalSettings`/`mergeLocalSettings`, `isManagedPath`, `ClusterConfigError`
     cluster-config-server.ts main side: `currentClusterConfig` (the manifest cached per fingerprint, `omp plugin list` cached 30 s), `clusterConfigVersion`, `admitClusterMember`, `configErrorResponse`; used by the two `app/api/hosts/cluster-config/` routes and `hub.ts`
     daemon-cluster-config.ts daemon side: `createClusterConfig` (`ensure`/`apply`/`restore`/`state`/`holds`/`stop`): download, verify, apply whole or not at all, the member's backup (`own-config/`), plugins, leaving; Node only, relative imports
+    host-bearer.ts     `hostFromBearer`: the host an `Authorization: Bearer <host token>` request names, or the 401/503 answer; used by `admitClusterMember`
     update-types.ts    shared per-host software status and operation contract
     updates.ts         daemon-side version checks, compatibility gate and durable update state
     update-worker.ts   host-only install/restart helper; never starts or stops the web-server service
@@ -536,21 +538,22 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `lib/session-resume.ts`), once, after the orphan's exit.
 - **Proxy exclusion.** The `proxy.ts` gate lets exactly `/api/hosts/link` through
   (the `UNGATED` pattern names that path, no subpaths), the prefix
-  `/api/hosts/broker/v1/` (below) and the two cluster configuration paths: the daemon has no
+  `/api/hosts/broker/v1/` (below) and the two exact cluster configuration paths (below): the daemon has no
   session cookie, so it authenticates with its bearer token instead. The hub
   verifies the `Authorization: Bearer <host token>` header before the upgrade
   (401 unknown token, 503 unreadable `hosts.json` or frozen server). Keep
-  `/api/hosts` itself behind the proxy. `/api/hosts/broker/v1/` is the second
-  ungated path (the `UNGATED` pattern names that prefix; anything else under
+  `/api/hosts` itself behind the proxy. `/api/hosts/broker/v1/` is the next ungated
+  path (the `UNGATED` pattern names that prefix; anything else under
   `/api/hosts/broker/` stays gated): the daemon authenticates there with its
   host token too. A reverse proxy must pass it without its own authentication,
   without response buffering (the snapshot stream stays open) and
-  without redirects. The third and fourth are the alternation
+  without redirects. The last ungated paths are the one alternation
   `api\/hosts\/cluster-config\/(?:manifest|file\/[0-9a-f]{64})$` of `UNGATED`: exactly
   `/api/hosts/cluster-config/manifest` and `/api/hosts/cluster-config/file/<64 hex digits>`, nothing
   below or beside them (`/api/hosts/[id]/cluster` and `/api/hosts/[id]/updates` answer to the id
   `cluster-config` and stay gated); each route checks the host token and membership itself
-  (`admitClusterMember`), and a reverse proxy passes them like the broker's, without its own authentication.
+  (`admitClusterMember`), and a reverse proxy passes them without its own authentication and
+  without redirects (exact paths, unlike the broker's prefix).
 - **Shared credentials** (`docs/specs/2026-11-10-shared-credentials-design.md`).
   A linked host's `shareCredentials` (default off; `local` never has it) makes the
   omp processes its daemon spawns use the credentials of the server machine
@@ -1694,7 +1697,7 @@ during the wait.
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives. omp reports it back as `hide` (it reads `hide`/`disableModelInvocation`/`disable-model-invocation`). Frontmatter is omp's only per-skill "hide from model, keep `/skill:`" knob; `disabledExtensions: ["skill:<name>"]` removes the skill entirely.
 - Only user-owned skills are togglable: `getSkillToggleRoots()` (allowed file roots — workspaces the user opened — plus replica scan roots) is the single allowlist for both PATCH and the `togglable` flag GET returns; it is `main`'s pre-CLI allowlist, unchanged. Skills omp lists from anywhere else (the plugin cache, registry installs, custom directories outside a workspace) render a disabled toggle — their files belong to an installer and an update would discard the edit. Never widen PATCH to whatever omp lists.
 - `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
-- `GET /api/plugins`, `POST /api/plugins`, `GET /api/skills`, `POST /api/skills/check` and `POST /api/skills/update` take no `cwd` for the user level (`loadUserSkillsWithInstallInfo`; omp runs in the agent directory, `ensureAgentDir`); project scope without a `cwd` is 400 `cwd_required`. Settings uses this for a cluster session on another member, whose project is not on this machine.
+- `GET /api/plugins`, `POST /api/plugins`, `GET /api/skills`, `POST /api/skills/check` and `POST /api/skills/update` take no `cwd` for the user level (`loadUserSkillsWithInstallInfo`; omp runs in the agent directory, `ensureAgentDir`). The GET routes have no project scope; a project-scope `POST /api/plugins` or `/api/skills/check` without a `cwd` answers 400 `cwd_required`, and `/api/skills/update` answers 400 `cwd_package_scope_required`. Settings uses this for a cluster session on another member, whose project is not on this machine.
 
 ### Updates: web server versus host software
 - **Settings → System** owns the web server's settings and application update. `GET /api/app-update` and its prepare/commit flow remain web-server-only; a compiled web server still links to the release download page.

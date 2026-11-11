@@ -185,7 +185,7 @@ Forward WebSocket upgrades on `/api/events/link` (browsers) and `/api/hosts/link
 
 Hosts that [use the server's provider logins](#use-the-servers-provider-logins-on-a-host) also call `/api/hosts/broker/`, authenticated by their host token. That path must reach ompweb without the proxy's own authentication (a proxy login page or `auth_request` would block the daemon), without response buffering (it carries a long-lived event stream; in nginx, `proxy_buffering off;`) and without redirects.
 
-Cluster members also fetch this machine's omp configuration from `/api/hosts/cluster-config/manifest` and `/api/hosts/cluster-config/file/<hash>` (exactly these paths, like the broker's), authenticated by their host token and answering members only. Like the broker's, they must reach ompweb without the proxy's own authentication and without redirects.
+Cluster members also fetch this machine's omp configuration from `/api/hosts/cluster-config/manifest` and `/api/hosts/cluster-config/file/<hash>` (exactly these two paths, `<hash>` being 64 hexadecimal digits), authenticated by their host token and answering members only. Unlike the broker's prefix, they must be reachable at exactly these paths, without the proxy's own authentication and without redirects.
 
 ### Two services: the web server and the local daemon
 
@@ -246,7 +246,7 @@ daemon needs the same, and the switch asks to restart the host service on this m
   several members is one cluster project, and its sessions are listed together. `git@github.com:a/b.git`
   and `https://github.com/a/b` are the same repository. Projects without a single Git `origin`,
   subfolders and linked worktrees stay on their node; the cluster shows them with the node's
-  name, and a new session there starts on that node. Nothing on the host's disk changes. A
+  name, and a new session there starts on that node. No project files on the host change. A
   cluster project created from a host project keeps the name and alias it showed (the folder
   name when it had no name of its own). A visible checkout that matches a hidden cluster project
   makes that project visible again. This machine joins with the first host added while it is
@@ -284,7 +284,8 @@ machine's provider logins (it can read their access tokens and stored API keys),
 confirmation having been shown. This includes a first pool disabled through the API, and a
 host added to the first pool later through `PUT /api/hosts` or by editing `pools.json`:
 membership, not scheduling, grants the logins. Each linked member needs an updated ompweb host
-daemon (link protocol 9) and omp 15.13.1 or newer; until the daemon is updated, cluster
+daemon (link protocol 9 at that release; cluster members now need link protocol 10, see the next
+note) and omp 15.13.1 or newer; until the daemon is updated, cluster
 placement skips that member, and a start fails when no other member is eligible. Before
 updating, remove a host that should not receive the logins from the first pool using
 `PUT /api/hosts` or editing `~/.omp/agent/omp-web/pools.json`; the old version has no
@@ -293,9 +294,13 @@ membership switch.
 **Upgrade note (configuration).** Joining the cluster, and every cluster session on a member,
 now need an ompweb host daemon at link protocol 10 on that member. Until a member's daemon is
 updated, session starts there are refused ("Update ompweb on the host…"), cluster placement
-skips it, and Settings → Hosts says it needs an update. An updated member receives this
-machine's configuration within about a minute, and its own is replaced until it leaves (see
-below). Update the web server first, then the members.
+skips it, and Settings → Hosts says it needs an update. Once its daemon is updated, every host
+already in the first pool receives this machine's configuration, secrets included (API keys,
+MCP environments and headers, tokens), automatically and without a confirmation having been
+shown, within about a minute, and its own configuration is replaced until it leaves (see
+below). To avoid that for a host, remove it from the first pool before updating its daemon,
+using `PUT /api/hosts` or editing `~/.omp/agent/omp-web/pools.json`. Update the web server
+first, then the members.
 
 Creation retries reuse the same intent and creation identity. Once a real session is known,
 its owner remains authoritative for resume, files, terminal, uploads, artifacts, rename, and
@@ -319,8 +324,9 @@ the cluster keeps its own configuration, managed on that machine.
   `extensions/` and `tools/`. Also `~/.agents/skills/` (where Settings installs skills), the
   agent environment variables of **Settings → System**, and the set of installed plugins with
   whether each is enabled. A mirrored directory becomes equal to this machine's: a file that
-  exists only on the member is removed from it (it stays in the member's backup). `node_modules`
-  and `.git` directories are left out.
+  exists only on the member is removed from it. `node_modules` and `.git` directories are left
+  out. The member's backup holds only what the host had when it joined; a file added or edited
+  on the member afterwards is deleted at the next apply, not backed up.
 - **What is not mirrored:** `lsp.json`, `ssh.json`, themes, key bindings, sessions, history,
   `agent.db`, caches and `secret-placeholder.key`; configuration inside a repository (`.omp/`
   travels with the checkout); named omp profiles (a cluster project that names a profile runs
@@ -331,24 +337,29 @@ the cluster keeps its own configuration, managed on that machine.
   `worktree.base`, `plan.autosaveDir`, `shellMinimizer.settingsPath`, `mnemopi.dbPath`,
   `workspace.additionalDirectories`, `skills.customDirectories`, `extensions`, `images.urls.*`,
   `providers.tinyModelDevice`, `providers.tinyModelDtype`, `tts.*`, `stt.*`, `tui.*`,
-  `terminal.*`, `lsp.*` and `auth.broker.*`. A member keeps its own value for each of them,
-  or none.
+  `terminal.*`, `lsp.*` and `auth.broker.*`. A member keeps its own value for each of them as
+  it was when the host joined, or none; a change made on the member afterwards is reset at the
+  next apply.
 - **Limits:** a file over 5 MiB, or a configuration over 50 MiB in all, is not mirrored at all:
-  this machine serves no configuration, and **Settings → Hosts** names the file that is over.
-  A `config.yml` that is not a YAML map or a file that cannot be read does the same. Each
-  download a member makes (the list of files, and each file) must finish within 30 s, body
-  included; a 5 MiB file needs roughly 1.4 Mbit/s, and a member on a slower link does not
-  update.
+  this machine serves no configuration, a cluster session start on a member is refused (409
+  `cluster_config_invalid`), placement skips every member, and **Settings → Hosts** names the
+  file that is over. A `config.yml` that is not a YAML map or a file that cannot be read does
+  the same. Each download a member makes (the list of files, and each file) must finish within
+  30 s, body included; a 5 MiB file needs roughly 1.4 Mbit/s, and a member on a slower link
+  does not update.
 - **When a member applies it:** after joining; when it is behind this machine's version
   (checked every 30 s); and before every session start on the member, which waits for it. The
-  files are written whole or not at all: a failure leaves the previous version in place. A
-  cluster session is never started with the member's own configuration: a start that must run
-  on that member (a resumed session, a project pinned to its node) is refused with the reason
-  when the files cannot be applied, and new cluster sessions are placed only on members that
-  have this machine's current configuration and plugins. Sessions already running are not
-  restarted. The applied files are readable by the daemon's user only.
-- **Plugins:** after the files, the member runs `omp plugin` itself to install what it lacks,
-  uninstall what this machine does not have, and match each plugin's enabled state. npm plugins
+  files are written whole or not at all: a failure leaves the previous version in place. Every
+  cluster session start carries this machine's version, and a start that must run on that
+  member (a resumed session, a project pinned to its node) is refused with the reason when the
+  files cannot be applied; new cluster sessions are placed only on members that have this
+  machine's current configuration and plugins. A session recovered after a daemon restart, or
+  started by another ompweb server, runs on whatever is on the member's disk at that moment.
+  Sessions already running are not restarted. The applied files are readable by the daemon's
+  user only.
+- **Plugins:** after the files, the member runs `omp plugin` itself to install what it lacks
+  (this needs `bun` and network access on the member), uninstall what this machine does not
+  have, and match each plugin's enabled state. npm plugins
   are pinned to this machine's version; a marketplace plugin has no version pin in omp, so one
   already installed counts as matching. This does not delay a session start. A failed install
   leaves the member not current, so placement skips it; it is retried about every 30 s and
@@ -362,8 +373,8 @@ the cluster keeps its own configuration, managed on that machine.
   (as a standalone host there), they run on this server's configuration for as long as the host
   is a member here.
 - **Changes made on a member** to a mirrored file are overwritten at the next apply; change the
-  configuration here. An apply is refused when `~/.agents`, or any other directory above a
-  mirrored entry, is a symbolic link on the member: replace it with a real directory. The
+  configuration here. An apply is refused when `~/.agents` is a symbolic link on the member:
+  replace it with a real directory. The
   mirrored directories, the staging area and the backup must be on one filesystem.
 - **Leaving:** the daemon removes the mirrored files, moves its backup into place, puts back
   its agent environment variables, and reinstalls its own plugins as far as omp allows. Its own
@@ -389,7 +400,8 @@ the cluster keeps its own configuration, managed on that machine.
   server environments and headers, tokens in `config.yml` and the values in `secrets.yml`. They
   are written to every member's disk, readable by the daemon's user only; a member can already
   read this machine's provider logins, and this adds the rest. Hooks, extensions, custom tools
-  and plugins are code: this machine's code runs on every member. Nothing flows the other way:
+  and plugins are code: this machine's code runs on every member; this machine can already
+  start omp with full tool access there. Nothing flows the other way:
   a member cannot change this machine's configuration, and the routes only serve members,
   checked on every request, and stop answering a host the moment it leaves or is revoked.
 - **Differences that remain:** a provider in `models.yml` that points at this machine's own
@@ -755,7 +767,7 @@ Notes:
   If the destination changes during cleanup, captured data is preserved in a
   private quarantine and the error gives its location; inspect it before removing
   or restoring anything.
-- **Not available on remote hosts yet:** session archiving and the Skills,
+- **Not available on remote hosts yet:** the Skills,
   Plugins, Agents and MCP settings, for a host outside the cluster (a cluster member uses
   this machine's: see [above](#cluster-members-use-this-machines-omp-configuration)).
   Transcript search still scans this machine.
