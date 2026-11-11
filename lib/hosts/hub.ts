@@ -44,7 +44,7 @@ import {
   type UpMessage,
   withSeq,
 } from "./link-protocol";
-import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
+import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, readHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
 import { confirmPooledChild, pooledStartForChild } from "./pool-starts";
 import { validateHostTools } from "./shared-requests";
@@ -1489,10 +1489,18 @@ export class RemoteHost implements Host {
         throw new HostOpError(426, "host_upgrade_required", `${this.label} needs a newer ompweb to use creation identity`);
       }
     }
-    // A pure join (expectedChannel) starts nothing, so it is neither refused nor flagged.
-    const sharing = options?.expectedChannel === undefined && this.id !== LOCAL_HOST_ID
-      && loadHosts().some((host) => host.id === this.id && host.shareCredentials);
-    if (sharing && (link.hostVersion ?? 0) < SHARED_CREDENTIALS_SINCE_VERSION) {
+    // A pure join (expectedChannel) starts nothing, so it is neither refused nor flagged. An unreadable registry
+    // refuses the start: a host that may be sharing must never run a session with its own stored logins.
+    let sharing = false;
+    if (options?.expectedChannel === undefined && this.id !== LOCAL_HOST_ID) {
+      try {
+        sharing = readHosts().some((host) => host.id === this.id && host.shareCredentials);
+      } catch (error) {
+        if (!(error instanceof HostRegistryUnreadableError)) throw error;
+        throw new HostOpError(503, "host_registry_unreadable", "The linked-hosts registry cannot be read; no session was started");
+      }
+    }
+    if (sharing && (!link.shared || (link.hostVersion ?? 0) < SHARED_CREDENTIALS_SINCE_VERSION)) {
       throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to share credentials with it`);
     }
     if (link.shared) {
