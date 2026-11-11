@@ -5,7 +5,7 @@ import React from "react";
 const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react/pure.js");
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { HeldMessageView, MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await import("./MessageView.tsx");
+const { HeldMessageView, MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage, areMessageViewPropsEqual, haveSameRelevantToolResults } = await import("./MessageView.tsx");
 const { CodeBlock } = await import("./MermaidBlock.tsx");
 const { buildSessionContext } = await import("../lib/session-reader.ts");
 const { collectToolResults, planTranscriptRows } = await import("../lib/chat-transcript-plan.ts");
@@ -1029,6 +1029,101 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
   assert.deepEqual(forked, [["user-7", true]]);
   view.unmount();
 });
+
+test("SafeMarkdownBody is wrapped in React.memo", () => {
+  assert.equal(SafeMarkdownBody.$$typeof, React.memo(() => null).$$typeof);
+});
+
+test("areMessageViewPropsEqual skips re-render when unrelated toolResults change", () => {
+  const msg1 = {
+    role: "assistant",
+    content: [
+      { type: "text", text: "Running tool..." },
+      { type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path: "a.ts" } },
+    ],
+  };
+  const res1 = { role: "toolResult", toolCallId: "call-1", content: "file content" };
+  const res2 = { role: "toolResult", toolCallId: "call-2", content: "another content" };
+
+  const mapA = new Map([["call-1", res1]]);
+  const mapB = new Map([["call-1", res1], ["call-2", res2]]);
+  const mapC = new Map([["call-1", { ...res1, content: "modified" }]]);
+
+  const baseProps = { message: msg1, toolResults: mapA };
+  // New tool in mapB is unrelated to msg1: props should be considered equal
+  assert.equal(areMessageViewPropsEqual(baseProps, { ...baseProps, toolResults: mapB }), true);
+  // Change in msg1's own tool: props should NOT be equal
+  assert.equal(areMessageViewPropsEqual(baseProps, { ...baseProps, toolResults: mapC }), false);
+});
+
+test("haveSameRelevantToolResults and MessageView re-render look up hybrid toolCall blocks by toolCallId over id", () => {
+  const hybridMsg = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "fc_item_1", toolCallId: "call_A", toolName: "bash", input: {} },
+    ],
+  };
+  const resA1 = { role: "toolResult", toolCallId: "call_A", content: [{ type: "text", text: "initial output" }] };
+  const resA2 = { role: "toolResult", toolCallId: "call_A", content: [{ type: "text", text: "updated output" }] };
+  const resLegacyId = { role: "toolResult", toolCallId: "fc_item_1", content: [{ type: "text", text: "wrong lookup" }] };
+
+  const mapA1 = new Map([["call_A", resA1], ["fc_item_1", resLegacyId]]);
+  const mapA1Same = new Map([["call_A", resA1], ["fc_item_1", { ...resLegacyId, content: [{ type: "text", text: "changed legacy" }] }]]);
+  const mapA2 = new Map([["call_A", resA2], ["fc_item_1", resLegacyId]]);
+
+  // Looking up by toolCallId ("call_A") means changing legacy "fc_item_1" does NOT trigger difference
+  assert.equal(haveSameRelevantToolResults(hybridMsg, mapA1, mapA1Same), true);
+  // Changing "call_A" returns false
+  assert.equal(haveSameRelevantToolResults(hybridMsg, mapA1, mapA2), false);
+
+  // Verify MessageView re-renders with updated tool result when toolResults changes for "call_A"
+  const initialProps = {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: false,
+    message: hybridMsg,
+    toolResults: mapA1,
+  };
+  const { container, rerender } = render(React.createElement(MessageView, initialProps));
+  assert.match(container.textContent, /initial output/);
+  assert.doesNotMatch(container.textContent, /wrong lookup/);
+
+  rerender(React.createElement(MessageView, { ...initialProps, toolResults: mapA2 }));
+  assert.match(container.textContent, /updated output/);
+  assert.doesNotMatch(container.textContent, /initial output/);
+});
+
+test("haveSameRelevantToolResults and areMessageViewPropsEqual handle toolCall with empty string toolCallId", () => {
+  const emptyIdMsg = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", toolCallId: "", toolName: "bash", input: {} },
+    ],
+  };
+  const resEmpty1 = { role: "toolResult", toolCallId: "", content: [{ type: "text", text: "empty id output 1" }] };
+  const resEmpty2 = { role: "toolResult", toolCallId: "", content: [{ type: "text", text: "empty id output 2" }] };
+  const resUnrelated = { role: "toolResult", toolCallId: "other", content: [{ type: "text", text: "other" }] };
+
+  const mapEmpty1 = new Map([["", resEmpty1]]);
+  const mapEmpty2 = new Map([["", resEmpty2]]);
+  const mapEmpty1WithUnrelated = new Map([["", resEmpty1], ["other", resUnrelated]]);
+  const mapEmptyWithoutResult = new Map();
+
+  // Adding a result under "" causes unequal comparison
+  assert.equal(haveSameRelevantToolResults(emptyIdMsg, mapEmptyWithoutResult, mapEmpty1), false);
+  // Updating result under "" causes unequal comparison
+  assert.equal(haveSameRelevantToolResults(emptyIdMsg, mapEmpty1, mapEmpty2), false);
+  // Unrelated key changing while "" is unchanged causes equal comparison
+  assert.equal(haveSameRelevantToolResults(emptyIdMsg, mapEmpty1, mapEmpty1WithUnrelated), true);
+
+  const baseProps = {
+    isStreaming: false,
+    message: emptyIdMsg,
+    toolResults: mapEmpty1,
+  };
+  assert.equal(areMessageViewPropsEqual(baseProps, { ...baseProps, toolResults: mapEmpty2 }), false);
+  assert.equal(areMessageViewPropsEqual(baseProps, { ...baseProps, toolResults: mapEmpty1WithUnrelated }), true);
+});
+
 
 test("user-message Edit only runs after confirmation, and not once blocked", async (t) => {
   const originalMatchMedia = window.matchMedia;
