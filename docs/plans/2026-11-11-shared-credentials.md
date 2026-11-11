@@ -126,7 +126,7 @@ The allow-list, exact:
 const ALLOWED: readonly (readonly [method: string, path: RegExp])[] = [
   ["GET", /^\/v1\/(?:healthz|snapshot|snapshot\/stream|credentials\/disabled|usage|usage\/history|usage\/clients)$/],
   ["POST", /^\/v1\/credential\/\d+\/(?:refresh|disable|block)$/],
-  ["DELETE", /^\/v1\/credential\/\d+\/blocks$/],
+  ["DELETE", /^\/v1\/credential\/\d+\/blocks?$/],
   ["POST", /^\/v1\/usage\/(?:observed|stale)$/],
 ];
 ```
@@ -136,7 +136,7 @@ Order of checks, each answering JSON `{ error }` with `cache-control: no-store`:
 2. Host is `local` or has `shareCredentials` false → 403 `Credential sharing is off for this host`.
 3. `"/" + params.path.join("/")` with the request method not in `ALLOWED` → 404.
 4. `disableIdleTimeout()`.
-5. Body over 1 MiB → 413 (read it only for `POST`).
+5. Body over 1 MiB → 413 (read it for `POST` and `DELETE`: omp's single-block delete carries a JSON body).
 6. `brokerFetch(host.id, path + url.search, …)` with `signal: request.signal`; `AuthBrokerUnavailableError` → 503; any other failure → 502.
 7. Log `[omp-web] broker <host id> <method> <path> <status>` (no query).
 
@@ -223,7 +223,7 @@ export function credentialsEnv(launch: SpawnRequest, deps: { forwarder: BrokerFo
 Behaviour the signatures do not fix:
 - Nothing listens until the first `env()` call; then `127.0.0.1:0`, once, with one secret of 32 random bytes (base64url) for the daemon's lifetime.
 - `env(serverUrl)` returns `{ OMP_AUTH_BROKER_URL: "http://127.0.0.1:<port>/<base64url(serverUrl)>", OMP_AUTH_BROKER_TOKEN: <secret> }`.
-- A request is `/<key>/<rest>`. A bearer that is not the secret (constant-time comparison) → 401. `deps.login(decoded key)` null → 503. Otherwise fetch `<login.url without trailing slashes>/api/hosts/broker/<rest>` (query kept) with `authorization: Bearer <login.token>`, read on every request, and stream the answer back. Upstream unreachable → 502. A client that disconnects aborts the upstream fetch.
+- A request is `/<key>/<rest>`. A bearer that is not the secret (constant-time comparison) → 401. `deps.login(decoded key)` null → 403 (not 5xx: omp treats 5xx as transient and may start from its snapshot cache). Otherwise fetch `<login.url without trailing slashes>/api/hosts/broker/<rest>` (query kept) with `authorization: Bearer <login.token>`, read on every request, and stream the answer back. Upstream unreachable → 502. A client that disconnects aborts the upstream fetch.
 - `credentialsEnv`: no `credentialsServer` → `undefined`, and nothing else runs. Otherwise it reads `deps.ompVersion()` first: `null` or older than `MIN_SHARED_CREDENTIALS_OMP` → `new HostOpError(409, "host_omp_too_old", "Shared credentials need omp 15.13.1 or newer on this host (found <version or \"unknown\">)")`. Only then it returns `deps.forwarder.env(launch.credentialsServer)`. Whether the link still exists is Task 6's check, not this function's.
 
 - [ ] **Step 1: Write the failing tests** against a real loopback upstream (`http.createServer`) that records each request:
@@ -232,7 +232,7 @@ Behaviour the signatures do not fix:
   - right bearer, `GET /<key>/v1/snapshot?wait=5` → upstream sees `/api/hosts/broker/v1/snapshot?wait=5` with `authorization: Bearer <login token>`; the secret appears in no upstream header; `cookie` and `x-extra` are not forwarded;
   - `login` returns a new token on the second request → the second upstream request carries it;
   - server URL `http://127.0.0.1:<p>/ompweb/` → upstream path `/ompweb/api/hosts/broker/v1/healthz`;
-  - `login` returns null → 503; upstream closed → 502; a body of 1 MiB + 1 byte → 413;
+  - `login` returns null → 403; upstream closed → 502; a body of 1 MiB + 1 byte → 413;
   - streaming: the upstream writes one chunk and holds the response; the client reads that chunk before the upstream writes the second; when the client aborts, the upstream sees `close`;
   - `stop()` ends an open stream and frees the port;
   - `credentialsEnv`: launch without `credentialsServer` → `undefined` and the forwarder is not started; version `"15.13.0"` and `null` → rejects with `code === "host_omp_too_old"` and the forwarder is not started; `"15.13.1"` and `"18.18.6"` → the `env` result.
@@ -322,7 +322,7 @@ Uses the installed `omp` (18.18.6 here), two temporary home directories and a fr
 - [ ] **Step 2:** Start the server as `scripts/smoke.ts` does (`bin/omp-web.js -p <free port> -H 127.0.0.1 --no-open`, `HOME=A`). `POST /api/hosts {label:"b"}`, save the token with `ompweb host login --url http://127.0.0.1:<port>` under `HOME=B`, start `ompweb host` under `HOME=B`, wait for the host to be `online`.
 - [ ] **Step 3:** With sharing off, start a session on host `b` (an omp process spawned there is enough; no prompt has to succeed). Expected: no `broker` line in the server log; `B/.omp/cache/auth-broker-snapshot.enc` does not exist.
 - [ ] **Step 4:** `PATCH /api/hosts {id, shareCredentials:true}`; start a second session on `b`. Expected: the server log has `[omp-web] broker <id> GET /v1/snapshot 200` and a `/v1/snapshot/stream` request; `B/.omp/cache/auth-broker-snapshot.enc` exists; `sk-probe-FAKE-0001` and the host token appear in no file under `B` except `B/.omp/agent/omp-web/host.json` (token only) — check with a recursive search; the omp child's environment (`ps eww <pid>` on macOS) has a loopback `OMP_AUTH_BROKER_URL` and no host token.
-- [ ] **Step 5:** Wait 20 s. Expected: the snapshot stream is still open (no new `snapshot/stream` request line), which proves the 10 s idle timeout is off for it.
+- [ ] **Step 5:** Leave the session idle. About 15 s after the `/v1/snapshot/stream` line (past the 10 s idle timeout, before omp parks an idle stream at about 20 s), check the connection itself: `lsof -nP -a -p <omp child pid> -iTCP -sTCP:ESTABLISHED` still lists the child's connection to the port in `OMP_AUTH_BROKER_URL`, and `lsof -nP -a -p <ompweb host pid> -iTCP:<server port> -sTCP:ESTABLISHED` still lists the forwarder's connection beside the link's. Expected: both are open, which proves the 10 s idle timeout is off for the stream. The absence of a new `snapshot/stream` line proves nothing: a stream closed at 10 s need not reopen at once.
 - [ ] **Step 6:** `PATCH {id, shareCredentials:false}`. Expected: the stream closes at once and the client's retry logs `403`.
 - [ ] **Step 7:** Stop both processes, delete both homes. Report each expectation as met or not, with the log lines.
 
