@@ -248,9 +248,10 @@ export function ExtensionDialog({
   // `pointerType` of the latest press: the pointer media query only describes
   // the primary pointer, not the one pressing now.
   const pressPointerRef = useRef<string | null>(null);
-  // omp takes one answer per request id and the panel stays up until the next request arrives, so a
-  // second select tap in that window (another checkbox toggle, Done) would be silently dropped.
-  const answeredIdRef = useRef<string | null>(null);
+  // omp takes one answer per request id and the panel stays up until the next request arrives, so the
+  // select controls are disabled in that window instead of sending a tap omp would silently drop.
+  const [answeredId, setAnsweredId] = useState<string | null>(null);
+  const awaitingNext = request.method === "select" && answeredId === request.id;
   const [askDrafts, setAskDrafts] = useState(() => initialAskDrafts(request));
   const viewportMaxHeight = useViewportMaxHeight();
   const { touchTargets } = useTouchTargets();
@@ -283,14 +284,14 @@ export function ExtensionDialog({
   // focused field disappears from under it.
   const respond = (response: ExtensionDialogResponse) => {
     if (request.method === "select") {
-      if (answeredIdRef.current === request.id) return;
-      answeredIdRef.current = request.id;
+      if (awaitingNext) return;
+      setAnsweredId(request.id);
     }
     const active = document.activeElement;
     if (active instanceof HTMLElement && panelRef.current?.contains(active)) active.blur();
     const id = request.id;
     void Promise.resolve(onRespond(request, response)).then((sent) => {
-      if (sent === false && answeredIdRef.current === id) answeredIdRef.current = null;
+      if (sent === false) setAnsweredId((current) => current === id ? null : current);
     });
   };
   const cancel = () => respond({ cancelled: true });
@@ -437,6 +438,7 @@ export function ExtensionDialog({
                   <button
                     key={option}
                     onClick={() => stage ? setSelectedOption(option) : respond({ value: option })}
+                    disabled={awaitingNext}
                     aria-pressed={stage ? selected : undefined}
                     style={{
                       width: "100%",
@@ -730,7 +732,7 @@ export function ExtensionDialog({
           ) : (request.method === "select" && attached) || request.method === "ask" ? (
             <button
               onClick={submitValue}
-              disabled={!canSubmit}
+              disabled={!canSubmit || awaitingNext}
               style={{
                 padding: "6px 10px",
                 minHeight: touchTargets === "accessible" ? 44 : undefined,
