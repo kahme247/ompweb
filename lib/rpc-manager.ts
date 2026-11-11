@@ -6,6 +6,7 @@ import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import type { RpcTransport } from "./omp/rpc-transport";
 import { editSessionHistory, isSessionEditReply, SESSION_EDIT_COMMAND, SessionEditAgentInvocationError, type SessionEditResult } from "./omp/session-edit";
+import { SubagentStreamLimiter } from "./subagent-stream";
 import { cacheSessionPath } from "./session-reader";
 import { allowFileRoot } from "./file-access";
 import { loadWebServerSettings } from "./web-settings";
@@ -472,6 +473,10 @@ export class AgentSessionWrapper {
    * the same conversation moving to a sibling file, not a session switch. */
   private sessionMovePending = false;
   private unsubscribeFrames: (() => void) | null = null;
+  /** Slims and rate-limits subagent frames before they reach any tab (lib/subagent-stream.ts). */
+  private readonly subagentStream = new SubagentStreamLimiter((frame) => {
+    if (this._alive) this.emit(frame);
+  });
   private readonly detectNotification = createNotificationDetector();
   /** Agent activity since the last `session_settled`: background work may still run after the turn ended. */
   private unsettled = false;
@@ -1245,6 +1250,8 @@ export class AgentSessionWrapper {
         if (event.isTerminal !== false) {
           // A server dialog belongs to a tool call of this run; nobody can answer it after the run.
           this.dropServerUiRequests();
+          // Held-back progress must land before the run's end, never after it.
+          this.subagentStream.flushAll();
           this.streaming = false;
           this.promptRunning = false;
           this.awaitingAgentStart = false;
@@ -1450,7 +1457,8 @@ export class AgentSessionWrapper {
     }
 
     this.publishNotifications(event);
-    this.emit(event);
+    // Subagent frames are slimmed or held back (newest progress per child per second) before any tab sees them.
+    if (!this.subagentStream.push(event)) this.emit(event);
     notifyRunningChange({ refreshSessionList });
   }
 
@@ -3037,6 +3045,7 @@ export class AgentSessionWrapper {
       this.sessionFileSignalTimer = null;
     }
     this.unsubscribeFrames?.();
+    this.subagentStream.dispose();
     this.unsubscribeHostStatus?.();
     this.unsubscribeHostStatus = null;
     this.clearPendingUiRequests();
