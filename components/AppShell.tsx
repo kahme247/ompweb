@@ -39,7 +39,7 @@ import type { WorkspaceFileSource } from "@/lib/workspace-types";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { hostProjectKey, LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
+import { foldedHostProjectKey, hostProjectKey, LOCAL_HOST_ID, remoteHostId, projectIdentity, projectTargetId } from "@/lib/project-ordering";
 import { useHostRows } from "@/hooks/useHostRows";
 import { LocalDaemonBanner } from "./LocalDaemonBanner";
 import { hostName } from "./host-status";
@@ -1775,7 +1775,11 @@ export function AppShell({ appName }: { appName: string }) {
   const newSessionHost = effectivePoolProject ? undefined : newSessionCwd !== null ? newSessionHostId : activeHostId;
   const newSessionHostKey = effectivePoolProject ? projectTargetId(effectivePoolProject) : newSessionHost ?? LOCAL_HOST_ID;
   const newSessionProject = effectivePoolProject ? projectIdentity(effectivePoolProject) : (workspaceOptions.cwd === effectiveNewSessionCwd && workspaceOptions.hostId === newSessionHostKey ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
-  const hostProjects = workspaceOptions.projects.filter((project) => projectTargetId(project) === newSessionHostKey);
+  // The panel's target is the group the sidebar lists the project under: the cluster for a member's pinned project. The real host (above) is where the session runs.
+  const newSessionGroupKey = projectTargetId(effectivePoolProject ?? { hostId: newSessionHostKey }, pools);
+  const hostProjects = workspaceOptions.projects.filter((project) => projectTargetId(project, pools) === newSessionGroupKey);
+  // Two members' projects can share a path, so a non-pool option's value carries its host.
+  const newSessionWorkspaceValue = effectivePoolProject ? projectIdentity(effectivePoolProject) : effectiveNewSessionCwd ? hostProjectKey(newSessionHost, effectiveNewSessionCwd) : "";
   const memberIds = new Set(pools.flatMap((pool) => pool.members.map((member) => member.hostId)));
   const creationTargets = [...(hosts ?? []).filter((host) => !memberIds.has(host.id) && (poolsLoaded || host.id === LOCAL_HOST_ID)).map((host) => ({ id: host.id, label: hostName(t, host) })), ...pools.map((pool) => ({ id: `pool:${pool.id}`, label: pool.label }))];
   const chatHost = remoteHost ? hosts?.find((host) => host.id === currentHostId) : undefined;
@@ -2545,10 +2549,10 @@ export function AppShell({ appName }: { appName: string }) {
                         </span>
                         <select
                           id="new-session-host"
-                          value={newSessionHostKey}
+                          value={newSessionGroupKey}
                           onChange={(event) => {
-                            const first = workspaceOptions.projects.find((project) => projectTargetId(project) === event.target.value);
-                            if (!first || event.target.value === newSessionHostKey) return;
+                            const first = workspaceOptions.projects.find((project) => projectTargetId(project, pools) === event.target.value);
+                            if (!first || event.target.value === newSessionGroupKey) return;
                             suppressCwdRef.current = first.path;
                             setActivePoolProject(first.poolId ? first : null);
                             setActiveCwd(first.poolId ? null : first.path);
@@ -2557,7 +2561,7 @@ export function AppShell({ appName }: { appName: string }) {
                           }}
                         >
                           {creationTargets.map((target) => (
-                            <option key={target.id} value={target.id} disabled={!workspaceOptions.projects.some((project) => projectTargetId(project) === target.id)}>
+                            <option key={target.id} value={target.id} disabled={!workspaceOptions.projects.some((project) => projectTargetId(project, pools) === target.id)}>
                               {target.label}
                             </option>
                           ))}
@@ -2576,26 +2580,32 @@ export function AppShell({ appName }: { appName: string }) {
                     <select
                       id="new-session-workspace"
                       aria-describedby="new-session-workspace-path"
-                      value={effectivePoolProject ? projectIdentity(effectivePoolProject) : effectiveNewSessionCwd ?? ""}
+                      value={newSessionWorkspaceValue}
                       onChange={(event) => {
                         const key = event.target.value;
-                        if (!key) { openAddProject(true, newSessionHostKey); return; }
-                        const project = hostProjects.find((candidate) => projectIdentity(candidate) === key || (!candidate.poolId && candidate.path === key));
+                        if (!key) { openAddProject(true, newSessionGroupKey); return; }
+                        const project = hostProjects.find((candidate) => projectIdentity(candidate) === key || (!candidate.poolId && hostProjectKey(candidate.hostId, candidate.path) === key));
                         if (!project) return;
                         suppressCwdRef.current = project.path;
                         setActivePoolProject(project.poolId ? project : null);
                         setActiveCwd(project.poolId ? null : project.path);
+                        setActiveHostId(project.poolId ? undefined : remoteHostId(project.hostId));
                         handleNewSession(crypto.randomUUID(), project.poolId ? null : project.path, project.hostId, project);
                       }}
                     >
-                      {!effectivePoolProject && effectiveNewSessionCwd && !hostProjects.some((project) => comparableProjectPath(project.path) === comparableProjectPath(newSessionProject)) && (
-                        <option value={effectiveNewSessionCwd}>{projectLabel(effectiveNewSessionCwd)}</option>
+                      {!effectivePoolProject && effectiveNewSessionCwd && !hostProjects.some((project) => foldedHostProjectKey(project.hostId, project.path) === foldedHostProjectKey(newSessionHost, newSessionProject)) && (
+                        <option value={newSessionWorkspaceValue}>{projectLabel(effectiveNewSessionCwd)}</option>
                       )}
-                      {hostProjects.map((project) => (
-                        <option key={projectIdentity(project)} value={project.poolId ? projectIdentity(project) : comparableProjectPath(project.path) === comparableProjectPath(newSessionProject) ? effectiveNewSessionCwd ?? project.path : project.path}>
-                          {project.alias ?? project.name ?? projectLabel(project.path)}
-                        </option>
-                      ))}
+                      {hostProjects.map((project) => {
+                        const name = project.alias ?? project.name ?? projectLabel(project.path);
+                        // A member's pinned project: its option names the node.
+                        const node = !project.poolId && projectTargetId(project, pools) !== (project.hostId ?? LOCAL_HOST_ID) ? hosts?.find((host) => host.id === (project.hostId ?? LOCAL_HOST_ID)) : undefined;
+                        return (
+                          <option key={projectIdentity(project)} value={project.poolId ? projectIdentity(project) : hostProjectKey(project.hostId, foldedHostProjectKey(project.hostId, project.path) === foldedHostProjectKey(newSessionHost, newSessionProject) ? effectiveNewSessionCwd ?? project.path : project.path)}>
+                            {node ? `${name} (${hostName(t, node)})` : name}
+                          </option>
+                        );
+                      })}
                       <option value="">+ {t("projects.add")}</option>
                     </select>
                     <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />

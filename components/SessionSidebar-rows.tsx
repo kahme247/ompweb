@@ -124,6 +124,8 @@ interface ProjectRowProps {
   /** The active search query; each session row can then list its hits. */
   searchQuery?: string;
   onOpenSearchMatch?: (session: SessionInfo, target: SearchMatchTarget) => void;
+  /** The node a pinned project of a cluster member runs on, shown beside its name. */
+  nodeLabel?: string;
 }
 
 /** One project in the sidebar: a card row matching the session items' visual
@@ -159,6 +161,7 @@ function ProjectRow({
   onSessionDeleted,
   searchQuery,
   onOpenSearchMatch,
+  nodeLabel,
 }: ProjectRowProps) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -339,6 +342,15 @@ function ProjectRow({
               >
                 {label}
               </span>
+              {nodeLabel && (
+                <span
+                  title={t("hosts.onNode", { node: nodeLabel })}
+                  aria-label={t("hosts.onNode", { node: nodeLabel })}
+                  style={{ flexShrink: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10.5, color: "var(--text-dim)" }}
+                >
+                  {nodeLabel}
+                </span>
+              )}
             </button>
             </Tooltip>
           )}

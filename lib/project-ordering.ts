@@ -46,24 +46,35 @@ export function projectIdentity(project: ManagedProject): string {
   return hostProjectKey(project.hostId, workspaceKeyOf(project));
 }
 
-export function projectTargetId(project: { poolId?: string; hostId?: string }): string {
-  return project.poolId ? `pool:${project.poolId}` : project.hostId ?? LOCAL_HOST_ID;
+export type PoolMembers = readonly { id: string; members: readonly { hostId: string }[] }[];
+
+/** `pool:<id>` for a pool project and, given `pools`, for a project of a member of the first pool (the cluster); else the host id. */
+export function projectTargetId(project: { poolId?: string; hostId?: string }, pools?: PoolMembers): string {
+  if (project.poolId) return `pool:${project.poolId}`;
+  const hostId = project.hostId ?? LOCAL_HOST_ID;
+  const cluster = pools?.[0];
+  return cluster?.members.some((member) => member.hostId === hostId) ? `pool:${cluster.id}` : hostId;
 }
 
 /** Projects per host for the sidebar: this machine first, then the other
  *  hosts by label. Every known host gets a group, empty or not, so it can
- *  still be added to; projects of a host that is not listed are dropped. */
+ *  still be added to; projects of a host that is not listed are dropped.
+ *  With `pools`, the first pool's members have no group: their own projects
+ *  follow the pool's projects in the pool's group. */
 export function groupProjectsByHost<T extends { hostId?: string; poolId?: string }>(
   projects: T[],
   hosts: { id: string; label: string }[],
+  pools?: PoolMembers,
 ): { host: { id: string; label: string }; projects: T[] }[] {
-  const ordered = [...hosts].sort((a, b) => {
+  const cluster = pools?.[0];
+  const ordered = hosts.filter((host) => !cluster?.members.some((member) => member.hostId === host.id)).sort((a, b) => {
     if ((a.id === LOCAL_HOST_ID) !== (b.id === LOCAL_HOST_ID)) return a.id === LOCAL_HOST_ID ? -1 : 1;
     return a.label.localeCompare(b.label, undefined, { sensitivity: "base", numeric: true });
   });
   return ordered.map((host) => ({
     host,
-    projects: projects.filter((project) => projectTargetId(project) === host.id),
+    // The sort is stable: pool projects first, each kind in the given order.
+    projects: projects.filter((project) => projectTargetId(project, pools) === host.id).sort((a, b) => Number(Boolean(b.poolId)) - Number(Boolean(a.poolId))),
   }));
 }
 

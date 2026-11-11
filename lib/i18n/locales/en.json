@@ -1441,6 +1441,7 @@
   "hosts.collapseGroup": "Collapse {host}",
   "hosts.addWorkspaceOn": "Add a workspace on {host}",
   "hosts.pickerLabel": "Host",
+  "hosts.onNode": "On {node}",
   "agentSession.hostOfflineSend": "{detail} (Not sent: your message is still in the composer.)",
   "agentSession.hostOfflineMaybeSent": "{detail} (Your message may have reached it before the link dropped; if so, it runs when the host reconnects.)",
   "agentSession.transportLostMaybeSent": "Connection lost while sending; the message may have been delivered. Check the conversation before sending it again.",
