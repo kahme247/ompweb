@@ -28,24 +28,27 @@ function only(source: Headers, names: readonly string[]): Headers {
   return picked;
 }
 
-/** The host the bearer token names, or the refusal to answer with. */
-function authenticate(request: Request): HostRecord | Response {
+/** The sharing host the bearer token names, or the refusal to answer with. */
+function admit(request: Request): HostRecord | Response {
   const header = request.headers.get("authorization");
   const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+  let host: HostRecord | null;
   try {
-    return (token ? hostForToken(token) : null) ?? fail("Unknown host token", 401);
+    host = token ? hostForToken(token) : null;
   } catch (error) {
     if (!(error instanceof HostRegistryUnreadableError)) throw error;
     // Never 401: a daemon told its token is unknown stops every omp child.
     return fail("The host registry cannot be read", 503);
   }
+  if (!host) return fail("Unknown host token", 401);
+  // `local` is refused by id: a hand-edited hosts.json can give its record the flag.
+  if (host.id === LOCAL_HOST_ID || !host.shareCredentials) return fail("Credential sharing is off for this host", 403);
+  return host;
 }
 
 async function forward(request: Request, { params, disableIdleTimeout }: { params: Promise<{ path: string[] }>; disableIdleTimeout: () => void }) {
-  const host = authenticate(request);
-  if (host instanceof Response) return host;
-  // `local` is refused by id: a hand-edited hosts.json can give its record the flag.
-  if (host.id === LOCAL_HOST_ID || !host.shareCredentials) return fail("Credential sharing is off for this host", 403);
+  const first = admit(request);
+  if (first instanceof Response) return first;
   const path = `/${(await params).path.join("/")}`;
   if (!ALLOWED.some(([method, allowed]) => method === request.method && allowed.test(path))) return fail("Not found", 404);
 
@@ -60,6 +63,11 @@ async function forward(request: Request, { params, disableIdleTimeout }: { param
       throw error;
     }
   }
+
+  // The body can take as long as the sender likes, and no request of this host is abortable (abortBrokerRequests) until
+  // brokerFetch registers it: a host revoked or switched off meanwhile must not get through. No await from here to that call.
+  const host = admit(request);
+  if (host instanceof Response) return host;
 
   const log = (status: number) => console.log(`[omp-web] broker ${host.id} ${request.method} ${path} ${status}`);
   let upstream: Response;
