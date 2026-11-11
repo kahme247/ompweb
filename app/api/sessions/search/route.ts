@@ -1,4 +1,4 @@
-import { searchSessions } from "@/lib/session-content-search";
+import { searchSessionsAllHosts } from "@/lib/hosts/session-search";
 
 const MAX_QUERY_LENGTH = 500;
 
@@ -10,7 +10,7 @@ export async function GET(req: Request, { disableIdleTimeout }: { disableIdleTim
   if (q.length > MAX_QUERY_LENGTH) {
     return Response.json({ error: "Query too long", code: "query_too_long" }, { status: 400 });
   }
-  const batches = searchSessions(q);
+  const batches = searchSessionsAllHosts(q);
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     // Pull-driven: the scan only advances while the client keeps reading.

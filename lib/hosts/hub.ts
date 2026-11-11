@@ -990,6 +990,13 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
   if (result.ok !== true || !("value" in result)) return false;
   const { value } = result;
   switch (op) {
+    case "searchSessionBatch": {
+      const ids = args[1];
+      if (!isRecord(value) || !Array.isArray(ids) || ids.length > 4) return false;
+      const scores = Object.entries(value);
+      return scores.length <= 4 && scores.every(([id, score]) => ids.includes(id)
+        && typeof score === "number" && Number.isFinite(score) && score >= 0);
+    }
     // Media bytes only ever arrive through the blob leg.
     case "readMedia":
       return value instanceof Uint8Array;

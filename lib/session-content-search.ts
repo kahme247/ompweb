@@ -21,8 +21,6 @@ declare global {
   var __ompSessionContentSearchCache: Map<string, ContentCacheEntry> | undefined;
 }
 
-const PARSE_CONCURRENCY = 4;
-
 /** User and assistant text only: tool output and thinking would drown real matches. */
 async function extractTranscriptText(filePath: string): Promise<string> {
   const parts: string[] = [];
@@ -84,29 +82,24 @@ export async function transcriptField(filePath: string, cache: Map<string, Conte
   return entry.field.catch(() => null);
 }
 
-/**
- * Yields matching session ids with their scores (titles outrank transcript
- * matches), one batch per group of scanned files, so callers can stream hits.
- * Every group yields, even with no hits: a caller stopping the iteration
- * (`return()` waits for the pending `next()`) then stops after that group.
- */
-export async function* searchSessions(rawQuery: string): AsyncGenerator<Record<string, number>> {
+/** Score a bounded batch on the owning daemon; only matching session IDs leave the host. */
+export async function searchSessions(rawQuery: string, ids: string[]): Promise<Record<string, number>> {
   const query = compileSearchQuery(rawQuery);
-  if (!query) return;
-  const sessions = await listAllSessions();
+  if (!query || ids.length === 0) return {};
+  const allSessions = await listAllSessions();
+  const requested = new Set(ids);
+  const sessions = allSessions.filter((session) => requested.has(session.id));
   const cache = (globalThis.__ompSessionContentSearchCache ??= new Map());
-  const listed = new Set(sessions.map((s) => s.path));
+  const listed = new Set(allSessions.map((s) => s.path));
   for (const path of cache.keys()) if (!listed.has(path)) cache.delete(path);
 
-  for (let i = 0; i < sessions.length; i += PARSE_CONCURRENCY) {
-    const scores: Record<string, number> = {};
-    await Promise.all(sessions.slice(i, i + PARSE_CONCURRENCY).map(async (session) => {
-      const fields = [searchField(session.name ?? "", TITLE_WEIGHT), searchField(session.firstMessage, FIRST_MESSAGE_WEIGHT)];
-      const content = await transcriptField(session.path, cache);
-      if (content) fields.push(content);
-      const score = scoreSearchFields(fields, query);
-      if (score !== null) scores[session.id] = score;
-    }));
-    yield scores;
-  }
+  const scores: Record<string, number> = {};
+  await Promise.all(sessions.map(async (session) => {
+    const fields = [searchField(session.name ?? "", TITLE_WEIGHT), searchField(session.firstMessage, FIRST_MESSAGE_WEIGHT)];
+    const content = await transcriptField(session.path, cache);
+    if (content) fields.push(content);
+    const score = scoreSearchFields(fields, query);
+    if (score !== null) scores[session.id] = score;
+  }));
+  return scores;
 }

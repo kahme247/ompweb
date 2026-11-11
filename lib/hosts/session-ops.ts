@@ -54,6 +54,8 @@ import {
   resolveSessionPath,
   SessionFileTooLargeError,
 } from "../session-reader";
+import { searchSessions } from "../session-content-search";
+import { isValidSessionId } from "../session-file-references-core";
 import type { SessionHistoryCursor } from "../session-sync";
 import { extractSubagentHistory, readCompletionArtifact, readSubagentTranscriptPage, resolveSubagentArtifact, subagentTranscriptPath } from "../subagent-history";
 import { SUBAGENT_ID_RE } from "../subagent-types";
@@ -98,6 +100,7 @@ export interface SessionOps {
   listSessions(): Promise<SessionInfo[]>;
   /** Strict, uncached active-ID inventory for restore conflict checks; errors mean absence cannot be established. */
   listSessionIdsForRestore(): Promise<string[]>;
+  searchSessionBatch(query: string, ids: string[]): Promise<OpResult<Record<string, number>>>;
   readSession(id: string, options: SessionReadOptions): Promise<OpResult<SessionReadValue>>;
   readContext(id: string, leafId: string | undefined, options: ContextReadOptions): Promise<OpResult<unknown>>;
   readThinking(id: string, entryId: string, block: number): Promise<OpResult<unknown>>;
@@ -314,6 +317,14 @@ async function runOmpExport(filePath: string, outputPath: string): Promise<void>
 export const sessionOps: SessionOps = {
   listSessions: () => listAllSessions(),
   listSessionIdsForRestore: async () => listSessionIdsForRestore(),
+
+  async searchSessionBatch(query, ids) {
+    if (typeof query !== "string" || query.length > 500) return fail(400, "invalid_query", "Search query must be at most 500 characters");
+    if (!Array.isArray(ids) || ids.length > 4 || !ids.every((id) => typeof id === "string" && isValidSessionId(id))) {
+      return fail(400, "invalid_session_ids", "Search batch must contain at most 4 valid session ids");
+    }
+    return ok(await searchSessions(query, ids));
+  },
 
   async readSession(id, { deferThinking, deferMedia: deferToolResultImages }) {
     const filePath = await resolveSessionPath(id);

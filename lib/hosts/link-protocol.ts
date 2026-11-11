@@ -75,6 +75,7 @@ export type HostUriScheme = { scheme: string; writable: boolean };
 export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly string[] } = {
   listSessions: [],
   listSessionIdsForRestore: [],
+  searchSessionBatch: ["query", "ids"],
   readSession: ["id", "options"],
   readContext: ["id", "leafId", "options"],
   readThinking: ["id", "entryId", "block"],

@@ -19,6 +19,7 @@ function normalize(text: string): string {
 export interface SearchField {
   /** Lowercased, whitespace-collapsed text (phrase and order checks). */
   text: string;
+  originalText: string;
   /** Unique lowercased words (term matching). */
   words: string[];
   weight: number;
@@ -27,11 +28,13 @@ export interface SearchField {
 export interface CompiledSearchQuery {
   terms: { text: string; quality: (word: string) => number }[];
   phrases: string[];
+  caseParts: string[];
 }
 
 export function searchField(text: string, weight: number): SearchField {
-  const normalized = normalize(text).replace(/\s+/g, " ").trim();
-  return { text: normalized, words: [...new Set(normalized.match(WORD_RE) ?? [])], weight };
+  const originalText = text.normalize("NFC").replace(/\s+/g, " ");
+  const normalized = originalText.toLowerCase();
+  return { text: normalized, originalText, words: [...new Set(normalized.match(WORD_RE) ?? [])], weight };
 }
 
 let prevRow = new Uint16Array(64);
@@ -88,18 +91,25 @@ function termQuality(term: string, word: string): number {
 export function compileSearchQuery(raw: string): CompiledSearchQuery | null {
   const terms: string[] = [];
   const phrases: string[] = [];
+  const caseParts: string[] = [];
   // An unclosed quote is a phrase still being typed. Typographic quotes (“” „ «») count too.
-  for (const match of normalize(raw).matchAll(/["“”„«»]([^"“”„«»]*)["“”„«»]?|[^\s"“”„«»]+/g)) {
+  for (const match of raw.normalize("NFC").matchAll(/["“”„«»]([^"“”„«»]*)["“”„«»]?|[^\s"“”„«»]+/g)) {
     if (match[1] !== undefined) {
-      const phrase = match[1].replace(/\s+/g, " ").trim();
-      if (phrase) phrases.push(phrase);
+      const phrase = match[1].replace(/\s+/g, " ");
+      if (phrase) {
+        phrases.push(phrase.toLowerCase());
+        caseParts.push(phrase);
+      }
     } else {
-      terms.push(...(match[0].match(WORD_RE) ?? []));
+      const words = match[0].match(WORD_RE) ?? [];
+      terms.push(...words.map((word) => word.toLowerCase()));
+      caseParts.push(...words);
     }
   }
   if (terms.length === 0 && phrases.length === 0) return null;
   return {
     phrases,
+    caseParts,
     terms: terms.map((text) => {
       // Memoized per query: the same vocabulary repeats across sessions.
       const memo = new Map<string, number>();
@@ -158,7 +168,10 @@ export function scoreSearchFields(fields: SearchField[], query: CompiledSearchQu
     }
     score += bonus;
   }
-  return score;
+  // Capitalization breaks ties only; it must not outweigh match quality or field weights.
+  let caseMatches = 0;
+  for (const part of query.caseParts) if (fields.some((field) => field.originalText.includes(part))) caseMatches++;
+  return score + 0.01 * caseMatches / query.caseParts.length;
 }
 
 export interface SearchMatchSpan {

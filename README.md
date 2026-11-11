@@ -548,7 +548,14 @@ Notes:
   private quarantine and the error gives its location; inspect it before removing
   or restoring anything.
 - **Not available on remote hosts yet:** session archiving and the Skills,
-  Plugins, Agents and MCP settings. Transcript search still scans this machine.
+  Plugins, Agents and MCP settings.
+- **Transcript search on every host:** each daemon searches its own sessions and
+  returns similarity scores; the web app combines and ranks the results. Update
+  and restart older daemons to enable transcript search. An unavailable host
+  leaves the scan marked stopped while retaining results from healthy hosts.
+  Matching is case-insensitive, with matching capitalization breaking relevance
+  ties. Quotes require a phrase and preserve its leading and trailing spaces;
+  whitespace runs are normalized.
 - **Agent-started sessions:** with agent tools enabled, an agent can pass a `host`
   to `new_session` (it defaults to the agent's own host). A remote host asks for
   confirmation each time unless **Agents can start sessions here without asking**

@@ -837,7 +837,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // visibleProjectEntries filter runs at lower priority. Combines with the 200ms ETag loadSessions
   // debounce already in place — keystrokes never block the main thread on large session lists.
   const deferredSearchQuery = useDeferredValue(searchQuery);
-  const trimmedSearchQuery = deferredSearchQuery.trim();
+  // A trailing space may belong to an unfinished quoted phrase.
+  const trimmedSearchQuery = deferredSearchQuery.trimStart();
   const filtersActive = searchOpen || runningOnly || trimmedSearchQuery.length > 0;
   // Transcript matches stream from the server; title matches are scored locally
   // so results appear on the first keystroke and never wait on a full scan.
