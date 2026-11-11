@@ -1,26 +1,19 @@
-// useRouter and useSearchParams (the two hooks AppShell uses), over the History API.
+// useRouter and useSearchParams over the shared native history owner.
 import { useMemo, useSyncExternalStore } from "react";
-
-const EVENT = "omp:navigate";
-const subscribe = (notify: () => void) => {
-  window.addEventListener("popstate", notify);
-  window.addEventListener(EVENT, notify);
-  return () => {
-    window.removeEventListener("popstate", notify);
-    window.removeEventListener(EVENT, notify);
-  };
-};
+import {
+  browserBack, browserForward, getBrowserSearch, navigateBrowser, subscribeBrowserHistory,
+} from "./browser-history";
 
 export function useSearchParams(): URLSearchParams {
-  const search = useSyncExternalStore(subscribe, () => window.location.search);
+  const search = useSyncExternalStore(subscribeBrowserHistory, getBrowserSearch);
   return useMemo(() => new URLSearchParams(search), [search]);
 }
 
 const router = {
-  replace: (url: string) => {
-    window.history.replaceState(window.history.state, "", url);
-    window.dispatchEvent(new Event(EVENT));
-  },
+  push: (url: string) => navigateBrowser(url, false),
+  replace: (url: string) => navigateBrowser(url, true),
+  back: browserBack,
+  forward: browserForward,
 };
 
 export function useRouter() {
