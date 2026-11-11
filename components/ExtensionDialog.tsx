@@ -235,7 +235,8 @@ export function ExtensionDialog({
   attached = false,
 }: {
   request: ExtensionDialogRequest;
-  onRespond: (request: ExtensionDialogRequest, response: ExtensionDialogResponse) => void;
+  /** Resolves `false` when the answer could not be sent, so the panel takes another answer. */
+  onRespond: (request: ExtensionDialogRequest, response: ExtensionDialogResponse) => void | Promise<boolean>;
   /** Render as a composer panel instead of a full-chat overlay. */
   attached?: boolean;
 }) {
@@ -247,6 +248,9 @@ export function ExtensionDialog({
   // `pointerType` of the latest press: the pointer media query only describes
   // the primary pointer, not the one pressing now.
   const pressPointerRef = useRef<string | null>(null);
+  // omp takes one answer per request id and the panel stays up until the next request arrives, so a
+  // second select tap in that window (another checkbox toggle, Done) would be silently dropped.
+  const answeredIdRef = useRef<string | null>(null);
   const [askDrafts, setAskDrafts] = useState(() => initialAskDrafts(request));
   const viewportMaxHeight = useViewportMaxHeight();
   const { touchTargets } = useTouchTargets();
@@ -278,9 +282,16 @@ export function ExtensionDialog({
   // task, so the phone keyboard closes once instead of flashing as the
   // focused field disappears from under it.
   const respond = (response: ExtensionDialogResponse) => {
+    if (request.method === "select") {
+      if (answeredIdRef.current === request.id) return;
+      answeredIdRef.current = request.id;
+    }
     const active = document.activeElement;
     if (active instanceof HTMLElement && panelRef.current?.contains(active)) active.blur();
-    onRespond(request, response);
+    const id = request.id;
+    void Promise.resolve(onRespond(request, response)).then((sent) => {
+      if (sent === false && answeredIdRef.current === id) answeredIdRef.current = null;
+    });
   };
   const cancel = () => respond({ cancelled: true });
 

@@ -109,20 +109,60 @@ test("attached checkbox select sends each toggle at once, so Done cannot replace
     markableCount: 2,
   };
   const responses = [];
-  const view = render(React.createElement(ExtensionDialog, {
-    request,
-    onRespond: (current, response) => responses.push({ id: current.id, ...response }),
+  const dialog = (current) => React.createElement(ExtensionDialog, {
+    request: current,
+    onRespond: (answered, response) => {
+      responses.push({ id: answered.id, ...response });
+      return Promise.resolve(true);
+    },
     attached: true,
-  }));
+  });
+  const view = render(dialog(request));
   try {
     fireEvent.click(screen.getByRole("button", { name: "lint, not checked" }));
     assert.deepEqual(responses, [{ id: "jobs-2", value: "lint" }]);
+    // omp takes one answer per request: a second tap before the next request is not sent.
+    fireEvent.click(screen.getByRole("button", { name: "pytest, not checked" }));
+    assert.equal(responses.length, 1);
 
-    // The action row still waits for Next.
+    // The next request carries the toggle; the action row waits for Next.
+    view.rerender(dialog({ ...request, id: "jobs-3", checkedIndices: [1] }));
     fireEvent.click(screen.getByRole("button", { name: "✓ Done selecting" }));
     assert.equal(responses.length, 1);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    assert.deepEqual(responses[1], { id: "jobs-2", value: "✓ Done selecting" });
+    assert.deepEqual(responses[1], { id: "jobs-3", value: "✓ Done selecting" });
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a checkbox toggle that fails to send can be tried again", async () => {
+  const request = {
+    type: "extension_ui_request",
+    id: "jobs-4",
+    method: "select",
+    title: "Choose enabled jobs",
+    options: ["pytest", "✓ Done selecting"],
+    selectionMarker: "checkbox",
+    checkedIndices: [],
+    markableCount: 1,
+  };
+  const responses = [];
+  const results = [false, true];
+  const view = render(React.createElement(ExtensionDialog, {
+    request,
+    onRespond: (answered, response) => {
+      responses.push({ id: answered.id, ...response });
+      return Promise.resolve(results.shift());
+    },
+    attached: true,
+  }));
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "pytest, not checked" }));
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(screen.getByRole("button", { name: "pytest, not checked" }));
+    assert.deepEqual(responses, [{ id: "jobs-4", value: "pytest" }, { id: "jobs-4", value: "pytest" }]);
   } finally {
     view.unmount();
   }
