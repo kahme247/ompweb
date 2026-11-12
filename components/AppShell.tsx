@@ -1195,7 +1195,11 @@ export function AppShell({ appName }: { appName: string }) {
       router.replace(viewUrl({ poolId, projectId, creationId: crypto.randomUUID(), sidebarOpen }));
       return;
     }
-    if (!selectedSession && newSessionPoolProject?.poolId === poolId && newSessionPoolProject.projectId === projectId && newSessionCreation.id === creationId) return;
+    if (!selectedSession && newSessionPoolProject?.poolId === poolId && newSessionPoolProject.projectId === projectId && newSessionCreation.id === creationId) {
+      // The app already adopted this target (sidebar pick, New Session); a previous URL's error must not hide it.
+      setInitialCwdStatus("idle");
+      return;
+    }
     setSelectedSession(null);
     setSettingsTab(null);
     setNewSessionCwd(null);
