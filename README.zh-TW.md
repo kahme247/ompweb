@@ -235,11 +235,11 @@ npx --yes @kahme247/ompweb@latest ompweb-launchd uninstall   # 停止並移除�
 該服務執行 `npx --yes @kahme247/ompweb@latest`；若要鎖定特定版本，可傳入套件規格，例如 `ompweb-launchd install @kahme247/ompweb@0.3.6`。安裝時會讀取所有[環境變數](#環境變數)並寫入 plist 檔案，此外還包含 `OMP_WEB_PKG`（套件規格，等同於位置引數）。作為服務執行時，預設**不會**自動開啟瀏覽器——安裝時帶入 `OMP_WEB_NO_OPEN=0` 可恢復自動開啟行為。
 
 ```bash
-ompweb hash-password   # 以互動方式輸入密碼並產生雜湊值
+npx --yes @kahme247/ompweb@latest hash-password   # 以互動方式輸入密碼並產生雜湊值
 OMP_WEB_PASSWORD_HASH='<hash>' npx --yes @kahme247/ompweb@latest ompweb-launchd install
 ```
 
-請先執行 `ompweb hash-password` 以互動方式產生密碼雜湊，再透過 `OMP_WEB_PASSWORD_HASH` 傳入，避免將密碼明文留在 shell 歷史紀錄中；plist 內只會儲存雜湊值，絕不包含密碼明文。
+請先執行 `npx --yes @kahme247/ompweb@latest hash-password` 以互動方式產生密碼雜湊，再透過 `OMP_WEB_PASSWORD_HASH` 傳入，避免將密碼明文留在 shell 歷史紀錄中；plist 內只會儲存雜湊值，絕不包含密碼明文。
 
 當繫結至非回呼（non-loopback）主機時，請務必設定 `OMP_WEB_PASSWORD_HASH`（反向代理或 VPN 僅提供額外防護），並透過受信任的反向代理或 VPN 使用 HTTPS。切勿將未經驗證的 Web UI 暴露在公開網路中，或在明文 HTTP 連線下傳送密碼與工作階段 Cookie。
 
@@ -257,7 +257,7 @@ npx --yes --package=@kahme247/ompweb@latest ompweb-systemd install
 若要將服務繫結至所有 IPv4 介面以供區網存取，請先以互動方式產生密碼雜湊，並於安裝時透過 `OMP_WEB_PASSWORD_HASH` 設定（避免將密碼明文留在 shell 歷史紀錄中）：
 
 ```bash
-ompweb hash-password   # 以互動方式輸入密碼並產生雜湊值
+npx --yes @kahme247/ompweb@latest hash-password   # 以互動方式輸入密碼並產生雜湊值
 OMP_WEB_HOSTNAME=0.0.0.0 OMP_WEB_PASSWORD_HASH='<hash>' \
   npx --yes --package=@kahme247/ompweb@latest ompweb-systemd install
 ```
@@ -302,6 +302,16 @@ npx --yes --package=@kahme247/ompweb@latest ompweb-tray --uninstall    # 移除�
 ## 在其他機器上執行對話
 
 單一 ompweb 可以啟動並監看其他機器上的 omp 對話。每台機器保留其各自的 `omp` 安裝、`~/.omp/agent` 目錄、對話與認證資訊；ompweb 僅負責路由。遠端機器需要安裝 `omp` 以及 Node 24（用於 `npx`）或[單一二進位檔](#單一二進位檔)，並且必須能透過 HTTP(S) 連線至 ompweb 伺服器。遠端機器向外連線，因此可以位於 NAT 後方。
+
+### 透明主機集區
+
+設定完成的主機集區會顯示為一個目標，每個已註冊的儲存庫各有一個項目。請選取集區，而非個別工作節點；新的獨立對話會配置到符合條件的工作節點，並取得隔離的本機工作樹。新增集區專案只會註冊其 Git 來源，不會建立中央工作副本。所選工作節點會在對話開始時準備工作副本，並明確回報身分驗證、準備作業或儲存庫衝突。獨立主機（包含 Mac）仍支援輸入路徑，以及本機複製進度與取消操作。
+
+成員主機上既有的非集區工作區仍可從側邊欄存取；這些主機不會列為一般的集區建立目標。為新對話的附件解析所屬主機時，不會替換目前的輸入框，也不會丟棄草稿或上傳內容。若指令探索或系統提示檢視延後啟動對話，配置與準備失敗也會顯示；重試仍須由使用者明確操作。
+
+重試建立時會沿用相同的建立意圖與識別碼。一旦確認實際對話，其所屬主機便是繼續對話、檔案、終端機、上傳、產物、重新命名與刪除操作的唯一依據，即使集區成員變更也不例外。所屬主機無法使用時，不會在其他工作節點或 Mac 上建立替代對話。已修改但尚未提交的檔案與未發布的工作仍留在原主機；不支援即時遷移或未發布工作的容錯移轉。若回應結果不確定，請先檢查保留的對話，再明確重試可能已執行的指令。
+
+### 連結獨立主機
 
 1. 在 ompweb 伺服器上，開啟**設定 → 主機 → 新增主機**，輸入名稱，並複製權杖。權杖僅會顯示一次；系統只會儲存其雜湊值。
 2. 在遠端機器上儲存連線資訊。權杖是從 stdin 讀取，絕不會作為引數傳遞，因此不會出現在 `ps` 中：
