@@ -55,7 +55,7 @@ interface OmpPluginList {
 
 /** The `dependencies` of omp's plugins package.json, beside the `node_modules` holding `plugin`; null when unreadable. */
 async function declaredSources(plugin: { name: string; path?: unknown } | undefined): Promise<Record<string, unknown> | null> {
-  if (typeof plugin?.path !== "string" || !plugin.path.endsWith(join("node_modules", plugin.name))) return null;
+  if (typeof plugin?.path !== "string") return null;
   try {
     const pkg = JSON.parse(await readFile(join(plugin.path, ...plugin.name.split("/").map(() => ".."), "..", "package.json"), "utf8"));
     return typeof pkg?.dependencies === "object" && pkg.dependencies !== null ? pkg.dependencies : null;
@@ -71,7 +71,8 @@ export async function listPlugins(run: (args: string[]) => Promise<string>): Pro
   if (!list || !Array.isArray(list.npm) || !Array.isArray(list.marketplace) || !list.npm.every((entry) => named(entry, "name")) || !list.marketplace.every((entry) => named(entry, "id"))) {
     throw new Error("`omp plugin list --json` did not print a plugin list.");
   }
-  const sources = await declaredSources(list.npm.find((plugin) => typeof plugin.path === "string"));
+  // A linked plugin's path is its own directory, anywhere: only one under node_modules leads to omp's package.json.
+  const sources = await declaredSources(list.npm.find((plugin) => typeof plugin.path === "string" && plugin.path.endsWith(join("node_modules", plugin.name))));
   const plugins: PluginEntry[] = list.npm.map((plugin) => {
     const entry: PluginEntry = { kind: "npm", id: plugin.name, version: typeof plugin.version === "string" ? plugin.version : null, enabled: plugin.enabled === true };
     if (sources) entry.source = typeof sources[plugin.name] === "string" ? (sources[plugin.name] as string) : null;

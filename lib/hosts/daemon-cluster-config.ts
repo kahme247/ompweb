@@ -461,8 +461,10 @@ export function createClusterConfig(deps: {
       const installed: PluginEntry[] = [];
       for (const plugin of target) {
         const present = have.get(key(plugin));
-        if (present && (plugin.kind !== "npm" || plugin.version === null || present.version === plugin.version)) continue;
         const spec = installSpec(plugin);
+        // Same version from another source (the registry's package for a Git plugin) is not the master's plugin; an unknown source on either side counts by version.
+        const sameSource = plugin.source === undefined || present?.source === undefined || installSpec(present) === spec;
+        if (present && (plugin.kind !== "npm" || plugin.version === null || (present.version === plugin.version && sameSource))) continue;
         if (spec === null) {
           failed ??= `${plugin.id} is installed from a local directory on the master; install it on this host by hand`;
           deps.log(`cluster-config: ${plugin.id} cannot be installed here (a local directory on the master)`);
