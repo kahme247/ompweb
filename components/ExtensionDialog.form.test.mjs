@@ -68,3 +68,41 @@ test("changed answers are submitted, an unchecked radio group is omitted", async
   await user.click(screen.getByRole("button", { name: "Submit" }));
   assert.deepEqual(responses, [{ data: { extras: ["b"], agree: "on" } }]);
 });
+
+test("a radio group's Other text is its value, and picking an option afterwards sets it aside", async () => {
+  const user = userEvent.setup();
+  const responses = renderForm(`<form><label><input type="radio" name="c" value="r"> Red</label><label><input type="radio" name="c" value="b"> Blue</label></form>`);
+  const other = screen.getByRole("textbox", { name: /Other/ });
+  await user.click(screen.getByRole("radio", { name: /Red/ }));
+  await user.type(other, "  Green ");
+  assert.equal(screen.getByRole("radio", { name: /Red/ }).checked, false, "typing drops the picked option");
+  await user.click(screen.getByRole("button", { name: "Submit" }));
+  assert.deepEqual(responses, [{ data: { c: "Green" } }]);
+  await user.click(screen.getByRole("radio", { name: /Blue/ }));
+  await user.click(screen.getByRole("button", { name: "Submit" }));
+  assert.deepEqual(responses[1], { data: { c: "b" } });
+});
+
+test("a checkbox group's Other text is appended to its array; blank adds nothing", async () => {
+  const user = userEvent.setup();
+  const responses = renderForm(`<form><label><input type="checkbox" name="x" value="a" checked> A</label><label><input type="checkbox" name="x" value="b"> B</label></form>`);
+  await user.click(screen.getByRole("button", { name: "Submit" }));
+  await user.type(screen.getByRole("textbox", { name: /Other/ }), "mine");
+  await user.click(screen.getByRole("button", { name: "Submit" }));
+  assert.deepEqual(responses, [{ data: { x: ["a"] } }, { data: { x: ["a", "mine"] } }]);
+});
+
+test("no Other box when an option is already labelled Other or the group has one option", () => {
+  renderForm(`<form><label><input type="radio" name="c" value="r"> Red</label><label><input type="radio" name="c" value="o"> Other</label><label><input type="checkbox" name="s"> Solo</label></form>`);
+  assert.equal(screen.queryByRole("textbox"), null);
+});
+
+test("a required group is satisfied by its Other text", async () => {
+  const user = userEvent.setup();
+  const responses = renderForm(`<form><label><input type="radio" name="c" value="r" required> Red</label><label><input type="radio" name="c" value="b"> Blue</label></form>`);
+  await user.click(screen.getByRole("button", { name: "Submit" }));
+  assert.deepEqual(responses, [], "nothing answered yet");
+  await user.type(screen.getByRole("textbox", { name: /Other/ }), "Green");
+  await user.click(screen.getByRole("button", { name: "Submit" }));
+  assert.deepEqual(responses, [{ data: { c: "Green" } }]);
+});

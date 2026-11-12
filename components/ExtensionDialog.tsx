@@ -235,22 +235,120 @@ const INPUT_TYPES: Record<string, true> = {
 };
 const FIELD_STYLE = { padding: "7px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12.5, fontFamily: "inherit" } as const;
 
-function formNode(node: ChildNode, prefix: string, key: string): ReactNode {
+/** A radio/checkbox group that offers a free-text "Other" answer, as omp's html-form adds one. */
+interface OtherGroup { type: string; name: string; required: boolean }
+interface FormCtx {
+  prefix: string;
+  otherLabel: string;
+  /** Option element after which a group's Other box is rendered. */
+  others: Map<Element, OtherGroup>;
+  /** Options of those groups: their `required` moves to the Other box (see syncOtherValidity). */
+  grouped: Set<Element>;
+  /** Bare radio/checkbox inputs mapped to their `<label for>`, drawn together as one row. */
+  rows: Map<Element, Element>;
+  adopted: Set<Element>;
+}
+
+const choiceType = (element: Element) => {
+  const type = element.getAttribute("type")?.toLowerCase();
+  return type === "radio" || type === "checkbox" ? type : undefined;
+};
+
+const namedInputs = (form: HTMLFormElement, name: string, type: string) =>
+  Array.from(form.elements).filter((element) => element.tagName === "INPUT" && (element as HTMLInputElement).name === name && (element as HTMLInputElement).type === type) as HTMLInputElement[];
+
+// Mirrors omp's parser: a named radio/checkbox group of two or more options gets an Other answer
+// unless one of its options is already labelled "Other".
+function planForm(root: ParentNode, prefix: string, otherLabel: string): FormCtx {
+  const ctx: FormCtx = { prefix, otherLabel, others: new Map(), grouped: new Set(), rows: new Map(), adopted: new Set() };
+  const labelFor = new Map<string, Element>();
+  for (const label of root.querySelectorAll("label[for]")) {
+    if (!labelFor.has(label.getAttribute("for")!)) labelFor.set(label.getAttribute("for")!, label);
+  }
+  const groups = new Map<string, { input: Element; label?: Element }[]>();
+  for (const input of root.querySelectorAll("input")) {
+    const type = choiceType(input);
+    if (!type) continue;
+    const wrapper = input.closest("label");
+    const id = input.getAttribute("id");
+    const label = wrapper ?? (id ? labelFor.get(id) : undefined);
+    if (!wrapper && label) {
+      ctx.rows.set(input, label);
+      ctx.adopted.add(label);
+    }
+    const name = input.getAttribute("name");
+    if (name) {
+      const key = `${type}\0${name}`;
+      groups.set(key, [...(groups.get(key) ?? []), { input, label }]);
+    }
+  }
+  for (const [key, options] of groups) {
+    if (options.length < 2 || options.some(({ label }) => /^\s*other\b/i.test(label?.textContent ?? ""))) continue;
+    const [type, name] = key.split("\0");
+    const last = options[options.length - 1].input;
+    ctx.others.set(ctx.rows.has(last) ? last : last.closest("label") ?? last, { type, name, required: options.some(({ input }) => input.hasAttribute("required")) });
+    for (const { input } of options) ctx.grouped.add(input);
+  }
+  return ctx;
+}
+
+/** Whether a required Other-bearing group has an answer: an option, or Other text. */
+function syncOtherValidity(form: HTMLFormElement) {
+  for (const other of Array.from(form.querySelectorAll<HTMLInputElement>("input[data-other]"))) {
+    const { other: name, otherType: type = "" } = other.dataset;
+    const answered = other.value.trim() !== "" || namedInputs(form, name!, type).some((input) => input.checked && !input.disabled);
+    other.setCustomValidity(other.dataset.required && !answered ? (type === "checkbox" ? "Select at least one" : "Required") : "");
+  }
+}
+
+function otherBox({ type, name, required }: OtherGroup, ctx: FormCtx, key: string) {
+  return createElement("input", {
+    key,
+    type: "text",
+    "data-other": name,
+    "data-other-type": type,
+    "data-required": required || undefined,
+    "aria-label": ctx.otherLabel,
+    placeholder: ctx.otherLabel,
+    // Typing a radio group's own answer drops the picked option, as in omp.
+    onInput: (event: { currentTarget: HTMLInputElement }) => {
+      const box = event.currentTarget;
+      if (type === "radio" && box.value.trim() !== "" && box.form) for (const radio of namedInputs(box.form, name, type)) radio.checked = false;
+      if (box.form) syncOtherValidity(box.form);
+    },
+    style: { ...FIELD_STYLE, width: "100%", boxSizing: "border-box" },
+  });
+}
+
+function formNode(node: ChildNode, ctx: FormCtx, key: string): ReactNode {
   if (node.nodeType === 3) return node.textContent;
   if (node.nodeType !== 1) return null;
   const element = node as Element;
+  if (ctx.adopted.has(element)) return null;
+  let out = formElement(element, ctx, key);
+  const label = ctx.rows.get(element);
+  if (label) {
+    out = createElement("div", { key, style: { display: "flex", alignItems: "center", gap: 8 } }, out, formElement(label, ctx, `${key}.label`));
+  }
+  const other = ctx.others.get(element);
+  return other ? createElement(Fragment, { key }, out, otherBox(other, ctx, `${key}.other`)) : out;
+}
+
+function formElement(element: Element, ctx: FormCtx, key: string): ReactNode {
   const tag = element.localName;
   if (DROPPED_TAGS[tag]) return null;
-  const children = Array.from(element.childNodes, (child, index) => formNode(child, prefix, `${key}.${index}`));
+  const children = Array.from(element.childNodes, (child, index) => formNode(child, ctx, `${key}.${index}`));
   if (!FORM_TAGS[tag]) return createElement(Fragment, { key }, ...children);
   const attr = (name: string) => element.getAttribute(name) ?? undefined;
   const length = (name: string) => element.hasAttribute(name) ? Number(element.getAttribute(name)) : undefined;
   const props: Record<string, unknown> = { key };
   const id = attr("id");
-  if (id) props.id = `${prefix}-${id}`;
-  if (tag === "label" && attr("for")) props.htmlFor = `${prefix}-${attr("for")}`;
+  if (id) props.id = `${ctx.prefix}-${id}`;
+  if (tag === "label" && attr("for")) props.htmlFor = `${ctx.prefix}-${attr("for")}`;
+  // Each radio/checkbox option sits on its own row, its control spaced from its label.
+  if (tag === "label" && Array.from(element.querySelectorAll("input")).some(choiceType)) props.style = { display: "flex", alignItems: "center", gap: 8 };
   if (tag === "input" || tag === "select" || tag === "textarea") {
-    Object.assign(props, { name: attr("name"), required: element.hasAttribute("required"), disabled: element.hasAttribute("disabled") });
+    Object.assign(props, { name: attr("name"), required: element.hasAttribute("required") && !ctx.grouped.has(element), disabled: element.hasAttribute("disabled") });
   }
   if (tag === "input") {
     const rawType = attr("type")?.toLowerCase() ?? "text";
@@ -297,10 +395,14 @@ export function readFormData(form: HTMLFormElement): HtmlFormData {
     }
     const { type, value } = control as HTMLInputElement;
     if (type === "radio" || type === "checkbox") {
-      const group = controls.filter((other) => other.name === name && (other as HTMLInputElement).type === type) as HTMLInputElement[];
-      const checked = group.filter((input) => input.checked).map((input) => input.value);
-      if (type === "checkbox" && group.length > 1) data[name] = checked;
+      const options = namedInputs(form, name, type);
+      const checked = options.filter((input) => input.checked && !input.disabled).map((input) => input.value);
+      const other = Array.from(form.querySelectorAll<HTMLInputElement>("input[data-other]")).find((box) => box.dataset.other === name && box.dataset.otherType === type);
+      const typed = other?.value.trim();
+      // Other's text joins a checkbox group's array; it stands in for a radio group's value only while no option is picked.
+      if (type === "checkbox" && options.length > 1) data[name] = typed ? [...checked, typed] : checked;
       else if (checked[0] !== undefined) data[name] = checked[0];
+      else if (typed) data[name] = typed;
     } else if ((type === "number" || type === "range") && value.trim() !== "" && Number.isFinite(Number(value))) {
       data[name] = Number(value);
     } else {
@@ -348,12 +450,18 @@ export function ExtensionDialog({
   const { touchTargets } = useTouchTargets();
   const formRef = useRef<HTMLFormElement>(null);
   // Parsed in an inert document and never attached: only formNode's elements reach the page.
+  const otherLabel = t("chatWindow.askOther");
   const formContent = useMemo(() => {
     if (request.method !== "form") return null;
     const doc = new window.DOMParser().parseFromString(request.html, "text/html");
     const root = doc.querySelector("form") ?? doc.body;
-    return Array.from(root.childNodes, (node, index) => formNode(node, `form-${request.id}`, String(index)));
-  }, [request]);
+    const ctx = planForm(root, `form-${request.id}`, otherLabel);
+    return Array.from(root.childNodes, (node, index) => formNode(node, ctx, String(index)));
+  }, [request, otherLabel]);
+  // Required groups with an Other answer are validated through that answer's text box.
+  useEffect(() => {
+    if (formRef.current) syncOtherValidity(formRef.current);
+  }, [formContent]);
 
   useEffect(() => {
     // SSE reconnects replay the same request as a fresh object, not a new question.
@@ -452,6 +560,7 @@ export function ExtensionDialog({
       });
     } else if (request.method === "form") {
       const form = formRef.current;
+      if (form) syncOtherValidity(form);
       if (form?.reportValidity()) respond({ data: readFormData(form) });
     } else {
       respond({ value });
@@ -796,6 +905,7 @@ export function ExtensionDialog({
             <form
               key={request.id}
               ref={formRef}
+              onChange={(event) => syncOtherValidity(event.currentTarget)}
               onSubmit={(event) => { event.preventDefault(); submitValue(); }}
               style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8, color: "var(--text)", fontSize: 13, lineHeight: 1.55 }}
             >
