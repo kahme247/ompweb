@@ -45,6 +45,28 @@ test("parseSvgMarkup strips script, event handlers, foreignObject, style and jav
   assert.match(markup, /<rect/);
 });
 
+test("parseSvgMarkup blocks data: svg hrefs, vbscript: hrefs and dangerous style urls", () => {
+  const markup = parseSvgMarkup(`<svg viewBox="0 0 10 10" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <use xlink:href="data:image/svg+xml,&lt;svg&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;/svg&gt;" />
+    <image href="data:image/svg+xml,&lt;svg&gt;&lt;script&gt;alert(2)&lt;/script&gt;&lt;/svg&gt;" />
+    <a href="vbscript:alert(3)"><text>x</text></a>
+    <rect width="10" height="10" style="background: url('javascript:alert(4)')" />
+    <circle r="5" style="width: expression(alert(5))" />
+    <ellipse rx="5" ry="5" style="fill: red" />
+  </svg>`);
+  assert.doesNotMatch(markup, /data:image\/svg\+xml/);
+  assert.doesNotMatch(markup, /vbscript:/);
+  assert.doesNotMatch(markup, /javascript:/);
+  assert.doesNotMatch(markup, /expression\(/);
+  // The elements survive with the dangerous attributes removed…
+  assert.match(markup, /<use/);
+  assert.match(markup, /<image/);
+  assert.match(markup, /<rect/);
+  assert.match(markup, /<circle/);
+  // …while a benign style attribute is kept.
+  assert.match(markup, /fill: red/);
+});
+
 test("parseSvgMarkup keeps an explicit root fill instead of forcing currentColor", () => {
   const markup = parseSvgMarkup(`<svg viewBox="0 0 10 10" fill="red"><rect width="10" height="10" /></svg>`);
   assert.match(markup, /fill="red"/);

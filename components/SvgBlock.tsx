@@ -30,8 +30,16 @@ const SVG_THEME_ALIASES: Record<string, string> = {
 // block inside a fence could restyle the app. The reference implementation
 // in #421 leaves <style> in place; this PR removes it.
 const UNSAFE_TAGS = ["script", "foreignObject", "style"];
-const UNSAFE_HREF = /^\s*(javascript|data:text\/html)/i;
+// Block every data: URI, not just data:text/html: a <use> or <image> can
+// reference data:image/svg+xml,<svg><script>…</script></svg> and the browser
+// parses and executes the nested SVG's scripts. vbscript: is dead in modern
+// browsers but still honored by some embedded WebViews — block it too.
+const UNSAFE_HREF = /^\s*(javascript|vbscript|data:)/i;
 const UNSAFE_ATTRIBUTE = /^on/i;
+// A style attribute can smuggle code through url(javascript:…) or the legacy
+// IE expression(…); match inside url(…) rather than at the value start,
+// since the URL sits after a property name (background: url(…)).
+const UNSAFE_STYLE = /expression\s*\(|url\s*\(\s*['"]?\s*(javascript|vbscript|data):/i;
 
 function sanitizeSvg(root: Element): void {
   for (const tag of UNSAFE_TAGS) {
@@ -46,6 +54,9 @@ function sanitizeSvg(root: Element): void {
         continue;
       }
       if (/^(href|xlink:href)$/i.test(attr.name) && UNSAFE_HREF.test(attr.value)) {
+        el.removeAttribute(attr.name);
+      }
+      if (/^style$/i.test(attr.name) && UNSAFE_STYLE.test(attr.value)) {
         el.removeAttribute(attr.name);
       }
     }
