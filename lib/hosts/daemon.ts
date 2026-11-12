@@ -79,6 +79,8 @@ const CONFIG_API = "/api/hosts/cluster-config/";
 export interface HostDaemon {
   stop(): Promise<void>;
   done: Promise<number>;
+  /** Settles once startup work (upload sweep, session recovery, omp version read) is done; until then drain reports busy. */
+  started: Promise<void>;
   control(command: HostControlCommand): HostControlStatus;
 }
 type DaemonOptions = { allowHttp: boolean; url?: string; token?: string; links?: HostLink[] };
@@ -170,12 +172,12 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
   });
   const uploadRetention = new UploadRetention();
   if (!drained) void uploadRetention.start();
-  function sweepUploads(): void {
+  function sweepUploads(): Promise<void> | undefined {
     if (drained || stopped) return;
     operationsInFlight++;
-    void uploads.sweep().finally(() => operationsInFlight--);
+    return uploads.sweep().finally(() => operationsInFlight--);
   }
-  sweepUploads();
+  const startupSweep = sweepUploads();
   const sweepTimer = setInterval(sweepUploads, UPLOAD_SWEEP_INTERVAL_MS); sweepTimer.unref?.();
   const configDir = join(getAgentDir(), "omp-web"); mkdirSync(configDir, { recursive: true, mode: 0o700 });
   const watcher = watch(configDir, (_event, name) => {
@@ -448,20 +450,21 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
   let interrupted: HostResumeEntry[] = [];
   try { interrupted = resume.takeRunning(); } catch (error) { log("could not recover interrupted sessions: " + reason(error)); }
   let recovering = false;
-  function recover(): void {
+  function recover(): Promise<void> | undefined {
     if (drained || stopped || recovering) return;
     recovering = true;
     operationsInFlight++;
-    void channels.recover(interrupted).then(failed => resume.retireClaim(channels.running(), failed))
+    return channels.recover(interrupted).then(failed => resume.retireClaim(channels.running(), failed))
       .catch(error => log("could not retire recovered sessions: " + reason(error)))
       .finally(() => operationsInFlight--);
   }
-  recover();
+  const startupRecovery = recover();
   operationsInFlight++;
-  void getOmpVersion().then(version => { ompVersion = version; }).catch(error => log("could not read omp version: " + reason(error)))
+  const versionRead = getOmpVersion().then(version => { ompVersion = version; }).catch(error => log("could not read omp version: " + reason(error)))
     .finally(() => {
       operationsInFlight--;
       if (!stopped) for (const link of links.values()) link.start();
     });
-  return { stop: () => shutdown(0), done, control };
+  const started = Promise.all([startupSweep, startupRecovery, versionRead]).then(() => {});
+  return { stop: () => shutdown(0), done, control, started };
 }

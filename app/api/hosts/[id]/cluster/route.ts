@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, ClusterError, clusterJoinBlock, isClusterMember, joinCluster, leaveCluster, type HostProjectFacts } from "@/lib/hosts/cluster";
+import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, ClusterError, clusterJoinBlock, isClusterMember, joinCluster, leaveCluster, MIN_SHARED_CREDENTIALS_OMP, type HostProjectFacts } from "@/lib/hosts/cluster";
 import type { Host } from "@/lib/hosts/host";
-import { clusterConfigOp, getHost, getHostLinkProtocol, listHosts, masterConfigVersion, notifyHostsChange } from "@/lib/hosts/hub";
+import { clusterConfigOp, getHost, getHostLinkProtocol, getHostOmpVersion, listHosts, masterConfigVersion, notifyHostsChange } from "@/lib/hosts/hub";
 import { CLUSTER_CONFIG_SINCE_VERSION, HostOpError } from "@/lib/hosts/link-protocol";
 import { loadPools, poolProjectBindings, savePools, validatePools, type HostPool, type PoolMember, type PoolProject } from "@/lib/hosts/pools";
 import { LOCAL_HOST_ID, loadHosts } from "@/lib/hosts/registry";
@@ -48,8 +48,9 @@ function valueOf<T>(result: OpResult<T>): T {
 }
 
 function requireReady(host: Host): void {
-  const block = clusterJoinBlock({ status: host.status(), protocol: getHostLinkProtocol(host.id), supports: (operation) => host.supportsWorkspaceOp(operation) });
+  const block = clusterJoinBlock({ status: host.status(), protocol: getHostLinkProtocol(host.id), ompVersion: getHostOmpVersion(host.id), supports: (operation) => host.supportsWorkspaceOp(operation) });
   if (block === null) return;
+  if (block === "omp-old") throw new HostOpError(409, "host_omp_too_old", `Update omp on ${host.label} to ${MIN_SHARED_CREDENTIALS_OMP} or newer first`);
   if (block !== "upgrade") throw new HostOpError(409, "host_offline", `${host.label} is offline`);
   throw host.id === LOCAL_HOST_ID
     ? new HostOpError(409, "host_restart_required", "Restart this machine's ompweb host daemon to join the cluster")

@@ -159,7 +159,7 @@ lib/
     daemon-broker.ts   daemon side: the loopback forwarder that gives a sharing host's omp processes `OMP_AUTH_BROKER_URL`/`OMP_AUTH_BROKER_TOKEN` (`credentialsEnv`); forwards to the link's server with the link's host token
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
-    cluster.ts         pure cluster rules: `clusterOf` (= `pools[0]`), `isClusterMember`, `sharesCredentials`, `joinCluster`/`leaveCluster`, `clusterJoinBlock`; browser-importable (Settings uses it)
+    cluster.ts         pure cluster rules: `clusterOf` (= `pools[0]`), `isClusterMember`, `sharesCredentials`, `joinCluster`/`leaveCluster`, `clusterJoinBlock`, `ompSharesCredentials` (also the daemon's spawn check); browser-importable (Settings uses it)
     cluster-config.ts  pure, daemon-safe: what a cluster member mirrors from the master (`MIRRORED`, `LOCAL_SETTINGS`, `CONFIG_LIMITS`), `buildManifest`, `stripLocalSettings`/`mergeLocalSettings`, `isManagedPath`, `ClusterConfigError`
     cluster-config-server.ts main side: `currentClusterConfig` (the manifest cached per fingerprint, `omp plugin list` cached 30 s), `clusterConfigVersion`, `admitClusterMember`, `configErrorResponse`; used by the two `app/api/hosts/cluster-config/` routes and `hub.ts`
     daemon-cluster-config.ts daemon side: `createClusterConfig` (`ensure`/`apply`/`restore`/`state`/`holds`/`stop`): download, verify, apply whole or not at all, the member's backup (`own-config/`), plugins, leaving; Node only, relative imports

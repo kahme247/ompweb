@@ -7,7 +7,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
 
-[English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 Community: [Join the OMPWEB Discord](https://discord.gg/evqgGzRfM5)
 
@@ -238,9 +238,11 @@ remains an explicit user action.
 **Joining and leaving.** Each linked host has an **In the cluster** switch in **Settings →
 Hosts**. Turning it on asks for a folder on that host for the checkouts the cluster creates
 (default `<home>/ompweb-cluster`) and shows what changes. It needs the host online, its daemon
-on link protocol 10 and the `gitOrigins` operation; otherwise the disabled switch asks for an
-update or shows the host's unavailable status. While this machine is not a member yet, its own
-daemon needs the same, and the switch asks to restart the host service on this machine.
+on link protocol 10 with the `gitOrigins` operation, and omp 15.13.1 or newer (a member always
+uses this machine's provider logins); otherwise the disabled switch asks for an update of
+ompweb or omp, or shows the host's unavailable status. While this machine is not a member yet,
+its own daemon needs the same, and the switch asks to restart the host service on this machine
+(or to update its omp).
 
 - **Joining:** the host's Git projects are matched by repository: the same repository on
   several members is one cluster project, and its sessions are listed together. `git@github.com:a/b.git`
@@ -260,7 +262,9 @@ daemon needs the same, and the switch asks to restart the host service on this m
   the host again. Checkouts the cluster created inside the host's folder stay bound, so
   sessions the cluster started there stay under the cluster's projects. The cluster keeps the
   projects it gained from the host, so they may now be listed twice; hide any you do not want.
-  This machine cannot leave, and the cluster stays when the last linked host does.
+  This machine cannot leave, and the cluster stays when the last linked host does. Revoking a
+  member removes it from the cluster the same way; while `pools.json` cannot be read, the revoke
+  is refused.
 - **Provider logins:** a member always uses this machine's provider logins, whatever its own
   [**Use this server's provider logins**](#use-the-servers-provider-logins-on-a-host) setting
   says; Settings shows it on and disabled. This is computed from membership, so leaving brings
@@ -420,16 +424,20 @@ the cluster keeps its own configuration, managed on that machine.
   `.env` do). MCP servers started by a command need that command on each member.
 
 
-### Local worker maintenance (Unix)
+### Local worker maintenance
 
 `ompweb host status` prints daemon PID, native version/protocol, welcomed-link readiness,
 executable/entrypoint identity and maintenance state without credentials.
 `ompweb host drain` synchronously checks children (idle included), preparations,
 uploads/controls, pending operations and reliable results, and closes new-work admission
 only when idle. A busy refusal never kills work or changes admission.
-`ompweb host resume` reopens the live daemon. Controls use a private Unix socket inside
-the existing daemon, not TCP or a separate service. A disconnected deployer cannot release
-a live drain. Ordinary standalone Windows hosts remain unchanged; local controls are Unix-only.
+`ompweb host resume` reopens the live daemon. Controls run inside the existing daemon, not
+TCP or a separate service: a private Unix socket on Linux and macOS, and on Windows a named
+pipe with a random name and a per-start token. Windows keeps both in
+`<agent dir>/omp-web/host-control.json`, which only the daemon's user can read through the
+agent directory; a request without the current token is refused. A disconnected deployer
+cannot release a live drain. Windows hosts report CPU and memory capacity too, so they can be
+pool workers.
 Disable central member admission before worker rollout; native drain is the final race-free guard.
 
 Worker service cutovers can additionally start drained through `OMP_WEB_HOST_DRAINED=1`

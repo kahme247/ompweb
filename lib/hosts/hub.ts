@@ -1544,6 +1544,8 @@ export class RemoteHost implements Host {
         if (!(error instanceof HostRegistryUnreadableError)) throw error;
         throw new HostOpError(503, "host_registry_unreadable", "The linked-hosts registry cannot be read; no session was started");
       }
+      // A link that outlived its record (hosts.json deleted or hand-edited) cannot say whether it shares.
+      if (!record) throw new HostOpError(409, "host_unregistered", "This host is no longer in the linked-hosts registry; no session was started");
       const readPools = (): HostPool[] => {
         try {
           return loadPools();
@@ -1564,7 +1566,7 @@ export class RemoteHost implements Host {
         pools = readPools();
         if (!isClusterMember(pools, this.id)) configVersion = undefined;
       }
-      sharing = record !== undefined && sharesCredentials(record, pools);
+      sharing = sharesCredentials(record, pools);
     }
     if (sharing && (!link.shared || (link.hostVersion ?? 0) < SHARED_CREDENTIALS_SINCE_VERSION)) {
       throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to share credentials with it`);
@@ -1907,6 +1909,10 @@ export function isHostConfigCurrent(hostId: string): boolean {
   if (hostId === LOCAL_HOST_ID || !isClusterMember(loadPools(), hostId)) return true;
   const link = hub().links.get(hostId);
   return link !== undefined && configCurrent(link);
+}
+
+export function getHostOmpVersion(hostId: string): string | null {
+  return hub().links.get(hostId)?.ompVersion ?? null;
 }
 
 export function onHostsChange(listener: () => void): () => void {

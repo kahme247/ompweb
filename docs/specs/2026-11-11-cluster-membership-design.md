@@ -40,7 +40,7 @@ Not goals:
   - what happens to the host's projects (M3);
   - the credential note of M5.
 - Turning it off asks for confirmation and says what M6 does.
-- A host can join only while it is online, its daemon speaks link protocol 9 or newer and it answers the `gitOrigins` operation (M3). Otherwise the switch is disabled and says which of the three is missing. The same three hold for this machine's own daemon when the cluster is created; if one is missing, the join is refused and says to restart the host service on this machine.
+- A host can join only while it is online, its daemon speaks link protocol 9 or newer, it answers the `gitOrigins` operation (M3) and its omp is 15.13.1 or newer, the first that takes shared credentials (M5). Otherwise the switch is disabled and says which is missing: an old or unknown omp asks to update omp on that host, once its daemon is current. The same hold for this machine's own daemon when the cluster is created; if one is missing, the join is refused and says to restart the host service on this machine, or to update its omp.
 
 ### M3. Joining moves the host's projects
 
@@ -60,7 +60,7 @@ Joining is one request to the server, which reads the host's projects, computes 
 
 Two origins are the same repository when they are equal after: lower-casing the host name, removing the user (`git@`), reading `host:path` as `ssh://host/path`, ignoring the scheme, and removing a trailing `/` and `.git`. `git@github.com:a/b.git` and `https://github.com/a/b` are one project.
 
-The project keeps the origin it was first registered with. The preparation check on a member compares the checkout's origin with it by the same rule, where today it requires the exact text. It still requires exactly one `origin` URL.
+The project keeps the origin it was first registered with. The preparation check on a member accepts the checkout's origin when it is exactly that text, and otherwise compares it by the same rule (some origins Git accepts have no key, such as an IPv6 SSH host). It still requires exactly one `origin` URL.
 
 ### M5. Members use the master's provider logins
 
@@ -76,6 +76,7 @@ The project keeps the origin it was first registered with. The preparation check
 - Checkouts that joining bound (paths outside the host's `projectsRoot`) are unbound: those projects and their sessions are listed under the host again, with the presentation they had there.
 - Checkouts the cluster created (paths inside `projectsRoot`) stay bound, so sessions the cluster started there stay under the cluster's projects. This is today's behaviour for a removed member.
 - The cluster itself stays, with this machine in it, when the last linked host leaves.
+- Revoking a member leaves the cluster first, by the same rules; while `pools.json` cannot be read, the revoke answers 503.
 
 ### M7. Sidebar
 
@@ -88,7 +89,7 @@ The project keeps the origin it was first registered with. The preparation check
 
 | Case | Result |
 |---|---|
-| Host offline, daemon older than protocol 9, or no `gitOrigins` (the host's, or this machine's when it is being added) | The switch is disabled; the request answers 409 with the reason |
+| Host offline, daemon older than protocol 9, no `gitOrigins`, or omp older than 15.13.1 or unknown (the host's, or this machine's when it is being added) | The switch is disabled; the request answers 409 with the reason |
 | `gitOrigins` fails or times out | Nothing saved; the error is shown |
 | Folder not an absolute path | 400 |
 | `pools.json` unreadable | 503, as the other cluster requests answer today |

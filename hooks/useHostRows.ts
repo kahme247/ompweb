@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { openEventStream } from "@/lib/event-stream";
 import type { HostRow, MasterConfigError } from "@/lib/hosts/hub";
 import type { HostPool } from "@/lib/hosts/pools";
@@ -8,29 +8,45 @@ import type { HostPool } from "@/lib/hosts/pools";
 type Snapshot = { hosts?: HostRow[]; pools?: HostPool[]; masterConfigError?: MasterConfigError };
 
 /** Live host status plus pool configuration: the authenticated snapshot, then each SSE frame that carries it.
- * A frame without pools cannot erase the configured logical targets. `masterConfigError` comes with the hosts. */
-export function useHostRows(): { hosts: HostRow[] | null; pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; failed: boolean; masterConfigError: MasterConfigError | null } {
+ * A frame without pools cannot erase the configured logical targets. `masterConfigError` comes with the hosts. `reload`
+ * fetches the snapshot again and resolves with the pools known afterwards, or null when it failed. */
+export function useHostRows(): { hosts: HostRow[] | null; pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; failed: boolean; masterConfigError: MasterConfigError | null; reload: () => Promise<HostPool[] | null> } {
   const [rows, setRows] = useState<{ hosts: HostRow[]; masterConfigError: MasterConfigError | null } | null>(null);
   const [failed, setFailed] = useState(false);
   const [pools, setPools] = useState<HostPool[]>([]);
   const [poolsLoaded, setPoolsLoaded] = useState(false);
   const [poolsFailed, setPoolsFailed] = useState(false);
+  const snapshot = useRef<AbortController | null>(null);
+  const latestPools = useRef<HostPool[] | null>(null);
+
+  const reload = useCallback(async (): Promise<HostPool[] | null> => {
+    snapshot.current?.abort();
+    const controller = new AbortController();
+    snapshot.current = controller;
+    try {
+      const response = await fetch("/api/hosts", { signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json() as Snapshot;
+      if (controller.signal.aborted) return latestPools.current;
+      if (!Array.isArray(data.pools)) throw new Error("Host pool configuration is unavailable");
+      latestPools.current = data.pools;
+      setPools(data.pools);
+      setPoolsLoaded(true);
+      setPoolsFailed(false);
+      // SSE owns host status; this request supplies the retained pool configuration.
+      if (Array.isArray(data.hosts)) setRows((current) => current ?? { hosts: data.hosts!, masterConfigError: data.masterConfigError ?? null });
+      return data.pools;
+    } catch {
+      // Cancelled by a frame that carried pools: those are the current ones.
+      if (controller.signal.aborted) return latestPools.current;
+      setPoolsFailed(true);
+      setFailed(true);
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/hosts", { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json() as Snapshot;
-        if (controller.signal.aborted) return;
-        if (!Array.isArray(data.pools)) throw new Error("Host pool configuration is unavailable");
-        setPools(data.pools);
-        setPoolsLoaded(true);
-        setPoolsFailed(false);
-        // SSE owns host status; this request supplies the retained pool configuration.
-        if (Array.isArray(data.hosts)) setRows((current) => current ?? { hosts: data.hosts!, masterConfigError: data.masterConfigError ?? null });
-      })
-      .catch(() => { if (!controller.signal.aborted) { setPoolsFailed(true); setFailed(true); } });
+    void reload();
     const stream = openEventStream({ kind: "hosts" });
     stream.onmessage = (event) => {
       try {
@@ -42,7 +58,8 @@ export function useHostRows(): { hosts: HostRow[] | null; pools: HostPool[]; poo
         // A frame that carries pools is as good as the snapshot: it also recovers from a failed first request,
         // and cancels one still running so its older answer, or its failure, is ignored.
         if (Array.isArray(data.pools)) {
-          controller.abort();
+          latestPools.current = data.pools;
+          snapshot.current?.abort();
           setPools(data.pools);
           setPoolsLoaded(true);
           setPoolsFailed(false);
@@ -52,8 +69,8 @@ export function useHostRows(): { hosts: HostRow[] | null; pools: HostPool[]; poo
       }
     };
     stream.onerror = () => setFailed(true);
-    return () => { controller.abort(); stream.close(); };
-  }, []);
+    return () => { snapshot.current?.abort(); stream.close(); };
+  }, [reload]);
 
-  return { hosts: rows?.hosts ?? null, pools, poolsLoaded, poolsFailed, failed, masterConfigError: rows?.masterConfigError ?? null };
+  return { hosts: rows?.hosts ?? null, pools, poolsLoaded, poolsFailed, failed, masterConfigError: rows?.masterConfigError ?? null, reload };
 }

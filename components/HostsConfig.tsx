@@ -115,7 +115,7 @@ function HostDialog({ dialog, onClose }: { dialog: NonNullable<Dialogs>; onClose
 }
 
 /** The folder on the joining host where the cluster keeps the checkouts it creates. Without a home folder it starts empty and stays required. */
-function JoinDialog({ host, localJoins, onClose }: { host: HostRow; localJoins: boolean; onClose: () => void }) {
+function JoinDialog({ host, localJoins, reload, onClose }: { host: HostRow; localJoins: boolean; reload: () => Promise<HostPool[] | null>; onClose: () => void }) {
   const { t } = useI18n();
   const name = hostName(t, host);
   const [folder, setFolder] = useState("");
@@ -144,7 +144,11 @@ function JoinDialog({ host, localJoins, onClose }: { host: HostRow; localJoins: 
       await call("PUT", `/api/hosts/${encodeURIComponent(host.id)}/cluster`, { projectsRoot });
       onClose();
     } catch (failed) {
-      setError(failed instanceof Error ? failed.message : String(failed));
+      const message = failed instanceof Error ? failed.message : String(failed);
+      // The join may have been saved before its answer was lost: the membership the server has now decides.
+      const pools = await reload();
+      if (pools && isClusterMember(pools, host.id)) return onClose();
+      setError(pools ? message : t("hostsConfig.clusterOutcomeUnknown", { error: message }));
       setBusy(false);
     }
   };
@@ -175,10 +179,10 @@ function JoinDialog({ host, localJoins, onClose }: { host: HostRow; localJoins: 
   );
 }
 
-/** `localBlocked`: this machine is not a member yet, so a join adds it too, and its own daemon is not ready for that. */
-type ClusterState = { pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; localBlocked: boolean; masterFailed: boolean };
+/** `localReason`: this machine is not a member yet, so a join adds it too, and why its own daemon is not ready for that. */
+type ClusterState = { pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; localReason: string | null; masterFailed: boolean };
 
-const joinBlock = (row: HostRow) => clusterJoinBlock({ status: row.status, protocol: row.hostVersion, supports: (operation) => row.workspaceOps.includes(operation) });
+const joinBlock = (row: HostRow) => clusterJoinBlock({ status: row.status, protocol: row.hostVersion, ompVersion: row.ompVersion, supports: (operation) => row.workspaceOps.includes(operation) });
 
 function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave }: { host: HostRow; cluster: ClusterState; onRename: () => void; onRevoke: () => void; onShare: () => void; onJoin: () => void; onLeave: () => void }) {
   const { t } = useI18n();
@@ -190,9 +194,10 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
   const unavailable = !cluster.poolsLoaded && cluster.poolsFailed ? t("hostsConfig.poolsUnavailable") : null;
   const block = cluster.poolsLoaded && !member && linked ? joinBlock(host) : null;
   const joinReason = unavailable ?? (block === "upgrade" || block === "needs-upgrade" ? t("hostsConfig.joinUpgrade")
-    : block === "omp-missing" ? hostStatusText(t, host)
-      : block !== null ? t("hostsConfig.joinOffline")
-        : cluster.localBlocked && !member ? t("hostsConfig.joinLocalRestart") : null);
+    : block === "omp-old" ? t("hostsConfig.joinOmpOld", { name })
+      : block === "omp-missing" ? hostStatusText(t, host)
+        : block !== null ? t("hostsConfig.joinOffline")
+          : !member ? cluster.localReason : null);
   const reasonId = useId();
   const forcedId = useId();
   const details = [
@@ -288,7 +293,7 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
 
 export function HostsConfig() {
   const { t } = useI18n();
-  const { hosts, pools, poolsLoaded, poolsFailed, failed: loadFailed, masterConfigError } = useHostRows();
+  const { hosts, pools, poolsLoaded, poolsFailed, failed: loadFailed, masterConfigError, reload } = useHostRows();
   const [dialog, setDialog] = useState<Dialogs>(null);
   const [revoking, setRevoking] = useState<HostRow | null>(null);
   const [sharing, setSharing] = useState<HostRow | null>(null);
@@ -297,7 +302,9 @@ export function HostsConfig() {
   const [busy, setBusy] = useState(false);
   const local = hosts?.find(isLocalRow);
   const localJoins = !isClusterMember(pools, LOCAL_HOST_ID);
-  const localBlocked = poolsLoaded && localJoins && local !== undefined && joinBlock(local) !== null;
+  const localBlock = poolsLoaded && localJoins && local ? joinBlock(local) : null;
+  const localReason = !local || localBlock === null ? null
+    : localBlock === "omp-old" ? t("hostsConfig.joinOmpOld", { name: hostName(t, local) }) : t("hostsConfig.joinLocalRestart");
   const linkedMembers = clusterOf(pools)?.members.some((member) => member.hostId !== LOCAL_HOST_ID) ?? false;
 
   const share = async () => {
@@ -322,7 +329,11 @@ export function HostsConfig() {
       if (typeof restoreError === "string") toast.error(t("hostsConfig.leaveRestoreFailed", { name: leaving.label, reason: restoreError }));
       setLeaving(null);
     } catch (error) {
-      failure(error);
+      // As for a join: the leave may have been saved before its answer was lost.
+      const pools = await reload();
+      if (pools && !isClusterMember(pools, leaving.id)) setLeaving(null);
+      else if (pools) failure(error);
+      else toast.error(t("hostsConfig.clusterOutcomeUnknown", { error: error instanceof Error ? error.message : String(error) }));
     } finally {
       setBusy(false);
     }
@@ -361,13 +372,13 @@ export function HostsConfig() {
       ) : (
         <ul aria-label={t("hostsConfig.title")} style={{ margin: 0, padding: 0 }}>
           {hosts.map((host) => (
-            <HostCard key={host.id} host={host} cluster={{ pools, poolsLoaded, poolsFailed, localBlocked, masterFailed: masterConfigError !== null }} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} onShare={() => setSharing(host)} onJoin={() => setJoining(host)} onLeave={() => setLeaving(host)} />
+            <HostCard key={host.id} host={host} cluster={{ pools, poolsLoaded, poolsFailed, localReason, masterFailed: masterConfigError !== null }} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} onShare={() => setSharing(host)} onJoin={() => setJoining(host)} onLeave={() => setLeaving(host)} />
           ))}
           {hosts.length === 1 && <li style={{ listStyle: "none", fontSize: 12, color: "var(--text-dim)" }}>{t("hostsConfig.empty")}</li>}
         </ul>
       )}
       {dialog && <HostDialog dialog={dialog} onClose={() => setDialog(null)} />}
-      {joining && <JoinDialog host={joining} localJoins={localJoins} onClose={() => setJoining(null)} />}
+      {joining && <JoinDialog host={joining} localJoins={localJoins} reload={reload} onClose={() => setJoining(null)} />}
       <ConfirmDialog
         open={leaving !== null}
         onOpenChange={(open) => { if (!open) setLeaving(null); }}

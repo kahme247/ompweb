@@ -6,6 +6,7 @@ const { act, cleanup, render, screen, waitFor, within } = await import("@testing
 const { default: userEvent } = await import("@testing-library/user-event");
 
 const { HostsConfig } = await import("./HostsConfig.tsx");
+const { toast } = await import("./ui/toast.tsx");
 
 const originalWorker = globalThis.Worker;
 // The event-stream transport keeps the first worker it was given for the whole file.
@@ -25,12 +26,13 @@ afterEach(() => {
 const member = (hostId) => ({ hostId, projectsRoot: `/srv/${hostId}/ompweb-cluster`, provisioned: true, draining: false });
 const cluster = (...hostIds) => [{ id: "cluster", label: "Cluster", enabled: true, members: hostIds.map(member), projects: [] }];
 const hostRow = (overrides = {}) => ({
-  id: "local", label: "", status: "online", ompVersion: "1.0.0", platform: "linux",
+  id: "local", label: "", status: "online", ompVersion: "omp/15.13.1", platform: "linux",
   hostVersion: 10, serverVersion: 10, lastSeenAt: null, workspaceOps: ["gitOrigins"], ...overrides,
 });
 const linked = (id, label, overrides = {}) => hostRow({ id, label, allowAgentStart: false, shareCredentials: false, ...overrides });
 
-/** `pools: null` makes GET /api/hosts fail, `"pending"` never answers it, and a promise answers it once settled (null failing); `home: null` makes GET /api/home fail. Other requests go to `respond`. */
+/** `pools: null` makes GET /api/hosts fail, `"pending"` never answers it, a promise answers it once settled (null failing), and a function
+ * is asked on every request (null failing); `home: null` makes GET /api/home fail. Other requests go to `respond`. */
 async function showHosts(t, { hosts, pools = [], home = "/home/andre", respond = async () => Response.json({ pools }) }) {
   const calls = [];
   let snapshot;
@@ -39,7 +41,7 @@ async function showHosts(t, { hosts, pools = [], home = "/home/andre", respond =
     if (String(url) === "/api/hosts" && method === "GET") {
       snapshot = init;
       if (pools === "pending") return new Promise(() => {});
-      const answer = await pools;
+      const answer = await (typeof pools === "function" ? pools() : pools);
       return answer === null ? new Response("{}", { status: 500 }) : Response.json({ hosts: [], pools: answer });
     }
     if (String(url).startsWith("/api/home?")) {
@@ -57,7 +59,7 @@ async function showHosts(t, { hosts, pools = [], home = "/home/andre", respond =
   act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts }) } }));
   await screen.findByRole("button", { name: "Rename This machine" });
   // Settled once the snapshot is applied: every cluster switch is then enabled or says why not; while loading it is disabled without a reason.
-  if (Array.isArray(pools) || pools === null) {
+  if (Array.isArray(pools) || pools === null || typeof pools === "function") {
     await waitFor(() => assert.ok(screen.getAllByRole("switch", { name: /is in the cluster$/ }).every((toggle) => !toggle.disabled || toggle.hasAttribute("aria-describedby"))));
   }
   const frame = (data) => act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify(data) } }));
@@ -86,16 +88,19 @@ test("a first pool without this machine gives its row no master label", async (t
   assert.equal(screen.queryByText("Cluster master"), null);
 });
 
-for (const [label, local, pools] of [
-  ["offline", { status: "offline" }, []],
-  ["on protocol 8", { hostVersion: 8 }, cluster("h1")],
-  ["without gitOrigins", { workspaceOps: [] }, []],
+const RESTART = "Restart the host service on this machine first";
+for (const [label, local, pools, reason] of [
+  ["offline", { status: "offline" }, [], RESTART],
+  ["on protocol 8", { hostVersion: 8 }, cluster("h1"), RESTART],
+  ["without gitOrigins", { workspaceOps: [] }, [], RESTART],
+  // A restart does not update omp: the reason names what this machine needs.
+  ["on an omp too old to share credentials", { ompVersion: "omp/15.13.0" }, [], "Update omp on This machine to 15.13.1 or newer first"],
 ]) {
   test(`while this machine must join too and is ${label}, a non-member cannot join and says why; a member can still leave`, async (t) => {
     await showHosts(t, { hosts: [hostRow(local), linked("h1", "Laptop"), linked("h2", "Desk")], pools });
     const desk = clusterSwitch("Desk");
     assert.equal(desk.disabled, true);
-    assert.equal(reasonOf(desk), "Restart the host service on this machine first");
+    assert.equal(reasonOf(desk), reason);
     if (pools.length) assert.equal(clusterSwitch("Laptop").disabled, false);
   });
 }
@@ -111,6 +116,10 @@ for (const [label, row, reason] of [
   ["a protocol below 9", { hostVersion: 8 }, "Update ompweb on this host first"],
   ["no gitOrigins operation", { workspaceOps: [] }, "Update ompweb on this host first"],
   ["flagged needs-upgrade by the hub", { status: "needs-upgrade", hostVersion: 8 }, "Update ompweb on this host first"],
+  // Members always share credentials; the daemon refuses that below omp 15.13.1, and on an omp it cannot read.
+  ["on an omp too old to share credentials", { ompVersion: "omp/15.13.0" }, "Update omp on Laptop to 15.13.1 or newer first"],
+  ["on an unknown omp", { ompVersion: "omp/next" }, "Update omp on Laptop to 15.13.1 or newer first"],
+  ["on an outdated daemon and an old omp (the daemon first)", { hostVersion: 8, ompVersion: "omp/15.13.0" }, "Update ompweb on this host first"],
   ["without omp (its own status text is the reason)", { status: "omp-missing" }, "omp not installed"],
 ]) {
   test(`a host that is ${label} cannot join and says why`, async (t) => {
@@ -161,7 +170,7 @@ test("joining asks for the folder, prefilled from the host's home, and sends it"
   const folder = within(dialog).getByLabelText("Folder on Laptop for the cluster's checkouts");
   await waitFor(() => assert.equal(folder.value, "/home/andre/ompweb-cluster"));
   assert.deepEqual(calls.filter((call) => call.url.startsWith("/api/home")), [{ method: "GET", url: "/api/home?hostId=h1" }]);
-  assert.ok(within(dialog).getByText(/Its Git projects become cluster projects/));
+  assert.ok(within(dialog).getByText(/Its Git projects that match a cluster repository or can be added as one become cluster projects, unless they are inside or contain the cluster folder/));
   assert.ok(within(dialog).getByText(/Laptop will use this machine's provider logins/));
   assert.ok(within(dialog).getByText("It receives this machine's omp configuration (settings, models, MCP servers, skills, plugins, rules), API keys and environment values included, in place of its own until it leaves; its own is kept and put back then."));
   assert.equal(calls.some((call) => call.method === "PUT"), false);
@@ -176,9 +185,9 @@ for (const [label, pools, says] of [["no cluster", [], true], ["a first pool wit
     const { user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools });
     await user.click(clusterSwitch("Laptop"));
     const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
-    const note = within(dialog).queryByText(/^This machine joins too: its Git projects become cluster projects/);
+    const note = within(dialog).queryByText(/^This machine joins too: its Git projects that match a cluster repository or can be added as one become cluster projects/);
     assert.equal(note !== null, says);
-    if (says) assert.match(note.textContent, /any member with capacity \(currently Linux hosts only\)/);
+    if (says) assert.match(note.textContent, /unless they are inside or contain the ompweb-cluster folder in its home folder.*any member with capacity \(currently Linux hosts only\)/);
   });
 }
 
@@ -194,6 +203,38 @@ for (const [code, message] of [["cluster_changed", "The cluster changed during t
     await user.click(within(dialog).getByRole("button", { name: "Add to cluster" }));
     assert.equal((await within(dialog).findByRole("alert")).textContent, message);
     assert.ok(screen.getByRole("dialog", { name: "Add Laptop to the cluster?" }));
+  });
+}
+
+/** A join or leave whose answer is lost: the server saved it or not, and the reload after it answers or fails. */
+const LOST = [["saved", true, true], ["not saved", false, true], ["of unknown outcome, the reload failing", true, false]];
+const UNKNOWN = "Whether the change was saved is unknown (Failed to fetch); the cluster could not be reloaded to check.";
+
+for (const [label, saved, reloads] of LOST) {
+  test(`a join whose answer is lost, ${label}, shows what the reload finds before Add is enabled again`, async (t) => {
+    const pools = cluster("local");
+    let reloadFails = false;
+    const { user } = await showHosts(t, {
+      hosts: [hostRow(), linked("h1", "Laptop")], pools: () => (reloadFails ? null : pools),
+      respond: async () => {
+        if (saved) pools[0].members.push(member("h1"));
+        reloadFails = !reloads;
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    await user.click(clusterSwitch("Laptop"));
+    const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
+    await waitFor(() => assert.notEqual(within(dialog).getByLabelText(/Folder on Laptop/).value, ""));
+    const confirm = within(dialog).getByRole("button", { name: "Add to cluster" });
+    await user.click(confirm);
+    if (saved && reloads) {
+      // Done after all: no error, and no join offered again.
+      await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+      assert.equal(clusterSwitch("Laptop").getAttribute("aria-checked"), "true");
+      return;
+    }
+    assert.equal((await within(dialog).findByRole("alert")).textContent, reloads ? "Failed to fetch" : UNKNOWN);
+    await waitFor(() => assert.equal(confirm.disabled, false));
   });
 }
 
@@ -237,7 +278,6 @@ test("leaving is confirmed, then sends DELETE", async (t) => {
 });
 
 test("a leave whose own configuration could not be put back says so and why", async (t) => {
-  const { toast } = await import("./ui/toast.tsx");
   const errors = [];
   t.mock.method(toast, "error", (message) => { errors.push(message); });
   const { user } = await showHosts(t, {
@@ -305,6 +345,34 @@ test("a standalone host shows no configuration line, even with a report", async 
   assert.deepEqual(configLines("This machine"), []);
 });
 
+for (const [label, saved, reloads] of LOST) {
+  test(`a leave whose answer is lost, ${label}, shows what the reload finds before Remove is enabled again`, async (t) => {
+    const errors = [];
+    t.mock.method(toast, "error", (message) => { errors.push(message); });
+    const pools = cluster("local", "h1");
+    let reloadFails = false;
+    const { user } = await showHosts(t, {
+      hosts: [hostRow(), linked("h1", "Laptop")], pools: () => (reloadFails ? null : pools),
+      respond: async () => {
+        if (saved) pools[0].members.pop();
+        reloadFails = !reloads;
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    await user.click(clusterSwitch("Laptop"));
+    const remove = within(await screen.findByRole("dialog", { name: "Remove Laptop from the cluster?" })).getByRole("button", { name: "Remove" });
+    await user.click(remove);
+    if (saved && reloads) {
+      // Done after all: no error, and no leave offered again.
+      await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+      assert.equal(clusterSwitch("Laptop").getAttribute("aria-checked"), "false");
+      assert.deepEqual(errors, []);
+      return;
+    }
+    await waitFor(() => assert.deepEqual(errors, [reloads ? "Failed to fetch" : UNKNOWN]));
+    await waitFor(() => assert.equal(remove.disabled, false));
+  });
+}
 test("while the pools load, every switch and share toggle is disabled and nothing is sent", async (t) => {
   const { calls, user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop"), linked("h2", "Desk", { shareCredentials: true })], pools: "pending" });
   for (const name of ["Laptop", "Desk"]) {

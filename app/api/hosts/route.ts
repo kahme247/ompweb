@@ -1,4 +1,4 @@
-import { sharesCredentials } from "@/lib/hosts/cluster";
+import { isClusterMember, leaveCluster, sharesCredentials } from "@/lib/hosts/cluster";
 import { closeHostLink, hostsSnapshot, listHosts, notifyHostsChange } from "@/lib/hosts/hub";
 import { loadPools, savePools, type HostPool } from "@/lib/hosts/pools";
 import { createHost, HostRegistryUnreadableError, readHosts, revokeHost, UnknownHostError, updateHost, type HostRecord } from "@/lib/hosts/registry";
@@ -111,6 +111,7 @@ export async function PUT(req: Request) {
     if (isRecord(error) && typeof error.code === "string") return poolStorageFailure();
     return fail("Invalid pool configuration", 400);
   }
+  notifyHostsChange();
   // Leaving the first pool, or no longer being in it, can end a host's sharing: cut off what it already has open.
   for (const host of hosts) {
     if (sharesCredentials(host, before) && !sharesCredentials(host, after)) abortBrokerRequests(host.id);
@@ -165,6 +166,19 @@ export async function DELETE(req: Request) {
   const id = new URL(req.url).searchParams.get("id");
   if (!id) return fail("id is required", 400);
   if (id === "local") return fail("This machine cannot be revoked", 400);
+  // An unreadable registry fails before the pools change: no member is removed while its record and link remain.
+  try {
+    readHosts();
+  } catch (error) {
+    return failFor(error);
+  }
+  // A member leaves the cluster first: once its record is gone, no row is left to remove it there.
+  try {
+    const pools = loadPools();
+    if (isClusterMember(pools, id)) savePools(leaveCluster(pools, id));
+  } catch {
+    return poolStorageFailure();
+  }
   try {
     // Registry first: with the record gone a daemon that redials gets 401 instead of reconnecting.
     if (!revokeHost(id)) return fail("Unknown host", 404);
