@@ -7,6 +7,7 @@ import { isRecord } from "./type-guards";
 import {
   calculateCacheSavings,
   calculateUsageCost,
+  clearRatesCache,
   resolveModelRates,
 } from "./usage-rates";
 import type {
@@ -74,10 +75,12 @@ function setUsageCacheEntry(filePath: string, entry: SessionUsageCacheEntry): vo
   }
 }
 
-/** Clear in-memory usage cache (useful on session mutation or manual refresh). */
+/** Clear the in-memory usage cache and the model rates cached beside it (manual refresh): both keep the prices
+ * `models.yml` had when they were read. */
 export function invalidateUsageCache(): void {
   globalThis.__ompUsageCache?.clear();
   usageCacheApproxBytes = 0;
+  clearRatesCache();
 }
 
 /**

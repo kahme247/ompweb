@@ -35,6 +35,9 @@ function formatCurrency(amount: number): string {
   return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+/** How long after a report with a host still syncing the next one is fetched. */
+const HOST_SYNC_POLL_MS = 2000;
+
 export function UsageConfig() {
   const { t } = useI18n();
 
@@ -54,17 +57,18 @@ export function UsageConfig() {
   const chartSvgRef = useRef<SVGSVGElement | null>(null);
 
   const fetchUsage = useCallback(
-    async (isRefresh = false, signal?: AbortSignal) => {
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
-      setError(null);
+    // `poll` refetches behind the page: no spinner, and a failure leaves the report on screen.
+    async (mode: "load" | "refresh" | "poll" = "load", signal?: AbortSignal) => {
+      if (mode === "refresh") setRefreshing(true);
+      else if (mode === "load") setLoading(true);
+      if (mode !== "poll") setError(null);
 
       try {
         const params = new URLSearchParams({
           range: timeRange,
           granularity,
         });
-        if (isRefresh) params.set("refresh", "true");
+        if (mode === "refresh") params.set("refresh", "true");
 
         const res = await fetch(`/api/usage?${params.toString()}`, { signal });
         if (!res.ok) {
@@ -76,10 +80,12 @@ export function UsageConfig() {
         if (err instanceof DOMException && err.name === "AbortError") {
           return;
         }
-        setError(err instanceof Error ? err.message : String(err));
+        if (mode !== "poll") setError(err instanceof Error ? err.message : String(err));
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (mode !== "poll") {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [timeRange, granularity],
@@ -87,11 +93,30 @@ export function UsageConfig() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchUsage(false, controller.signal);
+    fetchUsage("load", controller.signal);
     return () => {
       controller.abort();
     };
   }, [fetchUsage]);
+
+  // The server answers after 10 s at most and lets slower hosts finish behind the report.
+  const hostsSyncing = report?.hostBreakdown?.some((host) => host.state === "syncing") ?? false;
+  useEffect(() => {
+    if (!hostsSyncing) return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const poll = () => {
+      timer = window.setTimeout(async () => {
+        await fetchUsage("poll", controller.signal);
+        if (!controller.signal.aborted) poll();
+      }, HOST_SYNC_POLL_MS);
+    };
+    poll();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [hostsSyncing, fetchUsage]);
 
   // Date range subtitle calculation
   const dateRangeSubtitle = useMemo(() => {
@@ -265,7 +290,7 @@ export function UsageConfig() {
         <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{error}</span>
         <button
           type="button"
-          onClick={() => fetchUsage(true)}
+          onClick={() => fetchUsage("refresh")}
           style={{
             marginTop: 8,
             display: "inline-flex",
@@ -431,7 +456,7 @@ export function UsageConfig() {
           {/* Refresh button */}
           <button
             type="button"
-            onClick={() => fetchUsage(true)}
+            onClick={() => fetchUsage("refresh")}
             disabled={refreshing}
             title={t("usageConfig.refresh")}
             aria-label={t("usageConfig.refresh")}

@@ -162,6 +162,7 @@ export interface UsageSessionStamps {
   transcripts: UsageTranscriptStamp[];
 }
 
+/** Every transcript the host counts usage from. The host fails the op rather than leave one out it cannot examine. */
 export interface UsageTranscriptIndex {
   parserVersion: number;
   sessions: UsageSessionStamps[];
@@ -176,19 +177,21 @@ export interface UsageTranscriptRecords extends UsageTranscriptStamp {
   records: UsageRecord[];
 }
 
-/** `missing`: gone or not listed by this host; `unread`: did not fit this answer, ask again. */
+/** `missing`: gone, or not a transcript this host lists. A path asked for and in neither list was not reached within
+ * the page limits: ask again. */
 export interface UsageRecordsPage {
   files: UsageTranscriptRecords[];
   missing: string[];
-  unread: UsageReadRequest[];
 }
 
+/** `stale`: the last pull failed. `unsupported`: the host's daemon predates the usage ops. */
 export type HostUsageSyncState = "current" | "syncing" | "offline" | "stale" | "unsupported";
 
 export interface HostUsageStatus {
   hostId: string;
   label: string;
   state: HostUsageSyncState;
+  /** When the stored rows were last brought up to date; null before the first full pull. */
   syncedAt: number | null;
 }
 

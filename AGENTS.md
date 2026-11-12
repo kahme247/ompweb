@@ -149,7 +149,7 @@ lib/
     daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
     pending-requests.ts daemon side: `PendingRequests`, a channel's still-open blocking requests and current session id for the hello
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
-    usage-sync.ts      main side of usage from linked hosts: `pullAllHostUsage` pulls each linked host's transcript stamps and records (`listUsageTranscripts`, `readUsageRecords`) into `usage.db` on `/api/usage`, 30 s TTL per host
+    usage-sync.ts      main side of usage from linked hosts: `pullAllHostUsage` pulls each linked host's transcript stamps and records (`listUsageTranscripts`, `readUsageRecords`) into `usage.db` on `/api/usage`, 30 s TTL per host (a forced refresh reads every transcript again); a host's sync state follows its link status, its last sync time is kept in `usage.db`
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
     update-types.ts    shared per-host software status and operation contract
     updates.ts         daemon-side version checks, compatibility gate and durable update state

@@ -1068,8 +1068,7 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
     case "readUsageRecords":
       return isRecord(value) && Array.isArray(value.files)
         && value.files.every((file) => usageStamp(file) && Array.isArray(file.records) && file.records.every(usageRecord))
-        && Array.isArray(value.missing) && value.missing.every(usagePath)
-        && Array.isArray(value.unread) && value.unread.every(usageReadRequest);
+        && Array.isArray(value.missing) && value.missing.every(usagePath);
     default:
       return true;
   }
@@ -1082,10 +1081,6 @@ const COST_QUALITY_TIERS: readonly unknown[] = ["provider_reported", "model_pric
 function usageStamp(value: unknown): boolean {
   return isRecord(value) && usagePath(value.path) && finiteNumber(value.mtimeMs)
     && typeof value.size === "number" && Number.isSafeInteger(value.size) && value.size > 0;
-}
-
-function usageReadRequest(value: unknown): boolean {
-  return isRecord(value) && usagePath(value.session) && Array.isArray(value.paths) && value.paths.every(usagePath);
 }
 
 function usageRecord(value: unknown): boolean {

@@ -1,13 +1,12 @@
 // Usage of linked hosts: each host's daemon reads its own transcripts, main keeps a copy in usage.db so a host that
 // goes offline keeps its last numbers. Pulled only on /api/usage requests. No `next/*` or `@/` imports.
 import type { Database } from "bun:sqlite";
-import { hostUsageStamps, pruneHostUsage, storeHostUsage } from "../usage-db";
+import { hostSyncTimes, isUpToDate, markHostSynced, pruneHostUsage, storedStamps, storeHostUsage } from "../usage-db";
 import type { HostUsageStatus, HostUsageSyncState, UsageReadRequest } from "../usage-types";
 import { isLinkUp, type Host } from "./host";
 import { getHost, listHosts, onHostHello } from "./hub";
 import { HostOpError } from "./link-protocol";
-import { customLocalLabel, LOCAL_HOST_ID, readHosts } from "./registry";
-import type { OpResult } from "./session-ops";
+import { readHosts } from "./registry";
 
 /** `ttlMs`: a host pulled this recently is not asked again; `waitMs`: how long a report waits for its pulls. */
 export const usageSyncTimings = { ttlMs: 30_000, waitMs: 10_000 };
@@ -15,38 +14,34 @@ export const usageSyncTimings = { ttlMs: 30_000, waitMs: 10_000 };
 /** Most sessions and paths asked for in one `readUsageRecords`. */
 const READ_BATCH = { sessions: 50, paths: 2_000 };
 
-interface HostUsage {
-  pulling: Promise<void> | null;
+interface HostPulls {
+  running: Promise<void> | null;
+  /** When the last pull succeeded; 0 pulls again whatever the TTL. */
   pulledAt: number;
-  syncedAt: number | null;
-  state: HostUsageSyncState;
+  /** How the last pull ended; `stale` before the first one. */
+  outcome: "current" | "stale" | "offline" | "unsupported";
 }
 
 declare global {
-  var __ompHostUsage: Map<string, HostUsage> | undefined;
+  var __ompHostUsagePulls: Map<string, HostPulls> | undefined;
 }
 
 // globalThis, like the hub: survives a `bun --hot` re-evaluation.
-function hostUsage(hostId: string): HostUsage {
-  if (!globalThis.__ompHostUsage) {
-    globalThis.__ompHostUsage = new Map();
+function pullsOf(hostId: string): HostPulls {
+  if (!globalThis.__ompHostUsagePulls) {
+    globalThis.__ompHostUsagePulls = new Map();
     // A host that links again may have new transcripts from while it was away.
     onHostHello((id) => {
-      const usage = globalThis.__ompHostUsage?.get(id);
-      if (usage) usage.pulledAt = 0;
+      const pulls = globalThis.__ompHostUsagePulls?.get(id);
+      if (pulls) pulls.pulledAt = 0;
     });
   }
-  let usage = globalThis.__ompHostUsage.get(hostId);
-  if (!usage) {
-    usage = { pulling: null, pulledAt: 0, syncedAt: null, state: "stale" };
-    globalThis.__ompHostUsage.set(hostId, usage);
+  let pulls = globalThis.__ompHostUsagePulls.get(hostId);
+  if (!pulls) {
+    pulls = { running: null, pulledAt: 0, outcome: "stale" };
+    globalThis.__ompHostUsagePulls.set(hostId, pulls);
   }
-  return usage;
-}
-
-function opValue<T>(result: OpResult<T>): T {
-  if (!result.ok) throw new HostOpError(result.status, result.code, result.error);
-  return result.value;
+  return pulls;
 }
 
 /** Take the next `readUsageRecords` batch off the front of `queue`; a session with too many paths is split. */
@@ -69,82 +64,82 @@ function nextBatch(queue: UsageReadRequest[]): UsageReadRequest[] {
   return batch;
 }
 
-/** Bring `db`'s copy of `host`'s usage up to date: read what is new or changed, drop what the host no longer lists. */
+/** Bring `db`'s copy of `host`'s usage up to date: read what is new or changed, drop what the host no longer has.
+ * `refresh` reads every transcript again, so the host's current prices apply to all of them. */
 async function syncHostUsage(host: Host, db: Database, refresh: boolean): Promise<void> {
-  const index = opValue(await host.sessionOps.listUsageTranscripts(refresh));
-  const stored = hostUsageStamps(db, host.id);
-  const listed = new Set<string>();
+  const index = await host.sessionOps.listUsageTranscripts(refresh);
+  if (!index.ok) throw new HostOpError(index.status, index.code, index.error);
+  const { parserVersion, sessions } = index.value;
+  const unlisted = storedStamps(db, host.id);
   const queue: UsageReadRequest[] = [];
-  for (const { session, transcripts } of index.sessions) {
+  for (const { session, transcripts } of sessions) {
     const paths: string[] = [];
-    for (const { path, mtimeMs, size } of transcripts) {
-      listed.add(path);
-      const known = stored.get(path);
-      if (!known || known.mtimeMs !== mtimeMs || known.size !== size || known.parserVersion !== index.parserVersion) paths.push(path);
+    for (const stamp of transcripts) {
+      const upToDate = isUpToDate(unlisted.get(stamp.path), stamp, parserVersion);
+      unlisted.delete(stamp.path);
+      if (refresh || !upToDate) paths.push(stamp.path);
     }
     if (paths.length > 0) queue.push({ session, paths });
   }
-  const removed = [...stored.keys()].filter((path) => !listed.has(path));
-  if (removed.length > 0) storeHostUsage(db, host.id, index.parserVersion, [], removed);
+  // The index is the host's whole inventory (it fails otherwise), so a stored transcript it leaves out is gone.
+  if (unlisted.size > 0) storeHostUsage(db, host.id, parserVersion, [], [...unlisted.keys()]);
 
   while (queue.length > 0) {
     const batch = nextBatch(queue);
-    const page = opValue(await host.sessionOps.readUsageRecords(batch));
-    if (page.files.length === 0 && page.missing.length === 0) {
+    const page = await host.sessionOps.readUsageRecords(batch);
+    if (!page.ok) throw new HostOpError(page.status, page.code, page.error);
+    // Only an answer about a path that was asked for counts: `delete` is true once for each.
+    const open = new Set(batch.flatMap((request) => request.paths));
+    const files = page.value.files.filter((file) => open.delete(file.path));
+    const missing = page.value.missing.filter((path) => open.delete(path));
+    // A host that settles none of a batch would be asked for it for ever.
+    if (files.length === 0 && missing.length === 0) {
       throw new HostOpError(502, "host_bad_result", `${host.label} read none of the usage transcripts it was asked for`);
     }
-    storeHostUsage(db, host.id, index.parserVersion, page.files, page.missing);
-    // Only paths of this batch it did not answer: every page shrinks the queue, whatever the host sends.
-    const asked = new Set(batch.flatMap((request) => request.paths));
-    for (const path of [...page.files.map((file) => file.path), ...page.missing]) asked.delete(path);
-    const unread = page.unread
-      .map((request) => ({ session: request.session, paths: request.paths.filter((path) => asked.delete(path)) }))
+    storeHostUsage(db, host.id, parserVersion, files, missing);
+    const rest = batch
+      .map(({ session, paths }) => ({ session, paths: paths.filter((path) => open.has(path)) }))
       .filter((request) => request.paths.length > 0);
-    queue.unshift(...unread);
+    queue.unshift(...rest);
   }
+  markHostSynced(db, host.id, Date.now());
 }
 
-/** Pull `hostId`'s usage into `db` unless it was pulled within the TTL (`refresh` pulls anyway). Never rejects; the
- * outcome is the host's sync state, and its stored rows are kept whatever fails. */
-export async function pullHostUsage(hostId: string, db: Database, refresh: boolean): Promise<void> {
-  if (hostId === LOCAL_HOST_ID) return;
-  const usage = hostUsage(hostId);
-  while (usage.pulling) await usage.pulling;
-  if (!refresh && Date.now() - usage.pulledAt < usageSyncTimings.ttlMs) return;
-  const host = getHost(hostId);
-  if (!host) return;
-  const status = host.status();
-  if (status === "needs-upgrade") {
-    usage.state = "unsupported";
-    return;
-  }
-  if (!isLinkUp(status)) {
-    usage.state = "offline";
-    return;
-  }
-  const pull = syncHostUsage(host, db, refresh).then(() => {
-    usage.state = "current";
-    usage.syncedAt = usage.pulledAt = Date.now();
+/** Pull `host`'s usage into `db` unless it was pulled within the TTL (`refresh` pulls anyway). Never rejects: a
+ * failed pull keeps the stored rows and shows in the host's sync state. */
+async function pullHostUsage(host: Host, db: Database, refresh: boolean): Promise<void> {
+  const pulls = pullsOf(host.id);
+  while (pulls.running) await pulls.running;
+  if (!isLinkUp(host.status())) return;
+  if (!refresh && Date.now() - pulls.pulledAt < usageSyncTimings.ttlMs) return;
+  pulls.running = syncHostUsage(host, db, refresh).then(() => {
+    pulls.outcome = "current";
+    pulls.pulledAt = Date.now();
   }, (error: unknown) => {
-    if (host.status() === "needs-upgrade" || (error instanceof HostOpError && error.status === 501)) {
-      usage.state = "unsupported";
-    } else if (error instanceof HostOpError && error.status === 503) {
-      usage.state = "offline";
-    } else {
-      usage.state = "stale";
+    const status = error instanceof HostOpError ? error.status : 0;
+    // 501: a daemon from before the usage ops. 503: the socket is gone, which the link's status only shows later.
+    pulls.outcome = status === 501 ? "unsupported" : status === 503 ? "offline" : "stale";
+    pulls.pulledAt = 0;
+    if (pulls.outcome === "stale") {
       console.warn(`[omp-web] could not sync usage from host ${host.label}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }).finally(() => {
-    usage.pulling = null;
+    pulls.running = null;
   });
-  usage.pulling = pull;
-  await pull;
+  await pulls.running;
+}
+
+/** The link's status as it is now comes first: a pull that succeeded says nothing about a host that has since dropped. */
+function syncState(host: Host, pulls: HostPulls): HostUsageSyncState {
+  const status = host.status();
+  if (status === "needs-upgrade") return "unsupported";
+  if (!isLinkUp(status)) return "offline";
+  return pulls.running ? "syncing" : pulls.outcome;
 }
 
 /** Pull every linked host's usage, waiting at most `usageSyncTimings.waitMs` (slower pulls finish in the background),
- * and drop the rows of hosts no longer registered. Returns this machine, then the linked hosts by label. */
+ * and drop what is stored for hosts no longer registered. Returns the linked hosts by label. */
 export async function pullAllHostUsage(db: Database, refresh: boolean): Promise<HostUsageStatus[]> {
-  const hosts = listHosts().sort((a, b) => a.label.toLowerCase().localeCompare(b.label.toLowerCase()) || a.id.localeCompare(b.id));
   let registered: string[] | null = null;
   try {
     registered = readHosts().map((host) => host.id);
@@ -153,22 +148,25 @@ export async function pullAllHostUsage(db: Database, refresh: boolean): Promise<
   }
   if (registered) {
     pruneHostUsage(db, registered);
-    for (const hostId of globalThis.__ompHostUsage?.keys() ?? []) {
-      if (!registered.includes(hostId)) globalThis.__ompHostUsage!.delete(hostId);
+    for (const hostId of globalThis.__ompHostUsagePulls?.keys() ?? []) {
+      if (!registered.includes(hostId)) globalThis.__ompHostUsagePulls!.delete(hostId);
     }
   }
 
+  const hosts = listHosts()
+    .sort((a, b) => a.label.toLowerCase().localeCompare(b.label.toLowerCase()) || a.id.localeCompare(b.id))
+    .flatMap((row) => getHost(row.id) ?? []);
   const waited = Promise.withResolvers<void>();
   const timer = setTimeout(waited.resolve, usageSyncTimings.waitMs);
   timer.unref();
-  await Promise.race([Promise.all(hosts.map((host) => pullHostUsage(host.id, db, refresh))), waited.promise]);
+  await Promise.race([Promise.all(hosts.map((host) => pullHostUsage(host, db, refresh))), waited.promise]);
   clearTimeout(timer);
 
-  return [
-    { hostId: LOCAL_HOST_ID, label: customLocalLabel(), state: "current", syncedAt: null },
-    ...hosts.map((host): HostUsageStatus => {
-      const usage = hostUsage(host.id);
-      return { hostId: host.id, label: host.label, state: usage.pulling ? "syncing" : usage.state, syncedAt: usage.syncedAt };
-    }),
-  ];
+  const syncedAt = hostSyncTimes(db);
+  return hosts.map((host) => ({
+    hostId: host.id,
+    label: host.label,
+    state: syncState(host, pullsOf(host.id)),
+    syncedAt: syncedAt.get(host.id) ?? null,
+  }));
 }

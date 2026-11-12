@@ -1179,7 +1179,7 @@ export async function listSessionFiles(sessionsRoot: string): Promise<string[]> 
  * caches: skipped directories or unreadable/unidentifiable headers cannot prove a session absent on this machine. */
 export function listSessionIdsForRestore(sessionsRoot = getSessionsDir()): string[] {
   const ids: string[] = [];
-  for (const file of collectSessionFiles(sessionsRoot, true)) {
+  for (const file of collectSessionFiles(sessionsRoot, "restore")) {
     const header = readSessionHeaderSync(file, true);
     if (!header || typeof header.id !== "string" || !header.id) throw new Error(`Cannot identify active session at ${file}`);
     ids.push(header.id);
@@ -1187,7 +1187,21 @@ export function listSessionIdsForRestore(sessionsRoot = getSessionsDir()): strin
   return ids;
 }
 
-function collectSessionFiles(sessionsRoot: string, strict = false): string[] {
+/** Every session file, uncached. Unlike `listSessionFiles`, a directory that exists but cannot be read throws, so a
+ * session the inventory omits is gone. */
+export function inventorySessionFiles(sessionsRoot: string): string[] {
+  return collectSessionFiles(sessionsRoot, "complete");
+}
+
+function isGone(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/** `complete` throws for a directory that exists but cannot be read. `restore` is the restore preflight: symlinks and
+ * directories that vanish during the walk throw too. */
+function collectSessionFiles(sessionsRoot: string, mode: "lenient" | "complete" | "restore" = "lenient"): string[] {
+  const strict = mode === "restore";
   const files: string[] = [];
   let projects: Dirent[];
   let observedRoot = false;
@@ -1201,6 +1215,7 @@ function collectSessionFiles(sessionsRoot: string, strict = false): string[] {
   } catch (error) {
     // Only a root absent from the outset is an empty inventory. Once observed, disappearance is uncertainty.
     if (strict && (observedRoot || !(error && typeof error === "object" && "code" in error && error.code === "ENOENT"))) throw error;
+    if (mode === "complete" && !isGone(error)) throw error;
     return [];
   }
   for (const dirent of projects) {
@@ -1213,7 +1228,7 @@ function collectSessionFiles(sessionsRoot: string, strict = false): string[] {
       inner = readDirectorySyncRuntime(dirPath, { withFileTypes: true });
     } catch (error) {
       // This project was enumerated: even ENOENT may mean it was renamed with active sessions inside. Never skip it in preflight.
-      if (strict) throw error;
+      if (strict || (mode === "complete" && !isGone(error))) throw error;
       continue;
     }
     for (const file of inner) {
@@ -1435,9 +1450,10 @@ export function deleteSessionFileWithArtifacts(filePath: string): void {
  * The top-level `local/` folder is skipped: it is the agent's `local://`
  * scratch space, which omp never writes transcripts to and which can hold
  * arbitrary trees (cloned repos, dependencies). Returns [] without an
- * artifacts directory.
+ * artifacts directory. With `complete`, a directory that exists but cannot be
+ * read throws instead of being left out.
  */
-export function listSessionArtifactTranscripts(sessionFile: string): string[] {
+export function listSessionArtifactTranscripts(sessionFile: string, complete = false): string[] {
   if (!sessionFile.endsWith(".jsonl")) return [];
   const root = sessionFile.slice(0, -".jsonl".length);
   const transcripts: string[] = [];
@@ -1446,7 +1462,8 @@ export function listSessionArtifactTranscripts(sessionFile: string): string[] {
     let entries: Dirent[];
     try {
       entries = readDirectorySyncRuntime(dir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      if (complete && !isGone(error)) throw error;
       continue;
     }
     for (const entry of entries) {

@@ -12,15 +12,29 @@ const project = (hostId, hostLabel, name) => ({
   hostId, hostLabel, project: `/work/${name}`, projectName: name, cost: 1, tokens: 1000, share: 50, sessionsCount: 1,
 });
 
-function fakeUsage(t, report) {
+/** Answer `/api/usage` with `reports` in turn, the last one from then on. Returns the URLs asked for. */
+function fakeUsage(t, ...reports) {
+  const requests = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     if (!String(url).startsWith("/api/usage")) return Response.json({});
-    return Response.json(report);
+    requests.push(String(url));
+    return Response.json(reports[Math.min(requests.length, reports.length) - 1]);
   };
   t.after(() => {
     cleanup();
     globalThis.fetch = originalFetch;
+  });
+  return requests;
+}
+
+/** Fake `setTimeout`. The returned function advances it by `ms`, then lets pending fetches answer and React render. */
+function mockTimers(t) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => t.mock.timers.reset());
+  return (ms = 0) => act(async () => {
+    t.mock.timers.tick(ms);
+    for (let i = 0; i < 30; i++) await Promise.resolve();
   });
 }
 
@@ -85,4 +99,36 @@ test("a report without hostBreakdown shows no HOST toggle", async (t) => {
   await settle();
   assert.ok(within(container).getByRole("button", { name: "PROJECT" }));
   assert.equal(within(container).queryByRole("button", { name: "HOST" }), null);
+});
+
+test("while a host is syncing the report is fetched again, until the host is done", async (t) => {
+  const laptop = (state) => report({ hostBreakdown: [host("local", "", "current", null, 2), host("h1", "laptop", state, null, 1)] });
+  const requests = fakeUsage(t, laptop("syncing"), laptop("syncing"), laptop("current"));
+  const advance = mockTimers(t);
+  const { container } = render(createElement(UsageConfig));
+  await advance();
+  fireEvent.click(within(container).getByRole("button", { name: "HOST" }));
+  const laptopRow = () => container.querySelectorAll("tbody tr")[1].cells[0].textContent;
+  assert.deepEqual([requests.length, laptopRow()], [1, "laptopSyncing…"]);
+
+  await advance(1999);
+  assert.equal(requests.length, 1);
+  await advance(1);
+  assert.deepEqual([requests.length, laptopRow()], [2, "laptopSyncing…"]);
+  await advance(2000);
+  assert.deepEqual([requests.length, laptopRow()], [3, "laptop"]);
+  assert.ok(requests.every((url) => !url.includes("refresh")), "polling never forces a refresh");
+
+  await advance(60_000);
+  assert.equal(requests.length, 3, "nothing is syncing any more");
+});
+
+test("leaving the page stops fetching for a host that is still syncing", async (t) => {
+  const requests = fakeUsage(t, report({ hostBreakdown: [host("local", "", "current", null, 2), host("h1", "laptop", "syncing", null, 1)] }));
+  const advance = mockTimers(t);
+  const { unmount } = render(createElement(UsageConfig));
+  await advance();
+  unmount();
+  await advance(60_000);
+  assert.equal(requests.length, 1);
 });
