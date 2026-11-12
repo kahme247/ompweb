@@ -2,6 +2,7 @@
 
 import { memo, useCallback, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
+import { LOCAL_HOST_ID } from "@/lib/project-ordering";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
 import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pencil, Pin, Plus } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
@@ -126,6 +127,8 @@ interface ProjectRowProps {
   onOpenSearchMatch?: (session: SessionInfo, target: SearchMatchTarget) => void;
   /** A pinned project of a cluster member: its node's name, status text and, while its link is down, why it cannot be used. */
   node?: { label: string; statusText?: string | null; unavailableReason?: string | null };
+  /** A cluster project with several members: each session row names its host (host id → label). */
+  sessionHosts?: ReadonlyMap<string, string>;
 }
 
 /** One project in the sidebar: a card row matching the session items' visual
@@ -162,6 +165,7 @@ function ProjectRow({
   searchQuery,
   onOpenSearchMatch,
   node,
+  sessionHosts,
 }: ProjectRowProps) {
   const { t } = useI18n();
   // The title is invisible to keyboards and screen readers: say the reason in text too.
@@ -492,6 +496,7 @@ function ProjectRow({
                   searchQuery={searchQuery}
                   onOpenSearchMatch={onOpenSearchMatch}
                   depth={0}
+                  sessionHosts={sessionHosts}
                 />
               ))}
               {hiddenCount > 0 && (
@@ -545,6 +550,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   searchQuery,
   onOpenSearchMatch,
   depth,
+  sessionHosts,
 }: {
   node: SessionTreeNode;
   selectedSessionId: string | null;
@@ -559,6 +565,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   searchQuery?: string;
   onOpenSearchMatch?: (session: SessionInfo, target: SearchMatchTarget) => void;
   depth: number;
+  sessionHosts?: ReadonlyMap<string, string>;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [matchesOpen, setMatchesOpen] = useState(false);
@@ -623,6 +630,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
           onToggleCollapse={handleToggleCollapse}
           matchesExpanded={matchesOpen}
           onToggleMatches={searchQuery && onOpenSearchMatch ? handleToggleMatches : undefined}
+          hostLabel={sessionHosts?.get(node.session.hostId ?? LOCAL_HOST_ID)}
         />
       </div>
       {matchesOpen && searchQuery && onOpenSearchMatch && (
@@ -646,6 +654,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
               searchQuery={searchQuery}
               onOpenSearchMatch={onOpenSearchMatch}
               depth={depth + 1}
+              sessionHosts={sessionHosts}
             />
           ))}
         </div>
@@ -673,7 +682,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
     if (prev.unreadSessionIds.has(id) !== next.unreadSessionIds.has(id)) return false;
   }
   if (prev.exitedSessions !== next.exitedSessions) return false;
-  if (prev.relativeTimeNow !== next.relativeTimeNow) return false;
+  if (prev.relativeTimeNow !== next.relativeTimeNow || prev.sessionHosts !== next.sessionHosts) return false;
   if (prev.onSelectSession !== next.onSelectSession
     || prev.onRenamed !== next.onRenamed
     || prev.onSessionDeleted !== next.onSessionDeleted
@@ -698,6 +707,7 @@ const SessionItem = memo(function SessionItem({
   onToggleCollapse,
   matchesExpanded = false,
   onToggleMatches,
+  hostLabel,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -716,6 +726,8 @@ const SessionItem = memo(function SessionItem({
   /** Present while a search is active: shows the session's hits below the row. */
   matchesExpanded?: boolean;
   onToggleMatches?: () => void;
+  /** The session's host, in a cluster project with several members. */
+  hostLabel?: string;
 }) {
   const { t, locale } = useI18n();
   const exitTitle = exited ? formatExitedSessionNotice(exited) : "";
@@ -889,6 +901,7 @@ const SessionItem = memo(function SessionItem({
             )}
           </button>
           {session.worktreeBranch && <span title={t("sessionSidebar.worktreeTitle", { path: session.cwd })} style={{ display: "flex", alignItems: "center", gap: 3, maxWidth: 56, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 10, flexShrink: 1 }}><GitBranch size={10} strokeWidth={2.4} aria-hidden="true" /><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span></span>}
+          {hostLabel && <span className="session-item-host" title={t("hosts.onNode", { node: hostLabel })} style={{ maxWidth: 56, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: isSelected ? "var(--accent)" : "var(--text-dim)", fontSize: 10, flexShrink: 1 }}><span className="sr-only">{t("hosts.onNode", { node: hostLabel })}</span><span aria-hidden="true">{hostLabel}</span></span>}
           {hasChildren && <button className="session-item-icon-button" onClick={(event) => { event.stopPropagation(); onToggleCollapse?.(); }} title={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-label={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-expanded={!collapsed} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, padding: 0, flexShrink: 0, border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}><ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" /></button>}
           <div style={{ display: "flex", alignItems: "center", gap: SIDEBAR_STATUS_GAP, flexShrink: 0 }}>
             {(isRunning || exited || isRecentlyCompleted || isUnread) && (

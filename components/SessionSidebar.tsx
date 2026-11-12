@@ -182,6 +182,12 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     if (!row || isLinkUp(row.status)) return null;
     return t("hosts.unavailableReason", { host: hostName(t, row), status: hostStatusText(t, row) });
   }, [hosts, t]);
+  // A cluster project's sessions run on any member: with two or more, each session row names its host.
+  const clusterHostLabels = useMemo(() => {
+    const members = pools[0]?.members ?? [];
+    if (members.length < 2) return undefined;
+    return new Map(members.map(({ hostId }) => [hostId, hostName(t, hosts?.find((host) => host.id === hostId) ?? { id: hostId, label: hostId })]));
+  }, [pools, hosts, t]);
   // Managed + session-discovered projects (server-merged, hidden excluded).
   const [projects, setProjects] = useState<ManagedProject[]>([]);
   const selectedPoolProject = projects.find((project) => project.poolId && projectIdentity(project) === selectedPoolKey);
@@ -1817,6 +1823,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                   key={projectKey}
                   project={project}
                   node={node ? { label: hostName(t, node), statusText: unavailable ? hostStatusText(t, node) : null, unavailableReason: unavailable } : undefined}
+                  sessionHosts={project.poolId && project.poolId === pools[0]?.id ? clusterHostLabels : undefined}
                   isActive={isActive}
                   activity={projectActivity.get(foldedHostProjectKey(project.hostId, workspaceKeyOf(project)))}
                   tree={tree}

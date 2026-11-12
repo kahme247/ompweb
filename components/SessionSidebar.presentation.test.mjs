@@ -174,6 +174,57 @@ test("the sidebar orders a cluster's pool projects and its members' projects as 
   }
 });
 
+test("a cluster project lists its sessions from every member, each naming its host, and filters them as one list", async () => {
+  const original = { fetch: globalThis.fetch, Worker: globalThis.Worker, SharedWorker: globalThis.SharedWorker, matchMedia: window.matchMedia };
+  globalThis.Worker = FakeWorker;
+  globalThis.SharedWorker = undefined;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  const hostRows = [{ id: "local", label: "", status: "online" }, { id: "h1", label: "Build box", status: "online" }];
+  const pools = [{ id: "cluster", label: "Cluster", enabled: true, members: [{ hostId: "local" }, { hostId: "h1" }], projects: [] }];
+  const key = "pool:cluster:x";
+  const at = (id, hostId, firstMessage, modified) => ({ path: `/s/${id}.jsonl`, id, cwd: "/w/x", projectRoot: "/w/x", projectKey: key, poolId: "cluster", projectId: "x", hostId, created: modified, modified, messageCount: 1, firstMessage });
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/hosts") return Response.json({ hosts: hostRows, pools });
+    if (url.pathname === "/api/projects") {
+      return Response.json({ projects: [
+        { path: key, poolId: "cluster", projectId: "x", projectKey: key, hostId: "local", name: "shared", origin: "git@example.com:o/shared.git" },
+        { path: "/notes", hostId: "h1", name: "notes" },
+      ] });
+    }
+    if (url.pathname === "/api/sessions") {
+      return Response.json({ sessions: [at("a1", "local", "fix the parser", "2026-01-01T00:00:00.000Z"), at("b2", "h1", "write the docs", "2026-01-02T00:00:00.000Z")] });
+    }
+    if (url.pathname === "/api/sessions/search") return new Response("");
+    return Response.json({});
+  };
+  try {
+    const { container } = render(React.createElement(SessionSidebar, {
+      selectedSessionId: null, skipInitialProjectSelection: true,
+      onSelectSession() {}, addProjectOpen: false, setAddProjectOpen() {}, usageVisible: false,
+    }));
+    await waitFor(() => assert.equal(container.querySelectorAll(".sidebar-project-identity").length, 2));
+    // The cluster project names no host; the member's plain folder does.
+    assert.equal(screen.queryByRole("button", { name: /^shared.*On / }), null);
+    assert.ok(screen.getByRole("button", { name: /notes.*On Build box/ }));
+    fireEvent.click(screen.getByRole("button", { name: translate("projects.expandProject", { name: "shared" }) }));
+    await waitFor(() => assert.equal(container.querySelectorAll(".session-item-host").length, 2));
+    const hosts = [...container.querySelectorAll(".session-item-row")].map((row) => [row.querySelector(".session-item-button").textContent, row.querySelector(".session-item-host")?.title]);
+    // Newest first, whichever member holds it.
+    assert.deepEqual(hosts, [["write the docs", translate("hosts.onNode", { node: "Build box" })], ["fix the parser", translate("hosts.onNode", { node: translate("hostsConfig.thisMachine") })]]);
+    // Search runs over the merged list: one member's session matches, the project stays with just that one.
+    fireEvent.click(screen.getByRole("button", { name: translate("sessionSidebar.search") }));
+    fireEvent.change(screen.getByRole("textbox", { name: translate("sessionSidebar.search") }), { target: { value: "parser" } });
+    await waitFor(() => assert.deepEqual([...container.querySelectorAll(".session-item-button")].map((button) => button.textContent), ["fix the parser"]));
+  } finally {
+    cleanup();
+    globalThis.fetch = original.fetch;
+    globalThis.Worker = original.Worker;
+    globalThis.SharedWorker = original.SharedWorker;
+    window.matchMedia = original.matchMedia;
+  }
+});
+
 test("the sidebar refetches its projects and sessions when the loaded pools change, not on their first load or an unchanged frame", async () => {
   const original = { fetch: globalThis.fetch, Worker: globalThis.Worker, SharedWorker: globalThis.SharedWorker, matchMedia: window.matchMedia };
   globalThis.Worker = FakeWorker;
