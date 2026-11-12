@@ -37,6 +37,8 @@ export interface TestHost {
 	/** Resolve with the first frame (already received or future) that matches. */
 	waitFor(match: (frame: Frame) => boolean, timeoutMs?: number): Promise<Frame>;
 	close(): void;
+	/** End omp's connection but keep listening, as a restarted host would. */
+	drop(): void;
 }
 
 /**
@@ -113,6 +115,9 @@ export async function startHost(): Promise<TestHost> {
 			server.stop(true);
 			fs.rmSync(dir, { recursive: true, force: true });
 		},
+		drop() {
+			client?.end();
+		},
 	};
 }
 
@@ -172,7 +177,7 @@ export interface TestSession {
  * mock model (`mock/mock-model`) that replies with `responses` in order.
  */
 export async function createTestSession(
-	options: { responses?: MockResponse[]; toolNames?: string[] } = {},
+	options: { responses?: MockResponse[]; toolNames?: string[]; ui?: Partial<ExtensionUIContext> } = {},
 ): Promise<TestSession> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ompweb-runner-session-"));
 	const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
@@ -202,7 +207,7 @@ export async function createTestSession(
 		hasUI: true,
 		toolNames: options.toolNames ?? [],
 	});
-	result.setToolUIContext(silentUi(), true);
+	result.setToolUIContext({ ...silentUi(), ...options.ui }, true);
 	result.session.agent.streamFn = mock.stream;
 	return {
 		session: result.session,

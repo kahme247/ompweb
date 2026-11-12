@@ -16,6 +16,8 @@ export async function createHostedAgentSession(options: CreateAgentSessionOption
 	// opens it on the default model, or none, so a logged-out user can still open old sessions and log in from them.
 	if (isHeadless()) return createAgentSession({ ...options, allowSessionModelFallback: true });
 	const result = await createAgentSession(options);
+	// Only the TUI is a session the web may drive; `-p`, json and acp runs leave `hasUI` unset (rpc modes never reach here).
+	if (!options.hasUI) return result;
 	const channel = await HostChannel.connect(result.session, result.subagentEventBus);
 	return {
 		...result,

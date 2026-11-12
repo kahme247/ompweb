@@ -6,6 +6,7 @@ import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import type { DaemonLink } from "./daemon-link";
 import { CONFIG_VERSION_RE, CREATION_ID_RE, HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
+import { CHANNEL_PROTO } from "./omp-socket";
 import { idOf, parseWire, PendingRequests, wireEvent, type WireFrame } from "./pending-requests";
 import { StreamSnapshot } from "./stream-snapshot";
 import { ChannelLifecycle } from "./channel-lifecycle";
@@ -13,11 +14,12 @@ import { SharedRequests } from "./shared-requests";
 import { RESUME_PROMPT, type HostResumeEntry } from "./host-resume";
 
 type Output = Unsequenced<Extract<UpMessage, { type: "stdout" | "stderr" | "exit" }>>;
-/** `reply`: a response to this member's own command, which a reopen's snapshot never supersedes. */
-type Member = { link: DaemonLink; paused: boolean; opens: number; queued: { body: Output; reply: boolean }[]; bytes: number; resync: boolean };
+/** `reply`: a response to this member's own command, which a reopen's snapshot never supersedes. `gap`: output to it was
+ * dropped (overflow) since its last snapshot, so its next open needs one. */
+type Member = { link: DaemonLink; paused: boolean; opens: number; queued: { body: Output; reply: boolean }[]; bytes: number; resync: boolean; gap: boolean };
 type Channel = {
   ch: string; transport: RpcTransport; launch: SpawnRequest; cwd: string; fellBack: boolean; launchAdvisor: boolean;
-  legacy: string | null; pending: PendingRequests; snapshot: StreamSnapshot; lifecycle?: ChannelLifecycle; shared?: SharedRequests;
+  pending: PendingRequests; snapshot: StreamSnapshot; lifecycle?: ChannelLifecycle; shared?: SharedRequests;
   members: Map<string, Member>; aliases: Set<string>; files: Set<string>;
   /** Daemon cmd id -> the link that sent it (null once it left) and that link's own id: links number their commands alike. */
   commands: Map<number, { link: DaemonLink | null; id: unknown; op: string }>;
@@ -35,8 +37,6 @@ type Channel = {
   stopReason?: string;
   /** omp accepted the resume prompt but has not started (or ended) that run yet: still recorded as running. */
   resuming?: boolean;
-  /** ompweb's own omp build supports bash exclude-from-context; kept for the open result's shape. */
-  supportsBashExcludeFromContext: boolean;
 };
 type ChannelDeps = {
   spawn(launch: SpawnRequest): Promise<SpawnResult>;
@@ -48,8 +48,6 @@ type ChannelDeps = {
   sessionsChanged?(): void;
   channelsChanged?(ch: string): void;
 };
-/** runner/src/channel.ts CHANNEL_PROTO. */
-const CHANNEL_PROTO = 1;
 const collision = () => new HostOpError(409, "session_running_elsewhere", "This session is already running on another link");
 const invalid = (message = "Invalid channel request") => new HostOpError(400, "invalid_request", message);
 /** A process start's launch, from what its opener asked: the wire never names the credentials server (it is the opening
@@ -68,7 +66,6 @@ export class ChannelTable {
   private readonly pendingSpawns = new Set<Promise<Channel>>();
   /** Kept after exit: a late retry must never create a replacement child. */
   private readonly creations = new Map<string, { fingerprint: string; spawn: Promise<Channel> }>();
-  private readonly reservedChannels = new Set<string>();
   private readonly mutating = new Map<string, Promise<void>>();
   private readonly goneLinks = new Set<string>();
   /** Exited channels whose open result is still queued for a paused member. */
@@ -98,7 +95,6 @@ export class ChannelTable {
 
   async open(link: DaemonLink, args: OpenChannelRequest): Promise<OpenChannelResult> {
     if (this.goneLinks.has(link.id)) throw new HostOpError(503, "host_link_closed", "The host link closed during open");
-    if (link.version < 7) throw invalid("open requires link protocol v7");
     if (!isRecord(args) || !(args.sessionId === null || typeof args.sessionId === "string" && isValidSessionId(args.sessionId)) || !isRecord(args.launch)
       || (args.replaceAdvisor !== undefined && typeof args.replaceAdvisor !== "boolean") || (args.preparing !== undefined && typeof args.preparing !== "boolean")
       || (args.expectedChannel !== undefined && (typeof args.expectedChannel !== "string" || !args.expectedChannel || args.replaceAdvisor === true))) throw invalid();
@@ -106,7 +102,7 @@ export class ChannelTable {
     if (args.expectedChannel !== undefined) {
       const advertised = this.channels.get(args.expectedChannel);
       const ownsCreation = typeof args.launch.creationId === "string" && advertised?.launch.creationId === args.launch.creationId;
-      if (!advertised || advertised.exited || advertised.replacing || advertised.legacy !== null
+      if (!advertised || advertised.exited || advertised.replacing
         || (!ownsCreation && (args.sessionId === null || !advertised.aliases.has(args.sessionId)))) {
         throw new HostOpError(404, "session_not_running", "The advertised session channel is no longer running");
       }
@@ -117,7 +113,7 @@ export class ChannelTable {
       }
       channel = advertised;
     } else {
-      channel = await this.ensure(args.sessionId, forStart(args.launch, link, args.launch), null, undefined, args.preparing ? link.id : undefined);
+      channel = await this.ensure(args.sessionId, forStart(args.launch, link, args.launch), args.preparing ? link.id : undefined);
     }
     if (this.goneLinks.has(link.id)) {
       channel.lifecycle?.linkGone(link.id);
@@ -138,9 +134,9 @@ export class ChannelTable {
     }
     const joined = channel.opened;
     channel.opened = true;
-    this.join(channel, link);
+    const continuous = this.join(channel, link);
     if (args.preparing) channel.lifecycle?.setPreparing(link.id, true);
-    return this.snapshot(channel, link, joined);
+    return this.snapshot(channel, link, joined, continuous);
   }
 
   /** Keep every alias/file fenced until the new child has its startup and source preparation lease. */
@@ -163,7 +159,7 @@ export class ChannelTable {
       // A new process: the opener's flags decide its credentials and configuration, as for any start (spec C6, K4).
       const launch = this.deps.prepareLaunch(forStart({ ...channel.launch, advisor: args.launch.advisor,
         ...(args.launch.spawnModel ? { spawnModel: args.launch.spawnModel } : {}) }, link, args.launch));
-      const spawning = this.create(launch, channel.pending.sessionId, null, undefined, args.preparing ? link.id : undefined);
+      const spawning = this.create(launch, channel.pending.sessionId, args.preparing ? link.id : undefined);
       this.pendingSpawns.add(spawning);
       try {
         const replacement = await spawning;
@@ -183,36 +179,17 @@ export class ChannelTable {
     const pending = channel.shared?.pending(link.id) ?? channel.pending.lines();
     return pending && pending.reduce((sum, line) => sum + Buffer.byteLength(line), 0) <= LINK_LIMITS.pendingBytes ? pending : null;
   }
-  private snapshot(channel: Channel, link: DaemonLink, joined: boolean): OpenChannelResult {
+  /** `continuous`: the link already holds every output line in order (a server restart on the same link). */
+  private snapshot(channel: Channel, link: DaemonLink, joined: boolean, continuous: boolean): OpenChannelResult {
     return { ch: channel.ch, joined, pending: this.pendingFor(channel, link), streaming: channel.snapshot.whole(), cwd: channel.cwd,
-      fellBack: channel.fellBack, launchAdvisor: channel.launchAdvisor, advisorSpawned: channel.launch.advisor || channel.launchAdvisor, autoApproveExtension: this.deps.autoApproveExtension?.() ?? false, supportsBashExcludeFromContext: channel.supportsBashExcludeFromContext };
+      fellBack: channel.fellBack, launchAdvisor: channel.launchAdvisor, advisorSpawned: channel.launch.advisor || channel.launchAdvisor, autoApproveExtension: this.deps.autoApproveExtension?.() ?? false,
+      ...(continuous ? { continuous: true } : {}) };
   }
 
-  async spawnLegacy(link: DaemonLink, args: SpawnRequest & { ch: string }): Promise<Omit<OpenChannelResult, "ch" | "joined" | "pending" | "streaming" | "advisorSpawned">> {
-    if (this.goneLinks.has(link.id)) throw new HostOpError(503, "host_link_closed", "The host link is closed");
-    if (typeof args.ch !== "string" || !args.ch
-      || ((this.channels.has(args.ch) || this.reservedChannels.has(args.ch))
-        && (typeof args.creationId !== "string" || !this.creations.has(args.creationId)))) throw invalid("Invalid channel id");
-    this.reservedChannels.add(args.ch);
-    let channel: Channel;
-    const launch = { ...args };
-    delete launch.shareCredentials; delete launch.credentialsServer; delete launch.configVersion;
-    try { channel = await this.ensure(null, launch, link.id, args.ch); }
-    finally { this.reservedChannels.delete(args.ch); }
-    if (this.goneLinks.has(link.id)) {
-      this.stopChannel(channel);
-      throw new HostOpError(503, "host_link_closed", "The host link closed during spawn");
-    }
-    if (channel.members.size > 0 && !channel.members.has(link.id)) throw collision();
-    this.join(channel, link);
-    this.release(link, channel.ch);
-    return { cwd: channel.cwd, fellBack: channel.fellBack, launchAdvisor: channel.launchAdvisor, autoApproveExtension: this.deps.autoApproveExtension?.() ?? false };
-  }
-
-  private async ensure(id: string | null, requested: SpawnRequest, legacy: string | null, ch?: string, preparingLinkId?: string): Promise<Channel> {
+  private async ensure(id: string | null, requested: SpawnRequest, preparingLinkId?: string): Promise<Channel> {
     const creationId = requested.creationId;
     if (creationId !== undefined && (typeof creationId !== "string" || !CREATION_ID_RE.test(creationId))) throw invalid("Invalid creation identity");
-    const fingerprint = creationId === undefined ? "" : JSON.stringify([requested.cwd, requested.recordedCwd ?? null, requested.sessionFile, requested.toolNames ?? null, requested.advisor, requested.spawnModel ?? null, legacy === null ? null : ch]);
+    const fingerprint = creationId === undefined ? "" : JSON.stringify([requested.cwd, requested.recordedCwd ?? null, requested.sessionFile, requested.toolNames ?? null, requested.advisor, requested.spawnModel ?? null]);
     const creation = creationId === undefined ? undefined : this.creations.get(creationId);
     if (creation) {
       if (creation.fingerprint !== fingerprint) throw new HostOpError(409, "creation_conflict", "Creation identity belongs to another request");
@@ -224,22 +201,20 @@ export class ChannelTable {
     const file = launch.sessionFile;
     const identity = id ?? this.identity(launch);
     const mutation = (identity === null ? undefined : this.mutating.get(identity)) ?? this.mutating.get(file);
-    if (mutation) { await mutation; return this.ensure(id, requested, legacy, ch, preparingLinkId); }
+    if (mutation) { await mutation; return this.ensure(id, requested, preparingLinkId); }
     const existing = this.find(identity, file);
     if (existing) {
-      if (legacy !== null || existing.legacy !== null) throw collision();
       await existing.startup;
-      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, legacy, ch, preparingLinkId);
-      if (existing.exited) return this.ensure(id, requested, legacy, ch, preparingLinkId);
+      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, preparingLinkId);
+      if (existing.exited) return this.ensure(id, requested, preparingLinkId);
       return existing;
     }
     const key = identity ?? (file || null);
     const pending = key === null ? undefined : this.spawning.get(key);
     if (pending) {
       const channel = await pending;
-      if (legacy !== null || channel.legacy !== null) throw collision();
-      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, legacy, ch, preparingLinkId);
-      if (channel.exited) return this.ensure(id, requested, legacy, ch, preparingLinkId);
+      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, preparingLinkId);
+      if (channel.exited) return this.ensure(id, requested, preparingLinkId);
       return channel;
     }
     if (id !== null && file === "") throw new HostOpError(404, "session_not_running", "The session listed by the host is no longer running");
@@ -247,13 +222,13 @@ export class ChannelTable {
     const headerId = this.identity(launch);
     if (id !== null && headerId === null) throw new HostOpError(404, "session_not_found", "The session launch file no longer exists");
     if (id !== null && headerId !== null && headerId !== id) throw invalid("Session identity does not match its launch file");
-    const spawn = this.create(launch, identity, legacy, ch, preparingLinkId);
+    const spawn = this.create(launch, identity, preparingLinkId);
     if (creationId !== undefined) this.creations.set(creationId, { fingerprint, spawn });
     this.pendingSpawns.add(spawn);
     if (key !== null) this.spawning.set(key, spawn);
     try {
       const channel = await spawn;
-      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, legacy, ch, preparingLinkId);
+      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, preparingLinkId);
       return channel;
     }
     finally {
@@ -262,16 +237,20 @@ export class ChannelTable {
     }
   }
 
-  /** A channel whose omp the daemon did not start (a TUI's runner on the host socket); resolves with its id once hello is read. */
-  async adopt(spawned: SpawnResult, launch: SpawnRequest): Promise<string> {
+  /** A channel whose omp the daemon did not start (a TUI's runner on the host socket); resolves with its id once hello is read.
+   * Refuses (409) a session that already has a channel: two omps must never write one session file. */
+  async adopt(spawned: SpawnResult, launch: SpawnRequest, sessionId?: string): Promise<string> {
     const prepared = this.deps.prepareLaunch(launch);
-    const channel = await this.create(prepared, prepared.sessionFile ? this.identity(prepared) : null, null, undefined, undefined, spawned);
+    const identity = (prepared.sessionFile ? this.identity(prepared) : null) ?? (sessionId && isValidSessionId(sessionId) ? sessionId : null);
+    const key = identity ?? (prepared.sessionFile || null);
+    if (this.find(identity, prepared.sessionFile) || (key !== null && this.spawning.has(key))) throw collision();
+    const channel = await this.create(prepared, identity, undefined, spawned);
     channel.opened = true;
     this.deps.channelsChanged?.(channel.ch);
     return channel.ch;
   }
 
-  private async create(launch: SpawnRequest, identity: string | null, legacy: string | null, requestedCh?: string, preparingLinkId?: string, adopted?: SpawnResult): Promise<Channel> {
+  private async create(launch: SpawnRequest, identity: string | null, preparingLinkId?: string, adopted?: SpawnResult): Promise<Channel> {
     this.spawningCount++;
     try {
       if (this.stopped) { adopted?.transport.killTree(true); throw new HostOpError(503, "host_stopping", "ompweb host is stopping"); }
@@ -279,19 +258,17 @@ export class ChannelTable {
       if (this.stopped) { spawned.transport.killTree(true); throw new HostOpError(503, "host_stopping", "ompweb host is stopping"); }
       const { promise: ready, resolve: noteReady } = Promise.withResolvers<WireFrame | null>();
       const readyTimer = setTimeout(() => noteReady(null), LINK_LIMITS.channelReadyMs); readyTimer.unref?.();
-      const ch = requestedCh ?? randomUUID();
-      const channel: Channel = { ...spawned, ch, launch, legacy, pending: new PendingRequests(LINK_LIMITS.pendingBytes, identity), snapshot: new StreamSnapshot(),
+      const ch = randomUUID();
+      const channel: Channel = { ...spawned, ch, launch, pending: new PendingRequests(LINK_LIMITS.pendingBytes, identity), snapshot: new StreamSnapshot(),
         members: new Map(), aliases: new Set(identity ? [identity] : []), files: new Set(launch.sessionFile ? [launch.sessionFile] : []),
         commands: new Map(), internal: new Map(), ready, noteReady, readyTimer,
-        startup: Promise.resolve(), exited: false, opened: false, fullFallback: false, supportsBashExcludeFromContext: true, adopted: adopted !== undefined };
+        startup: Promise.resolve(), exited: false, opened: false, fullFallback: false, adopted: adopted !== undefined };
       this.channels.set(ch, channel);
-      if (legacy === null) {
-        channel.lifecycle = new ChannelLifecycle({ stop: reason => { if (channel.adopted) return; this.deps.log(`channel ${ch}: stopping (${reason})`); this.stopChannel(channel, reason); }, onRunning: () => this.deps.runningChanged?.() });
-        if (preparingLinkId) channel.lifecycle.setPreparing(preparingLinkId, true);
-        channel.shared = new SharedRequests({ members: () => [...channel.members.keys()], isUp: id => channel.members.get(id)?.link.isUp() ?? false,
-          deliver: (id, lines) => { const member = channel.members.get(id); if (member) for (const line of lines) this.deliver(channel, member, { type: "stdout", ch, line }); },
-          write: (op, args, onReply) => { void this.command(channel, op, args, onReply).catch(error => this.deps.log(`channel ${ch}: ${String(error)}`)); } });
-      }
+      channel.lifecycle = new ChannelLifecycle({ stop: reason => { if (channel.adopted) return; this.deps.log(`channel ${ch}: stopping (${reason})`); this.stopChannel(channel, reason); }, onRunning: () => this.deps.runningChanged?.() });
+      if (preparingLinkId) channel.lifecycle.setPreparing(preparingLinkId, true);
+      channel.shared = new SharedRequests({ members: () => [...channel.members.keys()], isUp: id => channel.members.get(id)?.link.isUp() ?? false,
+        deliver: (id, lines) => { const member = channel.members.get(id); if (member) for (const line of lines) this.deliver(channel, member, { type: "stdout", ch, line }); },
+        write: (op, args, onReply) => { void this.command(channel, op, args, onReply).catch(error => this.deps.log(`channel ${ch}: ${String(error)}`)); } });
       spawned.transport.onLine(line => this.stdout(channel, line));
       // The last 500 bytes omp writes before startup settles, for the daemon's own log if it exits meanwhile; never sent on.
       let startupStderr: Buffer | null = Buffer.alloc(0);
@@ -311,8 +288,7 @@ export class ChannelTable {
         this.broadcast(channel, { type: "exit", ch, code, signal, ...(channel.stopReason ? { reason: channel.stopReason } : {}) }); this.deps.runningChanged?.();
         this.deps.channelsChanged?.(ch);
       });
-      if (legacy === null) channel.startup = this.configure(channel).finally(() => channel.lifecycle?.setStartup(false));
-      else { clearTimeout(readyTimer); noteReady(null); }
+      channel.startup = this.configure(channel).finally(() => channel.lifecycle?.setStartup(false));
       await channel.startup;
       startupStderr = null;
       if (channel.exited) throw new HostOpError(502, "host_process_exited", "omp exited during startup");
@@ -325,11 +301,13 @@ export class ChannelTable {
     const hello = await channel.ready; clearTimeout(channel.readyTimer);
     if (channel.exited) return;
     if (hello?.proto !== CHANNEL_PROTO) {
-      channel.transport.killTree(true);
+      // An attached runner's socket stays open for the host socket's refusal frame, which closes it.
+      if (!channel.adopted) channel.transport.killTree(true);
       throw new HostOpError(502, "host_process_exited", hello ? `omp speaks channel protocol ${String(hello.proto)}, not ${CHANNEL_PROTO}` : "omp did not say hello");
     }
-    await this.command(channel, "set_event_filter", { events: null, messageUpdates: "delta" }).catch(() => {});
-    await this.command(channel, "set_subagent_subscription", { level: "events" }).catch(() => {});
+    // Fire and forget: the runner answers only after its extensions start, which may wait on a human; replies nobody owns are dropped.
+    void this.command(channel, "set_event_filter", { events: null, messageUpdates: "delta" }).catch(() => {});
+    void this.command(channel, "set_subagent_subscription", { level: "events" }).catch(() => {});
   }
 
   private command(channel: Channel, op: string, args: Record<string, unknown>, onReply?: () => void): Promise<WireFrame> {
@@ -359,19 +337,6 @@ export class ChannelTable {
   }
 
   private stdout(channel: Channel, line: string): void {
-    if (channel.legacy !== null) {
-      if (line.includes('"session-persistence"') && wireEvent(parseWire(line) ?? { t: "" })?.type === "notice") channel.sessionMovePending = true;
-      const oldId = channel.pending.sessionId;
-      channel.pending.noteStdout(line);
-      if (channel.pending.sessionId) {
-        if (oldId && oldId !== channel.pending.sessionId) {
-          if (!channel.sessionMovePending) { channel.aliases.clear(); channel.files.clear(); }
-          channel.sessionMovePending = false;
-        }
-        channel.aliases.add(channel.pending.sessionId);
-      }
-      this.broadcast(channel, { type: "stdout", ch: channel.ch, line }); return;
-    }
     const frame = parseWire(line);
     if (!frame) {
       for (const member of channel.members.values()) member.link.queue({ type: "resync", ch: channel.ch }, channel.ch);
@@ -409,6 +374,8 @@ export class ChannelTable {
         if (member) this.deliver(channel, member, { type: "stdout", ch: channel.ch, line: JSON.stringify({ ...frame, id: owner.id }) }, true);
         return;
       }
+      // A reply nobody owns (a timed-out internal command): never a member's, whose ids the daemon's may collide with.
+      return;
     }
     if ((frame.t === "prompt_result" || frame.t === "prompt_error" || frame.t === "bash_output") && typeof frame.id === "number") {
       const owner = channel.commands.get(frame.id);
@@ -423,18 +390,21 @@ export class ChannelTable {
     this.broadcast(channel, { type: "stdout", ch: channel.ch, line });
   }
 
-  private join(channel: Channel, link: DaemonLink): void {
+  /** True when `link` was a member with no output dropped since its last snapshot (a server restart on the same link). */
+  private join(channel: Channel, link: DaemonLink): boolean {
     const member = channel.members.get(link.id);
     if (member) {
       // The snapshot supersedes queued output, never this link's command replies (FIFO before the result in the sender).
-      member.paused = true; member.opens++; member.resync = false;
+      const continuous = !member.gap && !member.resync && member.queued.every(item => item.reply);
+      member.paused = true; member.opens++; member.resync = false; member.gap = false;
       member.queued = member.queued.filter(item => item.reply);
       member.bytes = member.queued.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item.body)), 0);
-    } else {
-      link.discard(channel.ch);
-      channel.members.set(link.id, { link, paused: true, opens: 1, queued: [], bytes: 0, resync: false });
-      channel.lifecycle?.setInterest(link.id, false);
+      return continuous;
     }
+    link.discard(channel.ch);
+    channel.members.set(link.id, { link, paused: true, opens: 1, queued: [], bytes: 0, resync: false, gap: false });
+    channel.lifecycle?.setInterest(link.id, false);
+    return false;
   }
 
   /** Called only after the open result has been queued under this channel's key. */
@@ -453,7 +423,7 @@ export class ChannelTable {
   private deliver(channel: Channel, member: Member, body: Output, reply = false): void {
     if (member.paused) {
       member.bytes += Buffer.byteLength(JSON.stringify(body));
-      if (member.bytes > LINK_LIMITS.channelBufferBytes) { member.queued = []; member.resync = true; }
+      if (member.bytes > LINK_LIMITS.channelBufferBytes) { member.queued = []; member.resync = true; member.gap = true; }
       else if (!member.resync) member.queued.push({ body, reply });
     } else if (body.type === "exit") member.link.queue(body, channel.ch);
     else member.link.output(body, channel.pending.sessionId);
@@ -467,7 +437,6 @@ export class ChannelTable {
 
   stdin(link: DaemonLink, ch: string, line: string): void {
     const channel = this.member(link, ch);
-    if (channel.legacy !== null) { channel.pending.noteStdin(line); channel.transport.write(line, () => {}); return; }
     const frame = parseWire(line);
     if (!frame) throw invalid("Invalid channel frame");
     const member = channel.members.get(link.id)!;
@@ -536,15 +505,11 @@ export class ChannelTable {
       channel.members.delete(link.id);
       if (![...channel.members.values()].some(member => member.paused)) this.exitedHandoffs.delete(ch);
     }
-    for (const channel of this.channels.values()) {
-      if (channel.members.has(link.id)) this.close(link, channel.ch);
-      // Legacy servers own their timers; an exclusive channel has no owner after permanent removal.
-      if (channel.legacy === link.id) this.stopChannel(channel);
-    }
+    for (const channel of this.channels.values()) if (channel.members.has(link.id)) this.close(link, channel.ch);
   }
   members(ch: string): DaemonLink[] { return [...(this.channels.get(ch)?.members.values() ?? [])].map(member => member.link); }
   listing(link: DaemonLink, replay = true): HelloChannel[] {
-    return [...this.channels.values()].filter(channel => link.version >= 7 ? channel.legacy === null || channel.legacy === link.id : channel.legacy === link.id)
+    return [...this.channels.values()]
       .map(channel => ({ ch: channel.ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? this.pendingFor(channel, link) : null,
         ...(channel.launch.creationId === undefined ? {} : { creationId: channel.launch.creationId }) }));
   }
@@ -557,7 +522,7 @@ export class ChannelTable {
   async recover(entries: HostResumeEntry[]): Promise<HostResumeEntry[]> {
     const results = await Promise.allSettled(entries.map(async entry => {
       const lease = "d:resume";
-      const channel = await this.ensure(entry.sessionId, entry.launch, null, undefined, lease);
+      const channel = await this.ensure(entry.sessionId, entry.launch, lease);
       channel.lifecycle?.setPreparing(lease, true);
       try {
         channel.opened = true;

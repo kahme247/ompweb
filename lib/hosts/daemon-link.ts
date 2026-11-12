@@ -338,7 +338,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
       case "welcome":
         if (message.v < MIN_LINK_PROTOCOL_VERSION || message.v > owner.version) throw new LinkProtocolError("Invalid welcome protocol version");
         owner.version = message.v;
-        sender.parts = owner.version >= 5;
+        sender.parts = true;
         log("linked to " + serverUrl);
         acknowledgeHostUpdateHealth(); unknownLog.reset(); linked = socket; redialDelay = FIRST_RETRY_MS;
         resend = outbox.pending(); resendAt = 0; sender.dropBlobs();
