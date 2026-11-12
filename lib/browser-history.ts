@@ -119,7 +119,7 @@ class BrowserHistory {
   }
 
   private onPopState = (event: PopStateEvent) => {
-    const entry = entryFrom(event.state);
+    const entry = entryFrom(event.state) ?? (event.state === null && !this.pending ? this.adoptNativeEntry() : undefined);
     if (!entry || entry.id !== this.id) return;
     if (entry.guard) {
       if (this.pending === "leave") {
@@ -157,6 +157,15 @@ class BrowserHistory {
     if (queued) this.navigate(queued.url, queued.replace);
     releaseHistory();
   };
+
+  // A fragment link (the skip link, a heading anchor) pushes a stateless entry
+  // after the current one; give it the next position so traversal stays managed.
+  // shortcut: an unmanaged entry reached by a traversal popstate this owner missed stays ignored; adopt it too if that ever happens.
+  private adoptNativeEntry() {
+    this.write(this.position + 1, false, false);
+    this.end = this.position + 1;
+    return entryFrom(window.history.state);
+  }
 
   private onPageShow = () => {
     this.exitAllowed = false;
