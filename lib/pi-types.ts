@@ -1,4 +1,3 @@
-import type { SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import type { AgentMessage } from "./types";
 
 // Local mirrors of the omp shapes used by omp-web. omp's SDK packages are
@@ -114,8 +113,6 @@ export interface RpcSessionState {
   usageLimit?: UsageLimitState;
   /** omp's reported output throughput; null/undefined when not generating. */
   tokensPerSecond?: number | null;
-  /** Structured skill resolution diagnostics; absent on older OMP builds. */
-  skillDiagnostics?: SkillDiagnosticsSnapshot;
 }
 
 /**
@@ -152,8 +149,6 @@ export interface WebSessionState {
   usageLimit?: UsageLimitState;
   autoRetryEnabled?: boolean;
   tokensPerSecond?: number | null;
-  /** Parsed public diagnostics DTO; absent means unsupported or malformed. */
-  skillDiagnostics?: SkillDiagnosticsSnapshot;
   todoPhases: TodoPhase[];
   extensionStatuses: Array<{ key: string; text: string }>;
   extensionWidgets: Array<{ key: string; lines: string[]; placement: "aboveEditor" | "belowEditor" }>;

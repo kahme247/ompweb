@@ -24,7 +24,6 @@ import { isRecord } from "./type-guards";
 import { isClientMessageId, readQueueSnapshot } from "./client-message-ids";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
 import { publishNotification } from "./notification-hub";
-import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
@@ -1302,13 +1301,6 @@ export class AgentSessionWrapper {
         this.invalidateSessionLists();
         refreshSessionList = true;
         break;
-      case "skill_diagnostics_update":
-        this.emit({
-          type: "skill_diagnostics_update",
-          data: parseSkillDiagnosticsSnapshot(event.data),
-        });
-        notifyRunningChange();
-        return;
       case "prompt_error": {
         // An async prompt failure: terminal, no agent_end follows. Tabs and notifications read `errorMessage`.
         this.promptRunning = false;
@@ -2106,7 +2098,6 @@ export class AgentSessionWrapper {
     if (wasRunning && !this.isRunning()) {
       notifyRunningChange();
     }
-    const skillDiagnostics = parseSkillDiagnosticsSnapshot(state.skillDiagnostics);
     return {
       sessionId: state.sessionId,
       sessionFile: state.sessionFile ?? "",
@@ -2148,22 +2139,10 @@ export class AgentSessionWrapper {
       slowModeEnabled: state.slowModeEnabled ?? false,
       slowModeScope: state.slowModeScope,
       usageLimit: state.usageLimit,
-      ...(skillDiagnostics ? { skillDiagnostics } : {}),
       todoPhases: state.todoPhases ?? [],
       extensionStatuses: Array.from(this.extensionStatuses, ([key, text]) => ({ key, text })),
       extensionWidgets: Array.from(this.extensionWidgets.values()),
     };
-  }
-
-  private requireSkillDiagnostics(value: unknown): SkillDiagnosticsSnapshot {
-    const snapshot = parseSkillDiagnosticsSnapshot(value);
-    if (!snapshot) {
-      throw new WebRpcError(
-        "Skill diagnostics are unavailable for this OMP session",
-        "skill_diagnostics_unsupported",
-      );
-    }
-    return snapshot;
   }
 
   private async getStateWithTimeout(): Promise<RpcSessionState> {
@@ -2693,22 +2672,6 @@ export class AgentSessionWrapper {
           }
           throw error;
         }
-      }
-
-      case "get_skill_diagnostics": {
-        const result = await this.proc.sendCommand<unknown>({ type: "get_skill_diagnostics" }, GET_STATE_TIMEOUT_MS);
-        return this.requireSkillDiagnostics(result);
-      }
-
-      case "set_skill_startup_diagnostics": {
-        if (typeof command.enabled !== "boolean") {
-          throw new WebRpcError("enabled must be a boolean", "invalid_skill_startup_diagnostics");
-        }
-        const result = await this.proc.sendCommand<unknown>({
-          type: "set_skill_startup_diagnostics",
-          enabled: command.enabled,
-        }, GET_STATE_TIMEOUT_MS);
-        return this.requireSkillDiagnostics(result);
       }
 
       case "set_model": {

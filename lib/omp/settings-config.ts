@@ -14,7 +14,6 @@ export type NativeSettings = {
   personality?: "default" | "friendly" | "pragmatic" | "none";
   advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
   tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
-  skills?: { showStartupDiagnostics?: boolean };
   enabledModels?: string[];
   disabledProviders?: string[];
   modelProviderOrder?: string[];
@@ -91,7 +90,6 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
   const autoThinkingSource = providers.autoThinkingSource;
   const tools = isRecord(data.tools) ? data.tools : {};
   const approval = isRecord(tools.approval) ? tools.approval : {};
-  const skills = isRecord(data.skills) ? data.skills : {};
   const retry = isRecord(data.retry) ? data.retry : {};
   const fallbackChains = isRecord(retry.fallbackChains)
     ? Object.fromEntries(Object.entries(retry.fallbackChains).filter((entry): entry is [string, string[]] => typeof entry[0] === "string" && stringArray(entry[1]) !== undefined))
@@ -136,9 +134,6 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
           ...(approval.extension === "allow" || approval.extension === "prompt" ? { extension: approval.extension } : {}),
         } } : {}),
       } } : {}),
-      ...(typeof skills.showStartupDiagnostics === "boolean" ? {
-        skills: { showStartupDiagnostics: skills.showStartupDiagnostics },
-      } : {}),
       ...(stringArray(data.enabledModels) ? { enabledModels: stringArray(data.enabledModels) } : {}),
       ...(stringArray(data.disabledProviders) ? { disabledProviders: stringArray(data.disabledProviders) } : {}),
       ...(stringArray(data.modelProviderOrder) ? { modelProviderOrder: stringArray(data.modelProviderOrder) } : {}),
@@ -190,23 +185,18 @@ export function writeNativeSettings(settings: NativeSettings): void {
   assertOptionalRecord(settings.advisor, "advisor");
   assertOptionalRecord(settings.tools, "tools");
   assertOptionalRecord(settings.tools?.approval, "tools.approval");
-  assertOptionalRecord(settings.skills, "skills");
   assertOptionalRecord(settings.retry, "retry");
   assertOptionalRecord(settings.compaction, "compaction");
   assertOptionalRecord(settings.memory, "memory");
   assertOptionalRecord(settings.autolearn, "autolearn");
   assertOptionalRecord(settings.mnemopi, "mnemopi");
   assertOptionalRecord(settings.mcp, "mcp");
-  if (settings.skills && Object.keys(settings.skills).some((key) => key !== "showStartupDiagnostics")) {
-    throw new Error("Unsupported skills setting");
-  }
   for (const [name, value] of Object.entries({
     hideThinkingBlock: settings.hideThinkingBlock,
     externalThinking: settings.externalThinking,
     "advisor.enabled": settings.advisor?.enabled,
     "advisor.subagents": settings.advisor?.subagents,
     "retry.enabled": settings.retry?.enabled,
-    "skills.showStartupDiagnostics": settings.skills?.showStartupDiagnostics,
     "retry.modelFallback": settings.retry?.modelFallback,
     "compaction.enabled": settings.compaction?.enabled,
     "compaction.midTurnEnabled": settings.compaction?.midTurnEnabled,
@@ -264,9 +254,6 @@ export function writeNativeSettings(settings: NativeSettings): void {
   if (settings.tools?.approvalMode !== undefined) doc.setIn(["tools", "approvalMode"], settings.tools.approvalMode);
   if (settings.tools?.approval?.bash !== undefined) doc.setIn(["tools", "approval", "bash"], settings.tools.approval.bash);
   if (settings.tools?.approval?.extension !== undefined) doc.setIn(["tools", "approval", "extension"], settings.tools.approval.extension);
-  if (settings.skills?.showStartupDiagnostics !== undefined) {
-    doc.setIn(["skills", "showStartupDiagnostics"], settings.skills.showStartupDiagnostics);
-  }
   if (settings.enabledModels !== undefined) doc.set("enabledModels", settings.enabledModels);
   if (settings.disabledProviders !== undefined) doc.set("disabledProviders", settings.disabledProviders);
   if (settings.modelProviderOrder !== undefined) doc.set("modelProviderOrder", settings.modelProviderOrder);
