@@ -65,6 +65,11 @@ function updateStatus(patch) {
   fs.renameSync(tmp, statusFile());
 }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// The launcher (bin/omp-web.js watchUpdateCompletion) was armed at commit: an attempt that ends without a restart must
+// disarm it, or it takes the running server's next exit for this update's restart and waits forever.
+function disarmLauncher() {
+  try { atomicWrite(markerFile("complete.json"), { protocol: 1, attemptId, state: "failed", completedAt: new Date().toISOString() }); } catch {}
+}
 function isLaunchdActive() {
   try {
     const plist = path.join(os.homedir(), "Library", "LaunchAgents", "com.kahme247.ompweb.plist");
@@ -152,10 +157,12 @@ function preflightCandidate() {
       console.warn(`ompweb ${target} has no preflight command; its omp was not checked`);
       return;
     }
-    const result = cp.spawnSync(process.execPath, [path.join(release, "bin", "omp-web.js"), "preflight"], { cwd: prefix, timeout: 60 * 1000, windowsHide: true, env: process.env, encoding: "utf8" });
+    // OMP_WEB_PACKAGE_DIR: the launcher set it to the running install, whose omp this must not check.
+    const result = cp.spawnSync(process.execPath, [path.join(release, "bin", "omp-web.js"), "preflight"], { cwd: prefix, timeout: 60 * 1000, windowsHide: true, env: { ...process.env, OMP_WEB_PACKAGE_DIR: release }, encoding: "utf8" });
     if (result.status !== 0) throw new Error(`the new release cannot start a session: ${((result.stderr || "").trim() || String(result.error || `exit ${result.status}`)).slice(-200)}`);
   } finally {
-    fs.rmSync(prefix, { recursive: true, force: true, maxRetries: 3 });
+    // Best effort: a locked file (Windows) must not fail an update the check passed.
+    try { fs.rmSync(prefix, { recursive: true, force: true, maxRetries: 3 }); } catch {}
   }
 }
 
@@ -249,6 +256,7 @@ async function main() {
   // Check abort
   if (fs.existsSync(abortFile())) {
     updateStatus({ state: "failed", error: (readJson(abortFile()) || {}).reason || "aborted", finishedAt: new Date().toISOString(), cleanupReady: true });
+    disarmLauncher();
     process.exit(0);
   }
   // Check go marker exists (commit signal)
@@ -290,10 +298,12 @@ async function main() {
       try { systemctl("start"); } catch { msg = `${systemdUnit} is still stopped: ${msg}`; }
     }
     updateStatus({ state: "failed", error: msg.slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true });
+    disarmLauncher();
   }
 }
 
 main().catch((e) => {
   try { updateStatus({ state: "failed", error: String(e).slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true }); } catch {}
+  disarmLauncher();
   process.exit(1);
 });
