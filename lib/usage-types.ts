@@ -171,14 +171,18 @@ export interface UsageTranscriptIndex {
 export interface UsageReadRequest {
   session: string;
   paths: string[];
+  /** Records of `paths[0]` that earlier answers delivered: this one continues after them. */
+  skip?: number;
 }
 
 export interface UsageTranscriptRecords extends UsageTranscriptStamp {
   records: UsageRecord[];
+  /** The transcript has more records than one answer holds: ask for it again, skipping the ones received. */
+  more?: boolean;
 }
 
 /** `missing`: gone, or not a transcript this host lists. A path asked for and in neither list was not reached within
- * the page limits: ask again. */
+ * the page limits: ask again. A file with `more` is the last of its page. */
 export interface UsageRecordsPage {
   files: UsageTranscriptRecords[];
   missing: string[];

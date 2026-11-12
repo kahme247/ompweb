@@ -2,7 +2,7 @@
 // goes offline keeps its last numbers. Pulled only on /api/usage requests. No `next/*` or `@/` imports.
 import type { Database } from "bun:sqlite";
 import { hostSyncTimes, isUpToDate, markHostSynced, pruneHostUsage, storedStamps, storeHostUsage } from "../usage-db";
-import type { HostUsageStatus, HostUsageSyncState, UsageReadRequest } from "../usage-types";
+import type { HostUsageStatus, HostUsageSyncState, UsageReadRequest, UsageTranscriptRecords } from "../usage-types";
 import { isLinkUp, type Host } from "./host";
 import { getHost, listHosts, onHostHello } from "./hub";
 import { HostOpError } from "./link-protocol";
@@ -81,28 +81,54 @@ async function syncHostUsage(host: Host, db: Database, refresh: boolean): Promis
     }
     if (paths.length > 0) queue.push({ session, paths });
   }
+  // What the pull finds gone is dropped last: a pull that fails on the way takes nothing away.
+  const gone: string[] = [];
+  // A transcript too large for one answer comes in slices and is held until the last one: it is only stored whole.
+  let held = null as UsageTranscriptRecords | null;
   while (queue.length > 0) {
     const batch = nextBatch(queue);
+    // Continued only while it is what the batch starts with: the skip is for that path and no other.
+    if (held && batch[0].paths[0] === held.path) batch[0] = { ...batch[0], skip: held.records.length };
+    else held = null;
     const page = await host.sessionOps.readUsageRecords(batch);
     if (!page.ok) throw new HostOpError(page.status, page.code, page.error);
-    // Only an answer about a path that was asked for counts: `delete` is true once for each.
+    // Only an answer about a path that was asked for counts.
     const open = new Set(batch.flatMap((request) => request.paths));
-    const files = page.value.files.filter((file) => open.delete(file.path));
+    const files: UsageTranscriptRecords[] = [];
+    let sliced = 0;
+    for (const file of page.value.files) {
+      if (!open.has(file.path)) continue;
+      const earlier: UsageTranscriptRecords | null = held?.path === file.path ? held : null;
+      if (earlier && (earlier.mtimeMs !== file.mtimeMs || earlier.size !== file.size)) {
+        throw new HostOpError(409, "usage_changed", `${host.label} changed a usage transcript while it was being read`);
+      }
+      const whole: UsageTranscriptRecords = earlier ? { ...file, records: earlier.records.concat(file.records) } : file;
+      if (file.more) {
+        held = whole;
+        sliced += file.records.length;
+      } else {
+        if (earlier) held = null;
+        open.delete(file.path);
+        files.push(whole);
+      }
+    }
     const missing = page.value.missing.filter((path) => open.delete(path));
-    // A host that settles none of a batch would be asked for it for ever.
-    if (files.length === 0 && missing.length === 0) {
+    if (held && !open.has(held.path)) held = null;
+    // A host that settles none of a batch and sends no further slice would be asked for it for ever.
+    if (files.length + missing.length + sliced === 0) {
       throw new HostOpError(502, "host_bad_result", `${host.label} read none of the usage transcripts it was asked for`);
     }
     // Stored page by page, each transcript whole: a pull that fails later leaves the rest for the next one.
-    storeHostUsage(db, host.id, parserVersion, files, missing);
+    if (files.length > 0) storeHostUsage(db, host.id, parserVersion, files, []);
+    gone.push(...missing);
     const rest = batch
       .map(({ session, paths }) => ({ session, paths: paths.filter((path) => open.has(path)) }))
       .filter((request) => request.paths.length > 0);
     queue.unshift(...rest);
   }
-  // The index was the host's whole inventory (it fails otherwise), so a stored transcript it left out is gone. Dropped
-  // last: a pull that fails on the way takes nothing away.
-  if (unlisted.size > 0) storeHostUsage(db, host.id, parserVersion, [], [...unlisted.keys()]);
+  // The index was the host's whole inventory (it fails otherwise), so a stored transcript it left out is gone too.
+  gone.push(...unlisted.keys());
+  if (gone.length > 0) storeHostUsage(db, host.id, parserVersion, [], gone);
   markHostSynced(db, host.id, Date.now());
 }
 

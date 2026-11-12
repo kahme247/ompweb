@@ -1067,7 +1067,8 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
           && Array.isArray(entry.transcripts) && entry.transcripts.every(usageStamp));
     case "readUsageRecords":
       return isRecord(value) && Array.isArray(value.files)
-        && value.files.every((file) => usageStamp(file) && Array.isArray(file.records) && file.records.every(usageRecord))
+        && value.files.every((file) => usageStamp(file) && Array.isArray(file.records) && file.records.every(usageRecord)
+          && (file.more === undefined || typeof file.more === "boolean"))
         && Array.isArray(value.missing) && value.missing.every(usagePath);
     default:
       return true;

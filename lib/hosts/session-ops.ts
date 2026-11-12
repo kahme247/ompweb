@@ -309,7 +309,8 @@ function normalizeCwd(cwd: string): string {
   return isAbsolute(cwd) ? cwd : resolve(cwd);
 }
 
-/** One `readUsageRecords` answer stops growing past either limit; bytes are estimated (256 per file, 512 per record). */
+/** One `readUsageRecords` answer stops growing at either limit; bytes are estimated (256 per file, 512 per record). A
+ * transcript too large for one answer goes out in slices, so no answer comes near the link's 64 MiB result limit. */
 export const USAGE_PAGE_LIMITS = { bytes: 8 * 1024 * 1024, ms: 10_000 };
 
 /** Null for a path that is gone, empty or not a file. Any other stat failure throws: unreadable is not gone. */
@@ -342,7 +343,8 @@ function usageUnreadable(error: unknown): OpResult<never> {
 
 function isUsageReadRequest(value: unknown): value is UsageReadRequest {
   return isRecord(value) && typeof value.session === "string"
-    && Array.isArray(value.paths) && value.paths.every((path) => typeof path === "string");
+    && Array.isArray(value.paths) && value.paths.every((path) => typeof path === "string")
+    && (value.skip === undefined || (typeof value.skip === "number" && Number.isSafeInteger(value.skip) && value.skip >= 0));
 }
 
 /**
@@ -865,21 +867,21 @@ export const sessionOps: SessionOps = {
 
   async readUsageRecords(requests) {
     if (!Array.isArray(requests) || !requests.every(isUsageReadRequest)) {
-      return fail(400, "invalid_request", "Usage reads must be a list of { session, paths }");
+      return fail(400, "invalid_request", "Usage reads must be a list of { session, paths, skip? }");
     }
     const started = Date.now();
     const files: UsageTranscriptRecords[] = [];
     const missing: string[] = [];
     let bytes = 0;
+    // The records an empty answer has room for: a transcript with more of them is sent in slices.
+    const slice = Math.max(1, Math.floor((USAGE_PAGE_LIMITS.bytes - 256) / 512));
     try {
       const sessions = new Set(inventorySessionFiles(getSessionsDir()));
       const modelsConfig = readModelsConfig();
-      for (const { session, paths } of requests) {
+      for (const { session, paths, skip = 0 } of requests) {
         const transcripts = sessions.has(session) ? new Set([session, ...listSessionArtifactTranscripts(session, true)]) : null;
-        for (const path of paths) {
-          if (files.length > 0 && (bytes > USAGE_PAGE_LIMITS.bytes || Date.now() - started > USAGE_PAGE_LIMITS.ms)) {
-            return ok({ files, missing });
-          }
+        for (const [at, path] of paths.entries()) {
+          if (files.length > 0 && Date.now() - started > USAGE_PAGE_LIMITS.ms) return ok({ files, missing });
           // Stamped before parsing: a write that lands during the parse changes the stamp and is read again next time.
           const stamp = transcripts?.has(path) ? usageStamp(path) : null;
           const records = stamp && usageRecords(path, modelsConfig, session);
@@ -887,8 +889,17 @@ export const sessionOps: SessionOps = {
             missing.push(path);
             continue;
           }
-          files.push({ ...stamp, records });
-          bytes += 256 + 512 * records.length;
+          const from = at === 0 ? skip : 0;
+          const sent = from === 0 && records.length <= slice ? records : records.slice(from, from + slice);
+          const size = 256 + 512 * sent.length;
+          // An answer that holds a file takes no other past its limit; an empty one takes any, to settle something.
+          if (files.length > 0 && bytes + size > USAGE_PAGE_LIMITS.bytes) return ok({ files, missing });
+          bytes += size;
+          if (from + sent.length < records.length) {
+            files.push({ ...stamp, records: sent, more: true });
+            return ok({ files, missing });
+          }
+          files.push({ ...stamp, records: sent });
           await nextTurn();
         }
       }

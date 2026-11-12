@@ -1193,10 +1193,9 @@ export function inventorySessionFiles(sessionsRoot: string): string[] {
   return collectSessionFiles(sessionsRoot, "complete");
 }
 
-/** The path is not there, as opposed to there and unreadable. */
+/** The path does not exist. Any other failure, a parent that is no directory included, says nothing about it. */
 export function isGone(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException | null)?.code;
-  return code === "ENOENT" || code === "ENOTDIR";
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
 }
 
 /** `complete` throws for a root or project directory it cannot read. `restore` is the restore preflight, which also
@@ -1216,7 +1215,7 @@ function collectSessionFiles(sessionsRoot: string, mode: "lenient" | "complete" 
   } catch (error) {
     // Only a root absent from the outset is an empty inventory. Once observed, disappearance is uncertainty.
     if (strict && (observedRoot || !(error && typeof error === "object" && "code" in error && error.code === "ENOENT"))) throw error;
-    if (mode === "complete" && (error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
+    if (mode === "complete" && !isGone(error)) throw error;
     return [];
   }
   for (const dirent of projects) {
