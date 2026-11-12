@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
 import { Copy, Pencil, Plus, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/field";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
@@ -184,6 +184,19 @@ type ClusterState = { pools: HostPool[]; poolsLoaded: boolean; poolsFailed: bool
 
 const joinBlock = (row: HostRow) => clusterJoinBlock({ status: row.status, protocol: row.hostVersion, ompVersion: row.ompVersion, supports: (operation) => row.workspaceOps.includes(operation) });
 
+/** One host setting: its label with the note explaining its state directly below, and its switch at the end of the row. */
+function ToggleRow({ label, note, noteId, children }: { label: string; note?: string | null; noteId?: string; children: ReactNode }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, padding: "10px 0", borderTop: "1px solid var(--border)" }}>
+      <div style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>
+        <div style={{ fontSize: 13, color: "var(--text)" }}>{label}</div>
+        {note && <div id={noteId} className="settings-card-desc" style={{ marginTop: 2 }}>{note}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave }: { host: HostRow; cluster: ClusterState; onRename: () => void; onRevoke: () => void; onShare: () => void; onJoin: () => void; onLeave: () => void }) {
   const { t } = useI18n();
   const name = hostName(t, host);
@@ -221,7 +234,8 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
 
   return (
     <li className="settings-card" style={{ flexWrap: "wrap", listStyle: "none" }}>
-      <div className="settings-card-text">
+      {/* Room for the name: on a narrow card the buttons wrap below it instead of squeezing it to an ellipsis. */}
+      <div className="settings-card-text" style={{ flexBasis: 160 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: "50%", flexShrink: 0, background: HOST_STATUS_COLOR[host.status] }} />
           <strong style={{ fontSize: 14, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</strong>
@@ -241,42 +255,6 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
       </div>
       <div className="settings-card-control" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", flexShrink: 1, maxWidth: "100%" }}>
         {isLocalRow(host) && member && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("hostsConfig.clusterMaster")}</span>}
-        {linked && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: "100%", flexWrap: "wrap" }}>
-            <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.inCluster")}</span>
-            <ToggleSwitch
-              checked={member}
-              disabled={!cluster.poolsLoaded || joinReason !== null}
-              aria-label={t("hostsConfig.inClusterAria", { name })}
-              aria-describedby={joinReason ? reasonId : undefined}
-              onChange={(joining) => (joining ? onJoin() : onLeave())}
-            />
-            {joinReason && <span id={reasonId} style={{ fontSize: 11, color: "var(--text-dim)", maxWidth: 200 }}>{joinReason}</span>}
-          </div>
-        )}
-        {linked && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: "100%" }}>
-            <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.allowAgentStart")}</span>
-            <ToggleSwitch
-              checked={linked.allowAgentStart}
-              aria-label={t("hostsConfig.allowAgentStartAria", { name })}
-              onChange={(allowAgentStart) => void call("PATCH", "/api/hosts", { id: host.id, allowAgentStart }).catch(failure)}
-            />
-          </div>
-        )}
-        {linked && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: "100%", flexWrap: "wrap" }}>
-            <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.shareCredentials")}</span>
-            <ToggleSwitch
-              checked={linked.shareCredentials || member}
-              disabled={member || !cluster.poolsLoaded}
-              aria-label={t("hostsConfig.shareCredentialsAria", { name })}
-              aria-describedby={member ? forcedId : unavailable ? reasonId : undefined}
-              onChange={(shareCredentials) => { if (shareCredentials) onShare(); else void call("PATCH", "/api/hosts", { id: host.id, shareCredentials }).catch(failure); }}
-            />
-            {member && <span id={forcedId} style={{ fontSize: 11, color: "var(--text-dim)", maxWidth: 200 }}>{t("hostsConfig.shareForced")}</span>}
-          </div>
-        )}
         <button type="button" className="ui-focus-ring" aria-label={t("hostsConfig.renameAria", { name })} style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5 }} onClick={onRename}>
           <Pencil size={13} aria-hidden="true" />{t("hostsConfig.rename")}
         </button>
@@ -286,6 +264,35 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
           </button>
         )}
       </div>
+      {linked && (
+        <div style={{ flexBasis: "100%", minWidth: 0 }}>
+          <ToggleRow label={t("hostsConfig.inCluster")} note={joinReason} noteId={reasonId}>
+            <ToggleSwitch
+              checked={member}
+              disabled={!cluster.poolsLoaded || joinReason !== null}
+              aria-label={t("hostsConfig.inClusterAria", { name })}
+              aria-describedby={joinReason ? reasonId : undefined}
+              onChange={(joining) => (joining ? onJoin() : onLeave())}
+            />
+          </ToggleRow>
+          <ToggleRow label={t("hostsConfig.allowAgentStart")}>
+            <ToggleSwitch
+              checked={linked.allowAgentStart}
+              aria-label={t("hostsConfig.allowAgentStartAria", { name })}
+              onChange={(allowAgentStart) => void call("PATCH", "/api/hosts", { id: host.id, allowAgentStart }).catch(failure)}
+            />
+          </ToggleRow>
+          <ToggleRow label={t("hostsConfig.shareCredentials")} note={member ? t("hostsConfig.shareForced") : null} noteId={forcedId}>
+            <ToggleSwitch
+              checked={linked.shareCredentials || member}
+              disabled={member || !cluster.poolsLoaded}
+              aria-label={t("hostsConfig.shareCredentialsAria", { name })}
+              aria-describedby={member ? forcedId : unavailable ? reasonId : undefined}
+              onChange={(shareCredentials) => { if (shareCredentials) onShare(); else void call("PATCH", "/api/hosts", { id: host.id, shareCredentials }).catch(failure); }}
+            />
+          </ToggleRow>
+        </div>
+      )}
       <HostUpdates host={host} />
     </li>
   );
