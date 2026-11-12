@@ -112,8 +112,10 @@ test("the sidebar orders a cluster's pool projects and its members' projects as 
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/api/hosts") return Response.json({ hosts: hostRows, pools });
     if (url.pathname === "/api/projects" && init.method === "PATCH") {
-      writes.push(JSON.parse(init.body));
-      return Response.json({ projects: [] });
+      const body = JSON.parse(init.body);
+      writes.push(body);
+      // The first store refuses: the others are still written.
+      return body.poolId ? Response.json({ error: "Pool registry unavailable" }, { status: 503 }) : Response.json({ projects: [] });
     }
     if (url.pathname === "/api/projects") {
       return Response.json({ projects: [
@@ -141,9 +143,17 @@ test("the sidebar orders a cluster's pool projects and its members' projects as 
     assert.ok(screen.queryByRole("button", { name: /On This machine/ }), "this machine's pinned project names its node");
 
     // Moving this machine's project below the pool's one writes the cluster's whole order, one batch per store.
-    fireEvent.click(container.querySelectorAll(`[aria-label="${translate("commandPalette.actions")}"]`)[0]);
-    fireEvent.click(await screen.findByRole("menuitem", { name: translate("projects.moveDown") }));
-    await waitFor(() => assert.equal(writes.length, 3));
+    const errors = [];
+    const originalError = toast.error;
+    toast.error = (message) => { errors.push(message); };
+    try {
+      fireEvent.click(container.querySelectorAll(`[aria-label="${translate("commandPalette.actions")}"]`)[0]);
+      fireEvent.click(await screen.findByRole("menuitem", { name: translate("projects.moveDown") }));
+      await waitFor(() => assert.equal(errors.length, 1));
+    } finally {
+      toast.error = originalError;
+    }
+    assert.deepEqual(errors, [translate("projects.reorderFailed")]);
     assert.deepEqual(writes, [
       { poolId: "cluster", updates: [{ projectId: "x", sortOrder: 0 }] },
       { updates: [{ cwd: "/l", sortOrder: 1 }] },

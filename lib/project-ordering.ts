@@ -74,7 +74,7 @@ export function groupProjectsByHost<T extends { hostId?: string; poolId?: string
   });
   return ordered.map((host) => ({
     host,
-    // A pool project's own target is `pool:<id>`, which also holds for the sidebar's entries (their `hostId` is that target).
+    // A pool project (or a sidebar entry for one) already has `pool:<id>` as its target; a member's own project carries its host id and folds into the cluster through the membership check.
     projects: projects.filter((project) => projectTargetId(project, pools) === host.id),
   }));
 }

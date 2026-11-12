@@ -1147,23 +1147,24 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       });
       batches.set(store, batch);
     });
+    let failed = false;
     try {
-      // shortcut: one request per store, not atomic across stores; a failed one leaves a mixed order, which the next move rewrites.
+      // shortcut: one request per store, not atomic across stores; a store that fails (an offline member, say) keeps its old indices until a later move reaches it.
       for (const { target, updates } of batches.values()) {
         // Within a store the server applies every entry in a single atomic
         // registry save, so per-project writes can't interleave and lose
         // updates. Discovered projects included here are registered server-side.
+        // Every store is tried: one that cannot answer must not hold back the others.
         const response = await fetch("/api/projects", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ...target, updates }),
-        });
-        if (!response.ok) throw new Error(t("projects.reorderFailed"));
+        }).catch(() => null);
+        if (!response?.ok) failed = true;
       }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
-    } finally {
+      if (failed) toast.error(t("projects.reorderFailed"));
       await loadProjects();
+    } finally {
       orderWriteBusyRef.current = false;
     }
   }, [loadProjects, pinsActive, t]);
