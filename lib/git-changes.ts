@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { promisify } from "util";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
-import { createChildProcessEnvironment } from "./project-command-env";
+import { createGitEnvironment } from "./project-command-env";
 import type {
   GitCollapseReason,
   GitFileDiffResponse,
@@ -26,7 +26,7 @@ async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFE
   const pending = execFileAsync("git", ["-C", cwd, ...args], {
     timeout: GIT_TIMEOUT_MS,
     maxBuffer,
-    env: createChildProcessEnvironment({ LC_ALL: "C" }),
+    env: createGitEnvironment({ LC_ALL: "C" }),
   });
   if (input !== undefined) {
     // git may exit before reading stdin (EPIPE); that failure surfaces through `pending`.
@@ -36,9 +36,12 @@ async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFE
   return (await pending).stdout;
 }
 
+/** The worktree toplevel in `cwd`'s own spelling: Git's --show-toplevel can differ in separators, 8.3 names and symlinks.
+ * Null outside a worktree; a bare repository has a Git directory but no toplevel. */
 async function findRepositoryRoot(cwd: string): Promise<string | null> {
   try {
-    return (await git(cwd, ["rev-parse", "--show-toplevel"])).trim() || null;
+    const [insideWorkTree, cdup = ""] = (await git(cwd, ["rev-parse", "--is-inside-work-tree", "--show-cdup"])).split("\n");
+    return insideWorkTree === "true" ? path.resolve(cwd, cdup.trim()) : null;
   } catch {
     return null;
   }
@@ -118,12 +121,18 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
   // tracked symlink inside the selection is kept even when its target
   // points outside it. getGitFileDiff below keeps the fully canonical
   // check, since git reads the file content through the link there.
+  // Entries are repo-relative, so resolve them against the canonical root:
+  // findRepositoryRoot keeps cwd's own spelling since #450, which for a
+  // symlinked cwd is the link spelling — resolving entries against it
+  // would put them lexically outside the canonical cwd and drop them
+  // (#322). Only the root is canonicalized, never an entry itself.
   const canonicalCwd = canonicalizePath(cwd);
+  const canonicalRoot = canonicalizePath(repositoryRoot);
   const entries = (await readStatusEntries(repositoryRoot))
-    .filter((entry) => isWithinCanonicalParent(canonicalCwd, path.resolve(repositoryRoot, entry.path)));
+    .filter((entry) => isWithinCanonicalParent(canonicalCwd, path.resolve(canonicalRoot, entry.path)));
   const reasons = await readCollapseReasons(repositoryRoot, entries.map((entry) => entry.path));
   const files = entries.map((entry): GitFileStatus => ({
-    filePath: path.resolve(repositoryRoot, entry.path),
+    filePath: path.resolve(canonicalRoot, entry.path),
     ...classifyGitStatus(entry),
     indexStatus: entry.indexStatus,
     worktreeStatus: entry.worktreeStatus,
