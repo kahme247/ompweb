@@ -601,6 +601,8 @@
   "chatWindow.askTitle": "Questions from the agent",
   "chatWindow.askRecommended": "Recommended",
   "chatWindow.askOther": "Other: type your own answer",
+  "chatWindow.optionChecked": "checked",
+  "chatWindow.optionUnchecked": "not checked",
   "chatWindow.thinking": "Thinking...",
   "chatWindow.subagentCount.one": "{count} subagent",
   "chatWindow.subagentCount.other": "{count} subagents",

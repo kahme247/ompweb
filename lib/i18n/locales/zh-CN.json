@@ -584,6 +584,8 @@
   "chatWindow.askTitle": "来自智能体的问题",
   "chatWindow.askRecommended": "推荐",
   "chatWindow.askOther": "其他：输入你自己的答案",
+  "chatWindow.optionChecked": "已勾选",
+  "chatWindow.optionUnchecked": "未勾选",
   "chatWindow.thinking": "思考中...",
   "chatWindow.subagentCount.one": "{count} 个子代理",
   "chatWindow.subagentCount.other": "{count} 个子代理",

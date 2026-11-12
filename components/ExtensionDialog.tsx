@@ -235,7 +235,8 @@ export function ExtensionDialog({
   attached = false,
 }: {
   request: ExtensionDialogRequest;
-  onRespond: (request: ExtensionDialogRequest, response: ExtensionDialogResponse) => void;
+  /** Resolves `false` when the answer could not be sent, so the panel takes another answer. */
+  onRespond: (request: ExtensionDialogRequest, response: ExtensionDialogResponse) => void | Promise<boolean>;
   /** Render as a composer panel instead of a full-chat overlay. */
   attached?: boolean;
 }) {
@@ -247,6 +248,10 @@ export function ExtensionDialog({
   // `pointerType` of the latest press: the pointer media query only describes
   // the primary pointer, not the one pressing now.
   const pressPointerRef = useRef<string | null>(null);
+  // omp takes one answer per request id and the panel stays up until the next request arrives, so the
+  // select controls are disabled in that window instead of sending a tap omp would silently drop.
+  const [answeredId, setAnsweredId] = useState<string | null>(null);
+  const awaitingNext = request.method === "select" && answeredId === request.id;
   const [askDrafts, setAskDrafts] = useState(() => initialAskDrafts(request));
   const viewportMaxHeight = useViewportMaxHeight();
   const { touchTargets } = useTouchTargets();
@@ -278,9 +283,16 @@ export function ExtensionDialog({
   // task, so the phone keyboard closes once instead of flashing as the
   // focused field disappears from under it.
   const respond = (response: ExtensionDialogResponse) => {
+    if (request.method === "select") {
+      if (awaitingNext) return;
+      setAnsweredId(request.id);
+    }
     const active = document.activeElement;
     if (active instanceof HTMLElement && panelRef.current?.contains(active)) active.blur();
-    onRespond(request, response);
+    const id = request.id;
+    void Promise.resolve(onRespond(request, response)).then((sent) => {
+      if (sent === false) setAnsweredId((current) => current === id ? null : current);
+    });
   };
   const cancel = () => respond({ cancelled: true });
 
@@ -415,13 +427,19 @@ export function ExtensionDialog({
           )}
           {request.method === "select" && (
             <div style={{ display: "grid", gap: 8 }}>
-              {request.options.map((option) => {
+              {request.options.map((option, index) => {
                 const selected = selectedOption === option;
+                const checkbox = request.selectionMarker === "checkbox" && index < (request.markableCount ?? request.options.length);
+                const checked = checkbox && (request.checkedIndices?.includes(index) ?? false);
+                // A checkbox toggle goes out at once even when attached: staging it for Next would let the
+                // next row (often "Done selecting") silently replace it, and a stray toggle is undone by one tap.
+                const stage = attached && !checkbox;
                 return (
                   <button
                     key={option}
-                    onClick={() => attached ? setSelectedOption(option) : respond({ value: option })}
-                    aria-pressed={attached ? selected : undefined}
+                    onClick={() => stage ? setSelectedOption(option) : respond({ value: option })}
+                    disabled={awaitingNext}
+                    aria-pressed={stage ? selected : undefined}
                     style={{
                       width: "100%",
                       padding: "7px 10px",
@@ -438,7 +456,9 @@ export function ExtensionDialog({
                     onMouseEnter={attached ? undefined : (e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
                     onMouseLeave={attached ? undefined : (e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
                   >
+                    {checkbox && <span aria-hidden="true" style={{ marginRight: 6, color: checked ? "var(--accent)" : "var(--text-dim)" }}>{checked ? "☑" : "☐"}</span>}
                     {option}
+                    {checkbox && <span className="sr-only">, {t(checked ? "chatWindow.optionChecked" : "chatWindow.optionUnchecked")}</span>}
                   </button>
                 );
               })}
@@ -712,7 +732,7 @@ export function ExtensionDialog({
           ) : (request.method === "select" && attached) || request.method === "ask" ? (
             <button
               onClick={submitValue}
-              disabled={!canSubmit}
+              disabled={!canSubmit || awaitingNext}
               style={{
                 padding: "6px 10px",
                 minHeight: touchTargets === "accessible" ? 44 : undefined,

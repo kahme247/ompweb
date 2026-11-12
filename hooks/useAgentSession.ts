@@ -1971,11 +1971,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
     response: { value: string } | { confirmed: boolean } | { cancelled: true } | { answers: RpcAskDialogAnswer[] },
-  ) => {
+  ): Promise<boolean> => {
     const sid = sessionIdRef.current;
     if (!sid) {
       setExtensionDialog((current) => current?.id === request.id ? null : current);
-      return;
+      return true;
     }
     // Claim the dialog before awaiting: another tab answering broadcasts a
     // synchronized "cancel" for the same request id, which must not tear down
@@ -1988,7 +1988,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         id: request.id,
         ...response,
       });
-      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return true;
       // Keep the answered panel mounted briefly while the next question arrives.
       clearTimeout(extensionDialogClearTimerRef.current ?? undefined);
       extensionDialogClearTimerRef.current = setTimeout(() => {
@@ -1996,11 +1996,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (locallyAnsweredDialogRef.current === request.id) locallyAnsweredDialogRef.current = null;
         extensionDialogClearTimerRef.current = null;
       }, 250);
+      return true;
     } catch (e) {
       console.error("Failed to send extension UI response:", e);
       if (hookAliveRef.current && sessionIdRef.current === sid) {
         addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       }
+      // Let the panel take another answer: omp never got this one.
+      if (locallyAnsweredDialogRef.current === request.id) locallyAnsweredDialogRef.current = null;
+      return false;
     }
   }, [addNotice]);
 

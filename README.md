@@ -7,7 +7,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
 
-[English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 Community: [Join the OMPWEB Discord](https://discord.gg/evqgGzRfM5)
 
