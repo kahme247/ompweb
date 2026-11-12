@@ -2,7 +2,7 @@ import { runNpx } from "@/lib/npx";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import type { SkillInstallScope } from "@/lib/api-types";
 import { buildSkillUpdateArgs } from "@/lib/skill-updates";
-import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
+import { loadSkillsWithInstallInfo, loadUserSkillsWithInstallInfo } from "@/lib/skills-service";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 
 export async function POST(req: Request) {
@@ -17,15 +17,18 @@ export async function POST(req: Request) {
     const scope = body.scope === "global" || body.scope === "project"
       ? body.scope as SkillInstallScope
       : undefined;
-    if (!cwd || !pkg || !scope) {
+    // Without a cwd: the user level only; a project install needs its project.
+    if (!pkg || !scope || (!cwd && scope === "project")) {
       return Response.json({ error: "cwd, package, and scope are required", code: "cwd_package_scope_required" }, { status: 400 });
     }
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
+    if (cwd) {
+      const allowedRoots = await getAllowedFileRoots();
+      if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
+        return Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
+      }
     }
 
-    const { skills } = await loadSkillsWithInstallInfo(cwd);
+    const { skills } = await (cwd ? loadSkillsWithInstallInfo(cwd) : loadUserSkillsWithInstallInfo());
     const skill = skills.find(
       (item) => item.install?.package === pkg && item.install.scope === scope,
     );
@@ -42,7 +45,7 @@ export async function POST(req: Request) {
       env: createChildProcessEnvironment({ FORCE_COLOR: "0" }),
     });
 
-    const refreshed = await loadSkillsWithInstallInfo(cwd);
+    const refreshed = await (cwd ? loadSkillsWithInstallInfo(cwd) : loadUserSkillsWithInstallInfo());
     const updatedSkill = refreshed.skills.find(
       (item) => item.install?.package === pkg && item.install.scope === scope,
     );

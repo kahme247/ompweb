@@ -1,18 +1,19 @@
 // Pure computation of cluster membership (spec M3, M6): no disk, network or clock.
-// Browser-importable: only types from ./pools (it loads node:fs), no node:* modules.
+// Browser-importable: only types from ./pools (it loads node:fs), no node:* modules; ./link-protocol is pure.
 import { comparableProjectPath } from "../comparable-path";
 import { cloneDirectoryName, repositoryKey } from "../git-clone";
 import { LOCAL_HOST_ID } from "../project-ordering";
 import { isNewerVersion } from "../version-compare";
 import type { ManagedProject } from "../types";
 import type { HostStatus } from "./host";
+import { CLUSTER_CONFIG_SINCE_VERSION } from "./link-protocol";
 import type { HostPool, PoolProject } from "./pools";
 
 export const CLUSTER_ID = "cluster";
 export const CLUSTER_LABEL = "Cluster";
 export const CLUSTER_PROJECTS_DIR = "ompweb-cluster";
-/** The first link protocol whose daemons can be cluster members; they also need the `gitOrigins` operation. */
-export const CLUSTER_SINCE_VERSION = 9;
+/** The first link protocol whose daemons can be cluster members (they apply the master's configuration); they also need the `gitOrigins` operation. */
+export const CLUSTER_SINCE_VERSION = CLUSTER_CONFIG_SINCE_VERSION;
 /** The first omp that honours the broker variables; an older one could start with the host's own logins. */
 export const MIN_SHARED_CREDENTIALS_OMP = "15.13.1";
 
@@ -50,6 +51,18 @@ export function clusterOf(pools: readonly HostPool[]): HostPool | undefined {
 
 export function isClusterMember(pools: readonly HostPool[], hostId: string): boolean {
   return clusterOf(pools)?.members.some((member) => member.hostId === hostId) ?? false;
+}
+
+/**
+ * Whether Settings act for the cluster, on the master's configuration (spec K7): `target`, the session or project they
+ * are opened for, is the cluster's (its pool's, or one on a member's node), and `hostId`, where it runs (undefined: this
+ * machine), is still a member. A session of a host that has left runs on that host's own configuration.
+ */
+export function isClusterTarget(target: { poolId?: string; hostId?: string } | null, hostId: string | undefined, pools: readonly HostPool[]): boolean {
+  const cluster = clusterOf(pools);
+  if (!target || !cluster) return false;
+  const ofCluster = target.poolId ? target.poolId === cluster.id : isClusterMember(pools, target.hostId ?? LOCAL_HOST_ID);
+  return ofCluster && (hostId === undefined || isClusterMember(pools, hostId));
 }
 
 /** Whether sessions on this host run on the server's provider logins: members always, other hosts by their own flag, `local` never. */

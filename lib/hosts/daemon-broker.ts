@@ -65,17 +65,14 @@ async function forward(req: IncomingMessage, res: ServerResponse, secret: Buffer
   res.once("close", () => controller.abort());
   let upstream: Response;
   try {
-    const root = new URL(`${login.url.replace(/\/+$/, "")}/api/hosts/broker/`).href;
-    const target = new URL(root + tail.slice(1));
-    // Dot segments (also encoded) would climb out of the route, and this carries the link token: the route's own allow-list cannot see that.
-    if (!target.href.startsWith(root)) return reply(res, 404, "Not found");
-    const headers = new Headers({ authorization: `Bearer ${login.token}` });
+    const headers = new Headers();
     for (const name of REQUEST_HEADERS) {
       const value = req.headers[name];
       if (typeof value === "string") headers.set(name, value);
     }
-    // A redirect would carry the link token on to whatever it names, on the same origin too: it is a failure, not a hop.
-    upstream = await fetch(target, { method: req.method, headers, body: req.method === "GET" || req.method === "HEAD" ? undefined : body, signal: controller.signal, redirect: "error" });
+    const pending = serverFetch(login, "/api/hosts/broker/", tail.slice(1), { method: req.method, headers, body: req.method === "GET" || req.method === "HEAD" ? undefined : body, signal: controller.signal });
+    if (!pending) return reply(res, 404, "Not found");
+    upstream = await pending;
   } catch (error) {
     if (controller.signal.aborted) return; // the client left, or stop() closed it
     deps.log(`broker forward failed (${describe(error)})`);
@@ -94,6 +91,20 @@ async function forward(req: IncomingMessage, res: ServerResponse, secret: Buffer
   const stream = upstream.body as unknown as WebReadableStream | null;
   if (stream) pipeline(Readable.fromWeb(stream), res, () => {});
   else res.end();
+}
+
+/**
+ * `path` under `route` (`/api/hosts/<name>/`) on a linked server, with that link's token; null when dot segments
+ * (also encoded) would climb out of `route`, which the route's own allow-list cannot see.
+ */
+export function serverFetch(login: { url: string; token: string }, route: string, path: string, init: RequestInit): Promise<Response> | null {
+  const root = new URL(`${login.url.replace(/\/+$/, "")}${route}`).href;
+  const target = new URL(root + path);
+  if (!target.href.startsWith(root)) return null;
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${login.token}`);
+  // A redirect would carry the link token on to whatever it names, on the same origin too: it is a failure, not a hop.
+  return fetch(target, { ...init, headers, redirect: "error" });
 }
 
 export function startBrokerForwarder(deps: Deps): BrokerForwarder {

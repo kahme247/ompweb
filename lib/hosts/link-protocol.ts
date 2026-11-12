@@ -6,20 +6,26 @@ import { isValidSessionId } from "../session-file-references-core";
 import { UPLOAD_ID_RE } from "../upload-limits";
 import type { SessionOps } from "./session-ops";
 import type { HostCapacity } from "./capacity";
+import type { ConfigState } from "./daemon-cluster-config";
 import type { SpawnRequest } from "./host";
 import { isWorkspaceOp, WORKSPACE_OP_PARAMS } from "../workspace-types";
 import type { WorkspaceFileEvent } from "../workspace-types";
 
-/** 9: `open.launch.shareCredentials`. 8: pool capacity reports, creation identity and project preparation. 7: shared host-owned channels, lifecycle,
+/** 10: `open.launch.configVersion`, the `config_state` report and the `clusterConfig` op. 9: `open.launch.shareCredentials`.
+ * 8: pool capacity reports, creation identity and project preparation. 7: shared host-owned channels, lifecycle,
  * dialogs and callbacks. 6: composer uploads
  * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
  * `part` messages and a large result as several binary frames, both sent fair across channels
  * (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry the messages,
  * binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
-export const LINK_PROTOCOL_VERSION = 9;
+export const LINK_PROTOCOL_VERSION = 10;
 /** The first daemon link version that honours `open.launch.shareCredentials`: main answers 426 below it for a sharing host. */
 export const SHARED_CREDENTIALS_SINCE_VERSION = 9;
+/** The first daemon link version that applies the master's configuration (`open.launch.configVersion`, `clusterConfig`): a cluster member below it gets 426. */
+export const CLUSTER_CONFIG_SINCE_VERSION = 10;
+/** A configuration version: the manifest's SHA-256, in lowercase hex. */
+export const CONFIG_VERSION_RE = /^[0-9a-f]{64}$/;
 /** The first daemon link version that takes uploads: main answers 426 below it (host_upgrade_required, or
  * host_restart_required on this machine, whose daemon an in-place upgrade leaves running). */
 export const UPLOADS_SINCE_VERSION = 6;
@@ -104,8 +110,8 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   preparePoolProject: ["input"],
 };
 
-/** Unknown additions are answered with 501; pool preparation needs a v8 peer. */
-export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "open", "close", "editLease", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention"] as const;
+/** Unknown additions are answered with 501; pool preparation needs a v8 peer, `clusterConfig` a v10 one. */
+export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "open", "close", "editLease", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention", "clusterConfig"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
 
@@ -182,6 +188,10 @@ export type UpMessage =
   | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
   /** v8: a fresh resource sample; unsequenced and never retained for replay. */
   | { type: "capacity"; sample: HostCapacity }
+  /** v10: the daemon's cluster configuration state, at link up, on each change and after each host.json reload, and
+   * whether the configuration it holds is this link's server's (`owned`); unsequenced and never retained for replay,
+   * but the latest one that found the send window full goes once there is room. */
+  | { type: "config_state"; state: ConfigState; owned: boolean }
   /** v6: the daemon has written `received` bytes of upload `id` for this start `attempt`, `done` once all of them are
    * written and synced; with `error` the upload failed and its staged file is gone. */
   | { type: "upload_ack"; seq: number; id: string; attempt: string; received: number; done: boolean; error?: { status: number; code: string; message: string } }
@@ -294,7 +304,7 @@ export function isHostOp(name: string): name is HostOpName {
 }
 
 const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "interest", "host_tools", "req", "ping", "pong", "ack"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "notifier", "sessions_changed", "channels_changed", "stats", "capacity", "res", "upload_ack", "workspace_file", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "notifier", "sessions_changed", "channels_changed", "stats", "capacity", "config_state", "res", "upload_ack", "workspace_file", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -396,6 +406,18 @@ function channels(o: Obj): HelloChannel[] {
     if (creationId !== undefined && (typeof creationId !== "string" || !CREATION_ID_RE.test(creationId))) fail("Invalid creation identity");
     return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str), cwd: str(c, "cwd"), pending: nullable(c, "pending", strings), ...(creationId === undefined ? {} : { creationId }) };
   });
+}
+
+const CONFIG_FILES: readonly string[] = ["none", "current", "failed"];
+const CONFIG_PLUGINS: readonly string[] = ["none", "pending", "current", "failed"];
+
+/** A daemon's ConfigState (`config_state`, the `clusterConfig` result). Throws LinkProtocolError. */
+export function decodeConfigState(value: unknown): ConfigState {
+  if (!isObj(value)) fail("config state must be an object");
+  const { files, plugins } = value;
+  if (typeof files !== "string" || !CONFIG_FILES.includes(files)) fail("Invalid files state");
+  if (typeof plugins !== "string" || !CONFIG_PLUGINS.includes(plugins)) fail("Invalid plugins state");
+  return { version: nullable(value, "version", str), files: files as ConfigState["files"], plugins: plugins as ConfigState["plugins"], error: nullable(value, "error", str), missingCommands: strings(value, "missingCommands") };
 }
 
 function capacitySample(value: unknown): HostCapacity {
@@ -507,6 +529,8 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       return stats(o);
     case "capacity":
       return { type: "capacity", sample: capacitySample(o.sample) };
+    case "config_state":
+      return { type: "config_state", state: decodeConfigState(o.state), owned: bool(o, "owned") };
     case "upload_ack": {
       const attempt = str(o, "attempt");
       if (!UPLOAD_ID_RE.test(attempt)) fail("attempt must be a UUIDv4");

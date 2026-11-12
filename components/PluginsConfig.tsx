@@ -59,8 +59,8 @@ function versionSummary(pkg: PluginPackageInfo, t: (key: string, vars?: Record<s
   return parts.length ? parts.join(" · ") : t("pluginsConfig.unknown");
 }
 
-function installLocation(scope: PluginScope, cwd: string): string {
-  return scope === "project"
+function installLocation(scope: PluginScope, cwd: string | null): string {
+  return scope === "project" && cwd
     ? `${shortenPath(cwd)}/.omp`
     : "~/.omp/plugins";
 }
@@ -318,7 +318,8 @@ function AddPluginPanel({
   onScopeChange,
   onInstall,
 }: {
-  cwd: string;
+  /** null: the user level only (no project scope). */
+  cwd: string | null;
   source: string;
   scope: PluginScope;
   busy: boolean;
@@ -376,7 +377,7 @@ function AddPluginPanel({
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <SegmentedScope value={scope} onChange={onScopeChange} />
+        {cwd && <SegmentedScope value={scope} onChange={onScopeChange} />}
         <button
           type="button"
           onClick={onInstall}
@@ -450,7 +451,7 @@ function PackageDetail({
   onReloadSession,
 }: {
   pkg: PluginPackageInfo;
-  cwd: string;
+  cwd: string | null;
   busyKey: string | null;
   actionError: string | null;
   actionMessage: string | null;
@@ -570,10 +571,12 @@ function PackageDetail({
         >
           {pkg.installedPath ? shortenPath(pkg.installedPath) : t("pluginsConfig.notFound")}
         </div>
-        <div style={{ color: "var(--text-dim)" }}>{t("pluginsConfig.cwd")}</div>
-        <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>
-          {shortenPath(cwd)}
-        </div>
+        {cwd && <>
+          <div style={{ color: "var(--text-dim)" }}>{t("pluginsConfig.cwd")}</div>
+          <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>
+            {shortenPath(cwd)}
+          </div>
+        </>}
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -618,7 +621,8 @@ export function PluginsConfig({
   onSelectTab,
   embedded = false,
 }: {
-  cwd: string;
+  /** null: the user level only, as a request without a cwd lists and changes it. */
+  cwd: string | null;
   sessionId: string | null;
   onClose: () => void;
   onReloaded?: () => void;
@@ -651,7 +655,7 @@ export function PluginsConfig({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/plugins?cwd=${encodeURIComponent(cwd)}`);
+      const res = await fetch(cwd ? `/api/plugins?cwd=${encodeURIComponent(cwd)}` : "/api/plugins");
       const next = (await res.json()) as PluginsResponse & { error?: string; code?: string };
       if (!res.ok || next.error) throw new Error(formatApiError(next.error ? next : `HTTP ${res.status}`));
       setData(next);
@@ -782,7 +786,7 @@ export function PluginsConfig({
                 whiteSpace: "nowrap",
               }}
             >
-              {shortenPath(cwd)}
+              {cwd && shortenPath(cwd)}
             </code>
           </div>
           <button

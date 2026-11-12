@@ -46,7 +46,8 @@ function fileStem(filePath: string): string {
   return fileName.toLowerCase().endsWith(".md") ? fileName.slice(0, -3) : fileName;
 }
 
-export function AgentsConfig({ cwd }: { cwd: string | null }) {
+/** `userOnly`: the user level alone (a cluster member's settings, spec K7), with no project scope to offer. */
+export function AgentsConfig({ cwd, userOnly = false }: { cwd: string | null; userOnly?: boolean }) {
   const { t, tn } = useI18n();
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -353,7 +354,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
                       {t("agentsConfig.scope")}
                       <select value={createScope} onChange={(e) => setCreateScope(e.target.value as "user" | "project")} style={{ ...nativeSelectStyle, fontSize: 11, minHeight: 28 }}>
                         <option value="user">{t("agentsConfig.scopeUser")}</option>
-                        <option value="project" disabled={!canEditProject}>{t("agentsConfig.scopeProject")}</option>
+                        {!userOnly && <option value="project" disabled={!canEditProject}>{t("agentsConfig.scopeProject")}</option>}
                       </select>
                     </label>
                   ) : null}

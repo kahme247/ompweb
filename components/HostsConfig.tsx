@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
-import { CLUSTER_PROJECTS_DIR, clusterJoinBlock, isClusterMember } from "@/lib/hosts/cluster";
+import { CLUSTER_PROJECTS_DIR, clusterJoinBlock, clusterOf, isClusterMember } from "@/lib/hosts/cluster";
 import type { HostRow } from "@/lib/hosts/hub";
 import type { HostPool } from "@/lib/hosts/pools";
 import { useI18n } from "@/lib/i18n";
@@ -167,6 +167,7 @@ function JoinDialog({ host, localJoins, reload, onClose }: { host: HostRow; loca
           <p style={noteStyle}>{t("hostsConfig.joinProjectsNote", { name })}</p>
           {localJoins && <p style={noteStyle}>{t("hostsConfig.joinLocalNote")}</p>}
           <p style={noteStyle}>{t("hostsConfig.joinCredentialsNote", { name })}</p>
+          <p style={noteStyle}>{t("hostsConfig.joinConfigNote")}</p>
           {error && <div id={errorId} role="alert" style={{ fontSize: 12, color: "var(--status-error)" }}>{error}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
             <button type="button" className="ui-focus-ring" style={buttonStyle} disabled={busy} onClick={onClose}>{t("hostsConfig.cancel")}</button>
@@ -179,7 +180,7 @@ function JoinDialog({ host, localJoins, reload, onClose }: { host: HostRow; loca
 }
 
 /** `localReason`: this machine is not a member yet, so a join adds it too, and why its own daemon is not ready for that. */
-type ClusterState = { pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; localReason: string | null };
+type ClusterState = { pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; localReason: string | null; masterFailed: boolean };
 
 const joinBlock = (row: HostRow) => clusterJoinBlock({ status: row.status, protocol: row.hostVersion, ompVersion: row.ompVersion, supports: (operation) => row.workspaceOps.includes(operation) });
 
@@ -204,6 +205,19 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
     host.hostVersion !== null && host.status !== "needs-upgrade" && t("hostsConfig.protocol", { version: host.hostVersion }),
     linked && (host.lastSeenAt ? t("hostsConfig.lastSeen", { time: new Date(host.lastSeenAt).toLocaleString() }) : t("hostsConfig.neverSeen")),
   ].filter(Boolean).join(" · ");
+  // A member's configuration (spec K4): no line while it is offline; a daemon below link protocol 10 never applies it,
+  // so it needs an update; a member without a report yet is still being brought up to date, unless this machine cannot
+  // serve its configuration, which the message above the rows says once.
+  const memberBlock = member && linked ? joinBlock(host) : null;
+  const outdated = memberBlock === "upgrade" || memberBlock === "needs-upgrade";
+  const config = member && !outdated ? linked?.clusterConfig : undefined;
+  const updating = cluster.masterFailed ? null : t("hostsConfig.configUpdating");
+  const configLine = !member || !linked || host.status === "offline" ? null
+    : outdated ? t("hostsConfig.joinUpgrade")
+      : !config ? updating
+        : config.version !== null && !config.owned ? t("hostsConfig.configHeldElsewhere")
+          : config.error ? t("hostsConfig.configFailed", { reason: config.error })
+            : config.current ? t("hostsConfig.configCurrent") : updating;
 
   return (
     <li className="settings-card" style={{ flexWrap: "wrap", listStyle: "none" }}>
@@ -214,6 +228,8 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{hostStatusText(t, host)}</span>
         </div>
         {details && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)", overflowWrap: "anywhere" }}>{details}</div>}
+        {configLine && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)", overflowWrap: "anywhere" }}>{configLine}</div>}
+        {configLine && config?.missingCommands.length ? <div style={{ marginTop: 2, fontSize: 11, color: "var(--text-muted)", overflowWrap: "anywhere" }}>{t("hostsConfig.configMissing", { commands: config.missingCommands.join(", ") })}</div> : null}
         {isLocalRow(host) && host.daemonManaged && host.status === "offline" && (
           <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "var(--text-muted)" }}>
             {t("hostsConfig.localOfflineHint")}
@@ -277,7 +293,7 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
 
 export function HostsConfig() {
   const { t } = useI18n();
-  const { hosts, pools, poolsLoaded, poolsFailed, failed: loadFailed, reload } = useHostRows();
+  const { hosts, pools, poolsLoaded, poolsFailed, failed: loadFailed, masterConfigError, reload } = useHostRows();
   const [dialog, setDialog] = useState<Dialogs>(null);
   const [revoking, setRevoking] = useState<HostRow | null>(null);
   const [sharing, setSharing] = useState<HostRow | null>(null);
@@ -289,6 +305,7 @@ export function HostsConfig() {
   const localBlock = poolsLoaded && localJoins && local ? joinBlock(local) : null;
   const localReason = !local || localBlock === null ? null
     : localBlock === "omp-old" ? t("hostsConfig.joinOmpOld", { name: hostName(t, local) }) : t("hostsConfig.joinLocalRestart");
+  const linkedMembers = clusterOf(pools)?.members.some((member) => member.hostId !== LOCAL_HOST_ID) ?? false;
 
   const share = async () => {
     if (!sharing) return;
@@ -307,7 +324,9 @@ export function HostsConfig() {
     if (!leaving) return;
     setBusy(true);
     try {
-      await call("DELETE", `/api/hosts/${encodeURIComponent(leaving.id)}/cluster`);
+      const { restoreError } = await call("DELETE", `/api/hosts/${encodeURIComponent(leaving.id)}/cluster`);
+      // It left; only putting its own configuration back failed (spec K6), which the server retries while the host is linked.
+      if (typeof restoreError === "string") toast.error(t("hostsConfig.leaveRestoreFailed", { name: leaving.label, reason: restoreError }));
       setLeaving(null);
     } catch (error) {
       // As for a join: the leave may have been saved before its answer was lost.
@@ -346,12 +365,14 @@ export function HostsConfig() {
         </button>
       </div>
       {loadFailed && <div role="alert" style={{ fontSize: 12, color: "var(--status-error)" }}>{t("hostsConfig.loadFailed")}</div>}
+      {/* Once for every member: none of them can get this machine's configuration (spec K1). */}
+      {masterConfigError && linkedMembers && <div role="alert" style={{ fontSize: 12, color: "var(--status-error)", overflowWrap: "anywhere" }}>{t("hostsConfig.masterConfigFailed", { reason: masterConfigError.message })}</div>}
       {hosts === null ? (
         !loadFailed && <div role="status" style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("hostsConfig.loading")}</div>
       ) : (
         <ul aria-label={t("hostsConfig.title")} style={{ margin: 0, padding: 0 }}>
           {hosts.map((host) => (
-            <HostCard key={host.id} host={host} cluster={{ pools, poolsLoaded, poolsFailed, localReason }} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} onShare={() => setSharing(host)} onJoin={() => setJoining(host)} onLeave={() => setLeaving(host)} />
+            <HostCard key={host.id} host={host} cluster={{ pools, poolsLoaded, poolsFailed, localReason, masterFailed: masterConfigError !== null }} onRename={() => setDialog({ kind: "rename", host })} onRevoke={() => setRevoking(host)} onShare={() => setSharing(host)} onJoin={() => setJoining(host)} onLeave={() => setLeaving(host)} />
           ))}
           {hosts.length === 1 && <li style={{ listStyle: "none", fontSize: 12, color: "var(--text-dim)" }}>{t("hostsConfig.empty")}</li>}
         </ul>

@@ -106,7 +106,9 @@ app/api/
   hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart?, shareCredentials? } (`local`: label only, empty resets to "This machine"; `shareCredentials` on `local` is 400) | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
   hosts/link/route.ts             GET WebSocket upgrade (the `ompweb host` daemon; bearer checked before the upgrade, skipped by the `proxy.ts` gate) | POST 426 for pre-WebSocket daemons
   hosts/broker/[...path]/route.ts allow-listed forwarding of an omp auth broker's endpoints for a host that shares credentials (`sharesCredentials`: its `shareCredentials` flag or cluster membership); authenticated by the host token, outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Shared credentials"
-  hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`; this machine is added too by any join while it is not a member) | DELETE leave; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
+  hosts/cluster-config/manifest/route.ts GET the master's mirrored-configuration manifest (`{ version, files, agentEnv, plugins }`) for a cluster member; host token, members only (`admitClusterMember`: 401 unknown token, 403 `local`/not a member, 503 unreadable `hosts.json`/`pools.json`), 409 `{ error, code }` when the configuration cannot be built (`ClusterConfigError`); outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Cluster configuration"
+  hosts/cluster-config/file/[hash]/route.ts GET one file of the current manifest by its sha256 (404 for any other hash, an older version's included); same admission and gate as the manifest
+  hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`; this machine is added too by any join while it is not a member; the host needs link protocol 10; 409 `host_in_other_cluster` when it holds another server's configuration), then sends the host its configuration (`clusterConfigOp` `apply`) | DELETE leave, then `restore` (none to a daemon below protocol 10, which never applied one); the body carries `restoreError` when the host could not put its own configuration back; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -123,11 +125,11 @@ app/api/
   models-config/test/route.ts     POST test a configured model/provider
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
   web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume, agent tools, agent env, browser transport; a transport change is pushed to every open browser)
-  mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
-  plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
+  mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers; `GET ?sessionId=&attach=1` reads a running session's live MCP status and never starts one (a cluster session on another member)
+  plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`); without `cwd`, the user level only (omp runs in the agent directory; a `project` scope POST without `cwd` is 400 `cwd_required`)
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
   projects/clone/route.ts         POST clone a git URL into a new workspace (NDJSON progress) | DELETE cancel
-  skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
+  skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation; GET without `cwd` lists the user level only (`skills/check` and `skills/update` likewise; project scope needs a `cwd`: 400 `cwd_required` from check, `cwd_package_scope_required` from update)
   skills/install/route.ts         POST install skills through npx skills add
   skills/search/route.ts          GET/POST skills.sh search
   stt/route.ts                    POST audio (+scope) → 202 { jobId } | GET ?scope= live jobs (lib/stt-jobs.ts)
@@ -141,6 +143,7 @@ lib/
   dynamic.tsx          `dynamic()` over `React.lazy` + `Suspense`
   navigation.ts        `useRouter`/`useSearchParams` over the History API
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
+    plugins-cli.ts     `runOmpCli`, `listPlugins` (`omp plugin list --json` as `PluginEntry[]`), `parseJsonLoose`, `ANSI_RE`; loaded by the daemon too (relative imports only); used by `app/api/plugins/route.ts`, `cluster-config-server.ts` and `daemon-cluster-config.ts`
   hosts/               hosts and the local daemon (see "Remote hosts"); none of the daemon-loaded files may import `@/` (the daemon runs on Node through `jiti`)
     host.ts            `Host` interface, `HostStatus`, `isLinkUp`
     local-host.ts      `localHost`, the daemon's side: spawn + file checks on the daemon's machine; `resolveSpawnCwdResult`; `SESSION_EDIT_EXTENSION_PATH` (from the module's own location: the daemon runs in HOME). Never imported by main, nor is `daemon.ts` (`no-direct-local.test.mjs`)
@@ -157,6 +160,10 @@ lib/
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
     cluster.ts         pure cluster rules: `clusterOf` (= `pools[0]`), `isClusterMember`, `sharesCredentials`, `joinCluster`/`leaveCluster`, `clusterJoinBlock`, `ompSharesCredentials` (also the daemon's spawn check); browser-importable (Settings uses it)
+    cluster-config.ts  pure, daemon-safe: what a cluster member mirrors from the master (`MIRRORED`, `LOCAL_SETTINGS`, `CONFIG_LIMITS`), `buildManifest`, `stripLocalSettings`/`mergeLocalSettings`, `isManagedPath`, `ClusterConfigError`
+    cluster-config-server.ts main side: `currentClusterConfig` (the manifest cached per fingerprint, one build at a time, `omp plugin list` cached 120 s), `clusterConfigVersion`, `admitClusterMember`, `configErrorResponse`; used by the two `app/api/hosts/cluster-config/` routes and `hub.ts`
+    daemon-cluster-config.ts daemon side: `createClusterConfig` (`ensure`/`apply`/`restore`/`state`/`holds`/`stop`): download, verify, apply whole or not at all, the member's backup (`own-config/`), plugins, leaving; Node only, relative imports
+    host-bearer.ts     `hostFromBearer`: the host an `Authorization: Bearer <host token>` request names, or the 401/503 answer; used by `admitClusterMember`
     update-types.ts    shared per-host software status and operation contract
     updates.ts         daemon-side version checks, compatibility gate and durable update state
     update-worker.ts   host-only install/restart helper; never starts or stops the web-server service
@@ -456,12 +463,13 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   v6 (uploads: hub → daemon binary frames, `upload_ack`, `uploadStart`/
   `uploadAbort`/`uploadAttach`) keeps v4 and v5. v7 adds multi-server joins,
   host-owned lifecycle, callback routing and channel/list discovery:
-  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 9 (literal
+  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 10 (literal
   one-liners: the deploy script parses them with `sed`); a v4 daemon gets no
   `part`, whole lines and no unacked window (`link.sender.parts`); a v4/v5
   daemon gets 426 for uploads. v8 (host pool) adds `capacity` reports, `creationId`
   and `preparePoolProject`; v9 adds `open.launch.shareCredentials` (see "Shared
-  credentials" below). Main keeps at least N-1, and
+  credentials" below); v10 adds `open.launch.configVersion`, the `config_state`
+  report and the `clusterConfig` op (see "Cluster configuration" below). Main keeps at least N-1, and
   dropping one is an explicit decision (a hello
   outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
   daemon's POST gets 426). Once the WebSocket experiments end, the first version
@@ -529,17 +537,24 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   session resumes after its host's hello (`resumeOnHostLink`,
   `lib/session-resume.ts`), once, after the orphan's exit.
 - **Proxy exclusion.** The `proxy.ts` gate lets exactly `/api/hosts/link` through
-  (the `UNGATED` pattern names that path, no subpaths) and the prefix
-  `/api/hosts/broker/v1/` (below): the daemon has no
+  (the `UNGATED` pattern names that path, no subpaths), the prefix
+  `/api/hosts/broker/v1/` (below) and the two exact cluster configuration paths (below): the daemon has no
   session cookie, so it authenticates with its bearer token instead. The hub
   verifies the `Authorization: Bearer <host token>` header before the upgrade
   (401 unknown token, 503 unreadable `hosts.json` or frozen server). Keep
-  `/api/hosts` itself behind the proxy. `/api/hosts/broker/v1/` is the second
-  ungated path (the `UNGATED` pattern names that prefix; anything else under
+  `/api/hosts` itself behind the proxy. `/api/hosts/broker/v1/` is the next ungated
+  path (the `UNGATED` pattern names that prefix; anything else under
   `/api/hosts/broker/` stays gated): the daemon authenticates there with its
   host token too. A reverse proxy must pass it without its own authentication,
-  without response buffering (the snapshot stream stays open) and without
-  redirects.
+  without response buffering (the snapshot stream stays open) and
+  without redirects. The last ungated paths are the one alternation
+  `api\/hosts\/cluster-config\/(?:manifest|file\/[0-9a-f]{64})$` of `UNGATED`: exactly
+  `/api/hosts/cluster-config/manifest` and `/api/hosts/cluster-config/file/<64 hex digits>`, nothing
+  below or beside them (`/api/hosts/[id]/cluster` and `/api/hosts/[id]/updates` answer to the id
+  `cluster-config` and stay gated); each route checks the host token and membership itself
+  (`admitClusterMember`, again after the configuration is built, so a host revoked or removed meanwhile
+  gets 401/403), and a reverse proxy passes them without its own authentication and
+  without redirects (exact paths, unlike the broker's prefix).
 - **Shared credentials** (`docs/specs/2026-11-10-shared-credentials-design.md`).
   A linked host's `shareCredentials` (default off; `local` never has it) makes the
   omp processes its daemon spawns use the credentials of the server machine
@@ -597,11 +612,80 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     alias; binding a visible checkout un-hides a hidden cluster project.
     `POST /api/projects` pool registration matches by `repositoryKey` (or the
     identical text) and keeps the stored origin.
-  - **Not mirrored to members:** `models.yml` custom providers,
-    environment-variable API keys and omp settings; a cluster session's models
-    depend on the member chosen.
+  - **Mirrored to members:** this machine's omp configuration, see "Cluster
+    configuration" below. Not mirrored: programs (an MCP command, a language server, a local
+    model engine), `.omp/` in a repository, named omp profiles.
   - **Only grouping passes `pools` to `projectTargetId`.** Selection, expand
     keys, reorder, pin and drag use the project's own target.
+- **Cluster configuration** (`docs/specs/2026-11-11-cluster-configuration-design.md`).
+  A member runs omp on this machine's configuration, and its daemon applies it, never omp.
+  - **Master.** `buildManifest` (`lib/hosts/cluster-config.ts`) lists the `MIRRORED` files (from the
+    agent directory, and `~/.agents/skills`), `config.yml` without the `LOCAL_SETTINGS` keys (one
+    constant, read by the master when it builds and by the member when it merges), with
+    the agent environment variables and the plugin set. `version` is a sha256 over all of it. Limits: 5 MiB per file,
+    50 MiB per bundle, 5 MiB for the serialized manifest, which is what a member reads (`CONFIG_LIMITS`, shared
+    with the daemon; too many files is `bundle_too_large`); a configuration over one is not served at all
+    (`ClusterConfigError`, which names a file and never its content; it reaches Settings as `masterConfigError`
+    in the `hosts` snapshot). `currentClusterConfig` rebuilds only when its fingerprint changes
+    (an async stat of every file, agent environment, plugin list, which is read at most every 120 s, so a
+    plugin change reaches members within about two minutes, and keeps the
+    last good list when `omp plugin list` fails: a member removes the plugins the manifest lacks); a read
+    error in the fingerprint walk makes the fingerprint unique, so the build reports it instead of a cached manifest standing.
+    `startClusterConfigSync` (`instrumentation.node.ts`) runs `syncClusterConfig` at start, every 30 s, and
+    whenever `masterConfigVersion` finds a new version after a known one (a member start reads it too):
+    `clusterConfig apply` to each online v10 member that is not `configCurrent`, `restore` to a host outside
+    the cluster whose link is up (`omp-missing` too) and that still reports a configuration of this server or has
+    not reported since its link came up (a dropped `config_state`; the answer says); never while one of that
+    link's ops is unanswered. Join sends `apply` after it saves `pools.json`, leave `restore`
+    after it saves; neither may await between reading the pools and saving.
+  - **Protocol 10.** `open.launch.configVersion` is the master's version (64 hex digits,
+    `CONFIG_VERSION_RE`). The hub sets it for a cluster member's process start (not for a join of a
+    running channel), after reading `pools.json` a second time so a host that left meanwhile gets none; a member
+    below v10 is refused 426 `host_upgrade_required`. The daemon strips `shareCredentials`,
+    `credentialsServer` and `configVersion` from every wire launch and sets them only for the opening link
+    (`forStart`); a launch with a version needs `credentialsServer` and applies it first
+    (`createClusterConfig.ensure`) or the start is refused 409 `cluster_config_failed`. `config_state
+    { state, owned }` is an unsequenced daemon report (like `capacity`, never replayed), at link up, on each
+    change and after each `host.json` reload; one that finds the send window full is not dropped: the latest goes at
+    the link's next flush (main's ack, or the poll of a full socket buffer). The hub ignores it below v10. The
+    `clusterConfig` op is `{ action: "apply", version }` or `{ action: "restore" }` and answers `{ state, owned }`.
+    **The version is never persisted in the resume manifest:** `ChannelTable.running()` drops it and
+    `host-running.json` has no field for it, so a recovered session starts on the version already applied.
+  - **Daemon.** Per version: manifest, then each file the member lacks by hash from the link's server
+    (`<agent dir>/omp-web/cluster-config/objects/`, verified by hash), then one transaction: files are
+    staged, the member's own entries move aside (first apply: `own-config/`, with `plugins.json`,
+    `agent-env.json`, `absent.json`, `server.json` and `settings.yml`, a plain copy of its own `config.yml`
+    or `config.yaml` read through a link, which later applies merge from; later: `trash/`), the staged ones move in, the agent
+    environment and `state.json` are written; any failure puts everything back and the previous
+    version stays. Renames move links as links and cannot cross filesystems (`EXDEV` fails with both
+    directories named); a link above an entry (`~/.agents`) is refused. Every request to the master,
+    its body included, must finish within 30 s (`clusterConfigTimings.fetchMs`); `stop()` aborts it and a
+    running `omp plugin` command (`halt`). Plugins run after the
+    files in the same queue without the start waiting (`syncPlugins`, `omp plugin`; npm pinned by
+    version, a marketplace plugin has no pin); a new version with the same plugin list keeps `plugins: "current"`
+    while the step re-checks it; a failure keeps `plugins: "failed"` and is retried at most
+    every 30 s (`pluginRetryMs`). Applies, restores and plugin jobs run one at a time.
+  - **Ownership.** `own-config/server.json` records the server whose configuration the host holds: one
+    server at a time. Another server's `ensure`/`apply` is refused while the recorded one is still in
+    `host.json` (`foreign`); a recorded server that is no longer linked is taken over by the next apply. `owned`
+    in `config_state` and in the op's answer is `holds(link server)`. A join of a host that reports
+    another server's configuration is 409 `host_in_other_cluster`. Only the server that `holds` the configuration
+    puts it back: another server's `restore` answers at once and changes nothing (`owned: false`; a backup nobody
+    holds, such as a kept plugin list, waits for the next start), and a session start sent before that server's restore is refused
+    after it (`left`), as is any start while the holder's restore runs. A link that ends `"revoked"` while its server
+    `holds` the configuration awaits `restore` before the daemon shuts down: no other server could put it back.
+  - **Placement.** `isHostConfigCurrent`: `local` and hosts outside the cluster always; a member only when it reports
+    this server's version, `files` and `plugins` current. `selectPoolHost` skips a member that is not;
+    `startPooledSession` says why: "still receiving the configuration" or "Update
+    ompweb on the pool's workers". A start pinned to one member applies first and is refused with the reason; a
+    plugin difference does not refuse it.
+  - **Upgrade.** Every cluster member needs a daemon at protocol 10 (`CLUSTER_CONFIG_SINCE_VERSION`; also the
+    join rule `CLUSTER_SINCE_VERSION`). Until then starts there are refused and placement skips it.
+  - **Settings.** Rows carry `clusterConfig { …state, owned, current }` (`listHosts`); the member line shows
+    current, updating (none while `masterConfigError` is set), failed (reason), held by another server, needs update (below v10), and the MCP commands
+    missing there. For a cluster session on another member (`isClusterTarget` with a member host) the MCP,
+    Skills, Plugins and Agents panels use no cwd and no session (the user-level routes above); MCP alone keeps
+    the session for `?attach=1`, read-only (`McpConfig liveOnly`).
 - **Remote paths never reach `allowFileRoot`** or any other main-side
   filesystem check: they mean nothing on main. `startNewRpcSession` calls
   `allowFileRoot` and the local session-list invalidation only for the local
@@ -831,7 +915,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   instead of lapsing a held row by its clock (later opens only read the version).
   Async restore streams archives with fixed 256 MiB compressed and
   expanded limits, rejecting unsupported IDs before archive consumption.
-- **Not yet remote:** Skills/Plugins/Agents/MCP settings; transcript search reads
+- **Not yet remote:** Skills/Plugins/Agents/MCP settings for a host outside the cluster (cluster
+  members run this machine's, see "Cluster configuration"); transcript search reads
   this machine's files.
 
 #### Local daemon (`docs/specs/2026-10-29-local-daemon-design.md`)
@@ -1616,6 +1701,7 @@ during the wait.
   the RPC protocol, so failures surface as toasts (`toast.error`) from the
   editor actions, not inline text.
 - The endpoint is guarded by the same allowed-root rules as `/api/files`.
+- `GET /api/mcp?sessionId=…&attach=1` returns the live status of a session this server already has running (a remote one included), and otherwise answers `liveError: "The session is not running"` instead of starting one (a cluster session on another member is read where it runs; `McpConfig liveOnly` shows it read-only).
 
 ### Plugins and skills
 - `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK.
@@ -1623,6 +1709,7 @@ during the wait.
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives. omp reports it back as `hide` (it reads `hide`/`disableModelInvocation`/`disable-model-invocation`). Frontmatter is omp's only per-skill "hide from model, keep `/skill:`" knob; `disabledExtensions: ["skill:<name>"]` removes the skill entirely.
 - Only user-owned skills are togglable: `getSkillToggleRoots()` (allowed file roots — workspaces the user opened — plus replica scan roots) is the single allowlist for both PATCH and the `togglable` flag GET returns; it is `main`'s pre-CLI allowlist, unchanged. Skills omp lists from anywhere else (the plugin cache, registry installs, custom directories outside a workspace) render a disabled toggle — their files belong to an installer and an update would discard the edit. Never widen PATCH to whatever omp lists.
 - `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
+- `GET /api/plugins`, `POST /api/plugins`, `GET /api/skills`, `POST /api/skills/check` and `POST /api/skills/update` take no `cwd` for the user level (`loadUserSkillsWithInstallInfo`; omp runs in the agent directory, `ensureAgentDir`; the replica scan reads the user roots only, before names are deduplicated, so an agent directory below a project keeps its user skills). The GET routes have no project scope; a project-scope `POST /api/plugins` or `/api/skills/check` without a `cwd` answers 400 `cwd_required`, and `/api/skills/update` answers 400 `cwd_package_scope_required`. Settings uses this for a cluster session on another member, whose project is not on this machine.
 
 ### Updates: web server versus host software
 - **Settings → System** owns the web server's settings and application update. `GET /api/app-update` and its prepare/commit flow remain web-server-only; a compiled web server still links to the release download page.

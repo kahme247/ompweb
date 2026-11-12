@@ -1,4 +1,4 @@
-import { existsSync, realpathSync, statSync } from "fs";
+import { existsSync, mkdirSync, realpathSync, statSync } from "fs";
 import { homedir, tmpdir } from "os";
 import * as path from "path";
 
@@ -30,6 +30,14 @@ export function getAgentDir(): string {
   const override = process.env.PI_CODING_AGENT_DIR;
   if (override) return path.resolve(override);
   return path.join(getConfigRoot(), "agent");
+}
+
+/** The agent directory, created owner-only when missing: omp runs there for a request at the user level, which has no
+ * project; a missing directory would otherwise fail the spawn as if omp itself were missing. */
+export function ensureAgentDir(): string {
+  const dir = getAgentDir();
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
 }
 
 function isDefaultAgentDir(): boolean {

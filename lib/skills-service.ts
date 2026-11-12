@@ -6,7 +6,7 @@ import { promisify } from "util";
 import { parse as parseYaml } from "yaml";
 import { existingPathWithinRootsChecker, getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { resolveOmpBin, versionFingerprint, wrapWindowsScript } from "@/lib/omp/omp-cli";
-import { getAgentDir } from "@/lib/omp/paths";
+import { ensureAgentDir, getAgentDir } from "@/lib/omp/paths";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import { isRecord } from "@/lib/type-guards";
 import type { SkillInfo } from "@/lib/api-types";
@@ -340,16 +340,20 @@ async function discoverSkillsViaCli(cwd: string, ompBin: string | null): Promise
 /** Discover skills for a cwd the way omp does: through the omp binary when it
  * supports `skill list`, else the replica scan below. In the replica, name
  * collisions resolve to the highest-priority provider (scan-root order);
- * result is sorted by name. `ompBin` is a test seam. */
+ * result is sorted by name. `ompBin` is a test seam. `scope` "user" scans the
+ * user roots only, before the collisions are resolved: a user root that is also
+ * a project root (an agent directory below a project) keeps its user skills. */
 export async function discoverSkills(
   cwd: string,
   ompBin: string | null = resolveOmpBin(),
+  scope?: "user",
 ): Promise<SkillsWithDiagnostics> {
   const viaCli = await discoverSkillsViaCli(cwd, ompBin);
   if (viaCli) return viaCli;
   const diagnostics: SkillDiagnostic[] = [];
   const byName = new Map<string, SkillInfo>();
   for (const root of buildScanRoots(cwd)) {
+    if (scope && root.scope !== scope) continue;
     for (const skill of await scanRoot(root, diagnostics)) {
       if (!byName.has(skill.name)) byName.set(skill.name, skill);
     }
@@ -378,8 +382,8 @@ export async function getSkillToggleRoots(cwd?: string): Promise<Set<string>> {
   return roots;
 }
 
-export async function loadSkillsWithInstallInfo(cwd: string, ompBin: string | null = resolveOmpBin()) {
-  const [{ skills, diagnostics }, toggleRoots] = await Promise.all([discoverSkills(cwd, ompBin), getSkillToggleRoots(cwd)]);
+export async function loadSkillsWithInstallInfo(cwd: string, ompBin: string | null = resolveOmpBin(), scope?: "user") {
+  const [{ skills, diagnostics }, toggleRoots] = await Promise.all([discoverSkills(cwd, ompBin, scope), getSkillToggleRoots(cwd)]);
   const isTogglable = existingPathWithinRootsChecker(toggleRoots);
   return {
     skills: annotateSkillsWithInstallInfo(skills, { cwd, agentDir: getAgentDir() }).map((skill) => ({
@@ -388,4 +392,11 @@ export async function loadSkillsWithInstallInfo(cwd: string, ompBin: string | nu
     })),
     diagnostics,
   };
+}
+
+/** The user level only, for a request without a cwd (a cluster member's settings act on this machine's, spec K7): omp
+ * runs in its agent directory, where no project lies, and a project-scope entry is left out all the same. */
+export async function loadUserSkillsWithInstallInfo(ompBin: string | null = resolveOmpBin()) {
+  const listed = await loadSkillsWithInstallInfo(ensureAgentDir(), ompBin, "user");
+  return { ...listed, skills: listed.skills.filter((skill) => skill.sourceInfo?.scope !== "project") };
 }

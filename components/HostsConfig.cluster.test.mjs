@@ -27,7 +27,7 @@ const member = (hostId) => ({ hostId, projectsRoot: `/srv/${hostId}/ompweb-clust
 const cluster = (...hostIds) => [{ id: "cluster", label: "Cluster", enabled: true, members: hostIds.map(member), projects: [] }];
 const hostRow = (overrides = {}) => ({
   id: "local", label: "", status: "online", ompVersion: "omp/15.13.1", platform: "linux",
-  hostVersion: 9, serverVersion: 9, lastSeenAt: null, workspaceOps: ["gitOrigins"], ...overrides,
+  hostVersion: 10, serverVersion: 10, lastSeenAt: null, workspaceOps: ["gitOrigins"], ...overrides,
 });
 const linked = (id, label, overrides = {}) => hostRow({ id, label, allowAgentStart: false, shareCredentials: false, ...overrides });
 
@@ -172,6 +172,7 @@ test("joining asks for the folder, prefilled from the host's home, and sends it"
   assert.deepEqual(calls.filter((call) => call.url.startsWith("/api/home")), [{ method: "GET", url: "/api/home?hostId=h1" }]);
   assert.ok(within(dialog).getByText(/Its Git projects that match a cluster repository or can be added as one become cluster projects, unless they are inside or contain the cluster folder/));
   assert.ok(within(dialog).getByText(/Laptop will use this machine's provider logins/));
+  assert.ok(within(dialog).getByText("It receives this machine's omp configuration (settings, models, MCP servers, skills, plugins, rules), API keys and environment values included, in place of its own until it leaves; its own is kept and put back then."));
   assert.equal(calls.some((call) => call.method === "PUT"), false);
 
   await user.click(within(dialog).getByRole("button", { name: "Add to cluster" }));
@@ -190,18 +191,20 @@ for (const [label, pools, says] of [["no cluster", [], true], ["a first pool wit
   });
 }
 
-test("a refused join shows the server's message and keeps the dialog open", async (t) => {
-  const { user } = await showHosts(t, {
-    hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local"),
-    respond: async () => Response.json({ error: "The cluster changed during the join; try again", code: "cluster_changed" }, { status: 409 }),
+for (const [code, message] of [["cluster_changed", "The cluster changed during the join; try again"], ["host_in_other_cluster", "Laptop runs another server's cluster configuration; it must leave that cluster first"]]) {
+  test(`a refused join (${code}) shows the server's message and keeps the dialog open`, async (t) => {
+    const { user } = await showHosts(t, {
+      hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local"),
+      respond: async () => Response.json({ error: message, code }, { status: 409 }),
+    });
+    await user.click(clusterSwitch("Laptop"));
+    const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
+    await waitFor(() => assert.notEqual(within(dialog).getByLabelText(/Folder on Laptop/).value, ""));
+    await user.click(within(dialog).getByRole("button", { name: "Add to cluster" }));
+    assert.equal((await within(dialog).findByRole("alert")).textContent, message);
+    assert.ok(screen.getByRole("dialog", { name: "Add Laptop to the cluster?" }));
   });
-  await user.click(clusterSwitch("Laptop"));
-  const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
-  await waitFor(() => assert.notEqual(within(dialog).getByLabelText(/Folder on Laptop/).value, ""));
-  await user.click(within(dialog).getByRole("button", { name: "Add to cluster" }));
-  assert.equal((await within(dialog).findByRole("alert")).textContent, "The cluster changed during the join; try again");
-  assert.ok(screen.getByRole("dialog", { name: "Add Laptop to the cluster?" }));
-});
+}
 
 /** A join or leave whose answer is lost: the server saved it or not, and the reload after it answers or fails. */
 const LOST = [["saved", true, true], ["not saved", false, true], ["of unknown outcome, the reload failing", true, false]];
@@ -263,7 +266,7 @@ test("leaving is confirmed, then sends DELETE", async (t) => {
   const { calls, user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local", "h1") });
   await user.click(clusterSwitch("Laptop"));
   const dialog = await screen.findByRole("dialog", { name: "Remove Laptop from the cluster?" });
-  assert.ok(within(dialog).getByText(/The cluster keeps the projects it gained from Laptop; hide any you do not want\./));
+  assert.ok(within(dialog).getByText(/The cluster keeps the projects it gained from Laptop; hide any you do not want\. Laptop gets its own omp configuration back\./));
   assert.equal(calls.some((call) => call.method === "DELETE"), false);
   await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
   await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
@@ -272,6 +275,74 @@ test("leaving is confirmed, then sends DELETE", async (t) => {
   await user.click(clusterSwitch("Laptop"));
   await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
   await waitFor(() => assert.deepEqual(calls.find((call) => call.method === "DELETE"), { method: "DELETE", url: "/api/hosts/h1/cluster", body: undefined }));
+});
+
+test("a leave whose own configuration could not be put back says so and why", async (t) => {
+  const errors = [];
+  t.mock.method(toast, "error", (message) => { errors.push(message); });
+  const { user } = await showHosts(t, {
+    hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local", "h1"),
+    respond: async () => Response.json({ pools: cluster("local"), restoreError: "omp-web/own-config/agent is not readable" }),
+  });
+  await user.click(clusterSwitch("Laptop"));
+  await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
+  await waitFor(() => assert.deepEqual(errors, ["Laptop left the cluster, but its own omp configuration could not be put back: omp-web/own-config/agent is not readable. It is retried automatically while the host is linked."]));
+});
+
+const configState = (fields = {}) => ({ version: "a".repeat(64), files: "current", plugins: "current", error: null, missingCommands: [], owned: true, current: true, ...fields });
+const configLines = (name) => within(rowOf(name)).queryAllByText(/^(Configuration:|Not installed on this host:|Update ompweb on this host first)/).map((line) => line.textContent);
+
+for (const [label, overrides, lines] of [
+  ["current", { clusterConfig: configState() }, ["Configuration: same as the master"]],
+  ["updating", { clusterConfig: configState({ plugins: "pending", current: false }) }, ["Configuration: updating…"]],
+  ["not reported yet", {}, ["Configuration: updating…"]],
+  ["failed", { clusterConfig: configState({ files: "failed", error: "the master answered 500 for the manifest", current: false }) }, ["Configuration: failed — the master answered 500 for the manifest"]],
+  ["held by another server", { clusterConfig: configState({ owned: false, current: false }) }, ["Configuration: held by another ompweb server; remove it from that server's cluster first"]],
+  ["current, with commands it lacks", { clusterConfig: configState({ missingCommands: ["uvx", "docker"] }) }, ["Configuration: same as the master", "Not installed on this host: uvx, docker"]],
+  ["below link protocol 10, never reporting", { hostVersion: 9 }, ["Update ompweb on this host first"]],
+  ["offline, with its last report", { status: "offline", clusterConfig: configState({ missingCommands: ["uvx"] }) }, []],
+  ["offline, never reported", { status: "offline" }, []],
+]) {
+  test(`a member's row states its configuration: ${label}`, async (t) => {
+    await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop", overrides)], pools: cluster("local", "h1") });
+    assert.deepEqual(configLines("Laptop"), lines);
+  });
+}
+
+const MASTER_ERROR = { code: "file_too_large", message: "rules/big.md is 6000000 bytes, over the 5242880 byte limit" };
+const masterErrors = () => screen.queryAllByText(/^Members cannot get this machine's configuration/).map((line) => line.textContent);
+
+test("a master configuration the members cannot get is said once, above the member rows, until it works again", async (t) => {
+  const hosts = [hostRow(), linked("h1", "Laptop"), linked("h2", "Desk")];
+  const { frame } = await showHosts(t, { hosts, pools: cluster("local", "h1", "h2") });
+  assert.deepEqual(masterErrors(), []);
+  frame({ hosts, masterConfigError: MASTER_ERROR });
+  assert.deepEqual(masterErrors(), [`Members cannot get this machine's configuration: ${MASTER_ERROR.message}`]);
+  const [line] = screen.getAllByText(/^Members cannot get/);
+  assert.ok(line.compareDocumentPosition(rowOf("Laptop")) & 4, "before the rows");
+  frame({ hosts });
+  assert.deepEqual(masterErrors(), []);
+});
+
+test("without linked members the master configuration error is not shown", async (t) => {
+  const hosts = [hostRow(), linked("h1", "Laptop")];
+  const { frame } = await showHosts(t, { hosts, pools: cluster("local") });
+  frame({ hosts, masterConfigError: MASTER_ERROR });
+  assert.deepEqual(masterErrors(), []);
+});
+
+test("while members cannot get this machine's configuration, no member row says it is updating", async (t) => {
+  const hosts = [hostRow(), linked("h1", "Laptop"), linked("h2", "Desk", { clusterConfig: configState({ plugins: "pending", current: false }) })];
+  const { frame } = await showHosts(t, { hosts, pools: cluster("local", "h1", "h2") });
+  assert.deepEqual([configLines("Laptop"), configLines("Desk")], [["Configuration: updating…"], ["Configuration: updating…"]]);
+  frame({ hosts, masterConfigError: MASTER_ERROR });
+  assert.deepEqual([configLines("Laptop"), configLines("Desk")], [[], []]);
+});
+
+test("a standalone host shows no configuration line, even with a report", async (t) => {
+  await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop", { clusterConfig: configState({ owned: false, missingCommands: ["uvx"] }) })], pools: cluster("local") });
+  assert.deepEqual(configLines("Laptop"), []);
+  assert.deepEqual(configLines("This machine"), []);
 });
 
 for (const [label, saved, reloads] of LOST) {
@@ -302,7 +373,6 @@ for (const [label, saved, reloads] of LOST) {
     await waitFor(() => assert.equal(remove.disabled, false));
   });
 }
-
 test("while the pools load, every switch and share toggle is disabled and nothing is sent", async (t) => {
   const { calls, user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop"), linked("h2", "Desk", { shareCredentials: true })], pools: "pending" });
   for (const name of ["Laptop", "Desk"]) {
