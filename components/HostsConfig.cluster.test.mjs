@@ -31,7 +31,8 @@ const hostRow = (overrides = {}) => ({
 });
 const linked = (id, label, overrides = {}) => hostRow({ id, label, allowAgentStart: false, shareCredentials: false, ...overrides });
 
-/** `pools: null` makes GET /api/hosts fail, `"pending"` never answers it, and a promise answers it once settled (null failing); `home: null` makes GET /api/home fail. Other requests go to `respond`. */
+/** `pools: null` makes GET /api/hosts fail, `"pending"` never answers it, a promise answers it once settled (null failing), and a function
+ * is asked on every request (null failing); `home: null` makes GET /api/home fail. Other requests go to `respond`. */
 async function showHosts(t, { hosts, pools = [], home = "/home/andre", respond = async () => Response.json({ pools }) }) {
   const calls = [];
   let snapshot;
@@ -40,7 +41,7 @@ async function showHosts(t, { hosts, pools = [], home = "/home/andre", respond =
     if (String(url) === "/api/hosts" && method === "GET") {
       snapshot = init;
       if (pools === "pending") return new Promise(() => {});
-      const answer = await pools;
+      const answer = await (typeof pools === "function" ? pools() : pools);
       return answer === null ? new Response("{}", { status: 500 }) : Response.json({ hosts: [], pools: answer });
     }
     if (String(url).startsWith("/api/home?")) {
@@ -58,7 +59,7 @@ async function showHosts(t, { hosts, pools = [], home = "/home/andre", respond =
   act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts }) } }));
   await screen.findByRole("button", { name: "Rename This machine" });
   // Settled once the snapshot is applied: every cluster switch is then enabled or says why not; while loading it is disabled without a reason.
-  if (Array.isArray(pools) || pools === null) {
+  if (Array.isArray(pools) || pools === null || typeof pools === "function") {
     await waitFor(() => assert.ok(screen.getAllByRole("switch", { name: /is in the cluster$/ }).every((toggle) => !toggle.disabled || toggle.hasAttribute("aria-describedby"))));
   }
   const frame = (data) => act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify(data) } }));
@@ -169,7 +170,7 @@ test("joining asks for the folder, prefilled from the host's home, and sends it"
   const folder = within(dialog).getByLabelText("Folder on Laptop for the cluster's checkouts");
   await waitFor(() => assert.equal(folder.value, "/home/andre/ompweb-cluster"));
   assert.deepEqual(calls.filter((call) => call.url.startsWith("/api/home")), [{ method: "GET", url: "/api/home?hostId=h1" }]);
-  assert.ok(within(dialog).getByText(/Its Git projects that match a cluster repository or can be added as one become cluster projects/));
+  assert.ok(within(dialog).getByText(/Its Git projects that match a cluster repository or can be added as one become cluster projects, unless they are inside or contain the cluster folder/));
   assert.ok(within(dialog).getByText(/Laptop will use this machine's provider logins/));
   assert.equal(calls.some((call) => call.method === "PUT"), false);
 
@@ -185,7 +186,7 @@ for (const [label, pools, says] of [["no cluster", [], true], ["a first pool wit
     const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
     const note = within(dialog).queryByText(/^This machine joins too: its Git projects that match a cluster repository or can be added as one become cluster projects/);
     assert.equal(note !== null, says);
-    if (says) assert.match(note.textContent, /any member with capacity \(currently Linux hosts only\)/);
+    if (says) assert.match(note.textContent, /unless they are inside or contain the ompweb-cluster folder in its home folder.*any member with capacity \(currently Linux hosts only\)/);
   });
 }
 
@@ -202,23 +203,37 @@ test("a refused join shows the server's message and keeps the dialog open", asyn
   assert.ok(screen.getByRole("dialog", { name: "Add Laptop to the cluster?" }));
 });
 
-test("a join whose answer is lost reloads the cluster before the dialog is enabled again: the saved membership shows, the error stays", async (t) => {
-  const pools = cluster("local");
-  const { user } = await showHosts(t, {
-    hosts: [hostRow(), linked("h1", "Laptop")], pools,
-    // The server saved the join; its answer never arrived.
-    respond: async () => { pools[0].members.push(member("h1")); throw new TypeError("Failed to fetch"); },
+/** A join or leave whose answer is lost: the server saved it or not, and the reload after it answers or fails. */
+const LOST = [["saved", true, true], ["not saved", false, true], ["of unknown outcome, the reload failing", true, false]];
+const UNKNOWN = "Whether the change was saved is unknown (Failed to fetch); the cluster could not be reloaded to check.";
+
+for (const [label, saved, reloads] of LOST) {
+  test(`a join whose answer is lost, ${label}, shows what the reload finds before Add is enabled again`, async (t) => {
+    const pools = cluster("local");
+    let reloadFails = false;
+    const { user } = await showHosts(t, {
+      hosts: [hostRow(), linked("h1", "Laptop")], pools: () => (reloadFails ? null : pools),
+      respond: async () => {
+        if (saved) pools[0].members.push(member("h1"));
+        reloadFails = !reloads;
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    await user.click(clusterSwitch("Laptop"));
+    const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
+    await waitFor(() => assert.notEqual(within(dialog).getByLabelText(/Folder on Laptop/).value, ""));
+    const confirm = within(dialog).getByRole("button", { name: "Add to cluster" });
+    await user.click(confirm);
+    if (saved && reloads) {
+      // Done after all: no error, and no join offered again.
+      await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+      assert.equal(clusterSwitch("Laptop").getAttribute("aria-checked"), "true");
+      return;
+    }
+    assert.equal((await within(dialog).findByRole("alert")).textContent, reloads ? "Failed to fetch" : UNKNOWN);
+    await waitFor(() => assert.equal(confirm.disabled, false));
   });
-  await user.click(clusterSwitch("Laptop"));
-  const dialog = await screen.findByRole("dialog", { name: "Add Laptop to the cluster?" });
-  await waitFor(() => assert.notEqual(within(dialog).getByLabelText(/Folder on Laptop/).value, ""));
-  const confirm = within(dialog).getByRole("button", { name: "Add to cluster" });
-  await user.click(confirm);
-  assert.equal((await within(dialog).findByRole("alert")).textContent, "Failed to fetch");
-  await waitFor(() => assert.equal(confirm.disabled, false));
-  // The dialog hides the page from the accessibility tree.
-  assert.equal(screen.getByRole("switch", { name: "Laptop is in the cluster", hidden: true }).getAttribute("aria-checked"), "true");
-});
+}
 
 test("without a home folder the field starts empty and stays required; the dialog still opens", async (t) => {
   const { calls, user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop")], pools: cluster("local"), home: null });
@@ -259,22 +274,34 @@ test("leaving is confirmed, then sends DELETE", async (t) => {
   await waitFor(() => assert.deepEqual(calls.find((call) => call.method === "DELETE"), { method: "DELETE", url: "/api/hosts/h1/cluster", body: undefined }));
 });
 
-test("a leave whose answer is lost reloads the cluster before Remove is enabled again: the saved membership shows, the error stays", async (t) => {
-  const errors = [];
-  t.mock.method(toast, "error", (message) => { errors.push(message); });
-  const pools = cluster("local", "h1");
-  const { user } = await showHosts(t, {
-    hosts: [hostRow(), linked("h1", "Laptop")], pools,
-    // The server saved the leave; its answer never arrived.
-    respond: async () => { pools[0].members.pop(); throw new TypeError("Failed to fetch"); },
+for (const [label, saved, reloads] of LOST) {
+  test(`a leave whose answer is lost, ${label}, shows what the reload finds before Remove is enabled again`, async (t) => {
+    const errors = [];
+    t.mock.method(toast, "error", (message) => { errors.push(message); });
+    const pools = cluster("local", "h1");
+    let reloadFails = false;
+    const { user } = await showHosts(t, {
+      hosts: [hostRow(), linked("h1", "Laptop")], pools: () => (reloadFails ? null : pools),
+      respond: async () => {
+        if (saved) pools[0].members.pop();
+        reloadFails = !reloads;
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    await user.click(clusterSwitch("Laptop"));
+    const remove = within(await screen.findByRole("dialog", { name: "Remove Laptop from the cluster?" })).getByRole("button", { name: "Remove" });
+    await user.click(remove);
+    if (saved && reloads) {
+      // Done after all: no error, and no leave offered again.
+      await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+      assert.equal(clusterSwitch("Laptop").getAttribute("aria-checked"), "false");
+      assert.deepEqual(errors, []);
+      return;
+    }
+    await waitFor(() => assert.deepEqual(errors, [reloads ? "Failed to fetch" : UNKNOWN]));
+    await waitFor(() => assert.equal(remove.disabled, false));
   });
-  await user.click(clusterSwitch("Laptop"));
-  const remove = within(await screen.findByRole("dialog", { name: "Remove Laptop from the cluster?" })).getByRole("button", { name: "Remove" });
-  await user.click(remove);
-  await waitFor(() => assert.deepEqual(errors, ["Failed to fetch"]));
-  await waitFor(() => assert.equal(remove.disabled, false));
-  assert.equal(screen.getByRole("switch", { name: "Laptop is in the cluster", hidden: true }).getAttribute("aria-checked"), "false");
-});
+}
 
 test("while the pools load, every switch and share toggle is disabled and nothing is sent", async (t) => {
   const { calls, user } = await showHosts(t, { hosts: [hostRow(), linked("h1", "Laptop"), linked("h2", "Desk", { shareCredentials: true })], pools: "pending" });

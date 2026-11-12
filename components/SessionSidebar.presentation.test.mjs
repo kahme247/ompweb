@@ -143,7 +143,7 @@ test("the sidebar lists a cluster's pool projects before its members' pinned pro
   }
 });
 
-test("the sidebar refetches its projects when the loaded pools change, not on their first load or an unchanged frame", async () => {
+test("the sidebar refetches its projects and sessions when the loaded pools change, not on their first load or an unchanged frame", async () => {
   const original = { fetch: globalThis.fetch, Worker: globalThis.Worker, SharedWorker: globalThis.SharedWorker, matchMedia: window.matchMedia };
   globalThis.Worker = FakeWorker;
   globalThis.SharedWorker = undefined;
@@ -152,6 +152,7 @@ test("the sidebar refetches its projects when the loaded pools change, not on th
   const hosts = [{ id: "local", label: "", status: "online" }, { id: "h1", label: "Build box", status: "offline", hostVersion: null, serverVersion: 9 }];
   const cluster = (...hostIds) => [{ id: "cluster", label: "Cluster", enabled: true, members: hostIds.map((hostId) => ({ hostId })), projects: [] }];
   let projectLoads = 0;
+  let sessionLoads = 0;
   globalThis.fetch = async (input) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/api/hosts") return Response.json({ hosts, pools: cluster("local") });
@@ -159,7 +160,10 @@ test("the sidebar refetches its projects when the loaded pools change, not on th
       projectLoads++;
       return Response.json({ projects: [] });
     }
-    if (url.pathname === "/api/sessions") return Response.json({ sessions: [] });
+    if (url.pathname === "/api/sessions") {
+      sessionLoads++;
+      return Response.json({ sessions: [] });
+    }
     return Response.json({});
   };
   try {
@@ -171,10 +175,14 @@ test("the sidebar refetches its projects when the loaded pools change, not on th
     assert.equal(projectLoads, 1, "loading the pools does not fetch the projects again");
     const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
     const frame = (pools) => act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts, pools }) } }));
+    const sessionsBefore = sessionLoads;
     frame(cluster("local"));
     assert.equal(projectLoads, 1, "a frame with the same pools");
+    assert.equal(sessionLoads, sessionsBefore, "a frame with the same pools");
+    // The server tags sessions with the cluster's bindings: they move to the new projects only when fetched again.
     frame(cluster("local", "h1"));
     assert.equal(projectLoads, 2, "a host joined");
+    assert.equal(sessionLoads, sessionsBefore + 1, "a host joined");
   } finally {
     cleanup();
     globalThis.fetch = original.fetch;

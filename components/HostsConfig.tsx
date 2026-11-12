@@ -115,7 +115,7 @@ function HostDialog({ dialog, onClose }: { dialog: NonNullable<Dialogs>; onClose
 }
 
 /** The folder on the joining host where the cluster keeps the checkouts it creates. Without a home folder it starts empty and stays required. */
-function JoinDialog({ host, localJoins, reload, onClose }: { host: HostRow; localJoins: boolean; reload: () => Promise<void>; onClose: () => void }) {
+function JoinDialog({ host, localJoins, reload, onClose }: { host: HostRow; localJoins: boolean; reload: () => Promise<HostPool[] | null>; onClose: () => void }) {
   const { t } = useI18n();
   const name = hostName(t, host);
   const [folder, setFolder] = useState("");
@@ -144,9 +144,11 @@ function JoinDialog({ host, localJoins, reload, onClose }: { host: HostRow; loca
       await call("PUT", `/api/hosts/${encodeURIComponent(host.id)}/cluster`, { projectsRoot });
       onClose();
     } catch (failed) {
-      setError(failed instanceof Error ? failed.message : String(failed));
-      // The join may have been saved before its answer was lost: show the membership the server has now.
-      await reload();
+      const message = failed instanceof Error ? failed.message : String(failed);
+      // The join may have been saved before its answer was lost: the membership the server has now decides.
+      const pools = await reload();
+      if (pools && isClusterMember(pools, host.id)) return onClose();
+      setError(pools ? message : t("hostsConfig.clusterOutcomeUnknown", { error: message }));
       setBusy(false);
     }
   };
@@ -308,9 +310,11 @@ export function HostsConfig() {
       await call("DELETE", `/api/hosts/${encodeURIComponent(leaving.id)}/cluster`);
       setLeaving(null);
     } catch (error) {
-      failure(error);
       // As for a join: the leave may have been saved before its answer was lost.
-      await reload();
+      const pools = await reload();
+      if (pools && !isClusterMember(pools, leaving.id)) setLeaving(null);
+      else if (pools) failure(error);
+      else toast.error(t("hostsConfig.clusterOutcomeUnknown", { error: error instanceof Error ? error.message : String(error) }));
     } finally {
       setBusy(false);
     }

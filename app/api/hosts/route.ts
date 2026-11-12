@@ -166,6 +166,12 @@ export async function DELETE(req: Request) {
   const id = new URL(req.url).searchParams.get("id");
   if (!id) return fail("id is required", 400);
   if (id === "local") return fail("This machine cannot be revoked", 400);
+  // An unreadable registry fails before the pools change: no member is removed while its record and link remain.
+  try {
+    readHosts();
+  } catch (error) {
+    return failFor(error);
+  }
   // A member leaves the cluster first: once its record is gone, no row is left to remove it there.
   try {
     const pools = loadPools();
