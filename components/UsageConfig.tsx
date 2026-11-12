@@ -57,7 +57,7 @@ export function UsageConfig() {
   const chartSvgRef = useRef<SVGSVGElement | null>(null);
 
   const fetchUsage = useCallback(
-    // `poll` refetches behind the page: no spinner, and a failure leaves the report on screen.
+    // `poll` refetches behind the page: no spinner, and an earlier failure stays up until an answer arrives.
     async (mode: "load" | "refresh" | "poll" = "load", signal?: AbortSignal) => {
       if (mode === "refresh") setRefreshing(true);
       else if (mode === "load") setLoading(true);
@@ -76,11 +76,12 @@ export function UsageConfig() {
         }
         const data: UsageReport = await res.json();
         setReport(data);
+        setError(null);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
           return;
         }
-        if (mode !== "poll") setError(err instanceof Error ? err.message : String(err));
+        setError(err instanceof Error ? err.message : String(err));
       } finally {
         if (mode !== "poll") {
           setLoading(false);
@@ -477,6 +478,13 @@ export function UsageConfig() {
           </button>
         </div>
       </div>
+
+      {/* A refresh or background update that failed: what is on screen is the last report that arrived. */}
+      {error && (
+        <div role="alert" style={{ fontSize: 12, color: "var(--status-error)" }}>
+          {t("usageConfig.error")}: {error}
+        </div>
+      )}
 
       {/* 2. Top Row: Raw Token Cost & Chart */}
       <div

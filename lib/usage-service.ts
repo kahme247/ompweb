@@ -1,4 +1,4 @@
-import { statSync } from "fs";
+import { closeSync, openSync, statSync } from "fs";
 import { basename, join } from "path";
 import { readModelsConfig } from "./omp/models-config";
 import { forEachFileLineSync, readSessionHeaderSync } from "./omp/session-files";
@@ -182,17 +182,23 @@ export function computeTimeRangeBounds(
  * that session's artifacts directory (subagent, advisor, `/tan` clone,
  * extension sub-session) the records carry the owner's id and cwd rather than
  * the transcript's own header, so they count toward that session and project.
+ *
+ * A transcript that cannot be read to its end yields what was read, uncached.
+ * With `strict` that throws instead, as does an unreadable file or owner: the
+ * caller stores the result as the whole transcript.
  */
 export function parseSessionUsage(
   filePath: string,
   customModelsConfig = readModelsConfig(),
   sessionFile = filePath,
+  strict = false,
 ): UsageRecord[] {
   let stats;
   try {
     stats = statSync(filePath);
     if (!stats.isFile() || stats.size === 0) return [];
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
 
@@ -204,6 +210,8 @@ export function parseSessionUsage(
 
   const isArtifact = sessionFile !== filePath;
   const owner = isArtifact ? readSessionHeaderSync(sessionFile) : null;
+  // An owner that opens but has no header is malformed and its artifacts go by its file name; one that does not open throws.
+  if (strict && isArtifact && !owner) closeSync(openSync(sessionFile, "r"));
   let sessionId = owner?.id ?? basename(sessionFile, ".jsonl");
   let sessionCwd = owner?.cwd ?? "";
   let sessionTimestamp = stats.mtimeMs;
@@ -399,8 +407,10 @@ export function parseSessionUsage(
         }
       }
     });
-  } catch {
-    // Return partially collected records on read error
+  } catch (error) {
+    if (strict) throw error;
+    // Not cached: its stamp would vouch for a transcript that was only partly read.
+    return records;
   }
 
   setUsageCacheEntry(filePath, {

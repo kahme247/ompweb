@@ -81,9 +81,6 @@ async function syncHostUsage(host: Host, db: Database, refresh: boolean): Promis
     }
     if (paths.length > 0) queue.push({ session, paths });
   }
-  // The index is the host's whole inventory (it fails otherwise), so a stored transcript it leaves out is gone.
-  if (unlisted.size > 0) storeHostUsage(db, host.id, parserVersion, [], [...unlisted.keys()]);
-
   while (queue.length > 0) {
     const batch = nextBatch(queue);
     const page = await host.sessionOps.readUsageRecords(batch);
@@ -96,12 +93,16 @@ async function syncHostUsage(host: Host, db: Database, refresh: boolean): Promis
     if (files.length === 0 && missing.length === 0) {
       throw new HostOpError(502, "host_bad_result", `${host.label} read none of the usage transcripts it was asked for`);
     }
+    // Stored page by page, each transcript whole: a pull that fails later leaves the rest for the next one.
     storeHostUsage(db, host.id, parserVersion, files, missing);
     const rest = batch
       .map(({ session, paths }) => ({ session, paths: paths.filter((path) => open.has(path)) }))
       .filter((request) => request.paths.length > 0);
     queue.unshift(...rest);
   }
+  // The index was the host's whole inventory (it fails otherwise), so a stored transcript it left out is gone. Dropped
+  // last: a pull that fails on the way takes nothing away.
+  if (unlisted.size > 0) storeHostUsage(db, host.id, parserVersion, [], [...unlisted.keys()]);
   markHostSynced(db, host.id, Date.now());
 }
 

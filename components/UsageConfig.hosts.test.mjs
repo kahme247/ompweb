@@ -12,14 +12,15 @@ const project = (hostId, hostLabel, name) => ({
   hostId, hostLabel, project: `/work/${name}`, projectName: name, cost: 1, tokens: 1000, share: 50, sessionsCount: 1,
 });
 
-/** Answer `/api/usage` with `reports` in turn, the last one from then on. Returns the URLs asked for. */
+/** Answer `/api/usage` with `reports` in turn, the last one from then on; `null` answers 503. Returns the URLs asked for. */
 function fakeUsage(t, ...reports) {
   const requests = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     if (!String(url).startsWith("/api/usage")) return Response.json({});
     requests.push(String(url));
-    return Response.json(reports[Math.min(requests.length, reports.length) - 1]);
+    const next = reports[Math.min(requests.length, reports.length) - 1];
+    return next ? Response.json(next) : new Response("", { status: 503, statusText: "Service Unavailable" });
   };
   t.after(() => {
     cleanup();
@@ -131,4 +132,20 @@ test("leaving the page stops fetching for a host that is still syncing", async (
   unmount();
   await advance(60_000);
   assert.equal(requests.length, 1);
+});
+
+test("a background update that fails is shown above the report it could not replace, until one arrives", async (t) => {
+  const laptop = (state) => report({ hostBreakdown: [host("local", "", "current", null, 2), host("h1", "laptop", state, null, 1)] });
+  const requests = fakeUsage(t, laptop("syncing"), null, laptop("current"));
+  const advance = mockTimers(t);
+  const { container } = render(createElement(UsageConfig));
+  await advance();
+  assert.equal(within(container).queryByRole("alert"), null);
+
+  await advance(2000);
+  assert.equal(within(container).getByRole("alert").textContent, "Could not load usage data: Failed to fetch usage: Service Unavailable");
+  assert.ok(within(container).getByRole("button", { name: "HOST" }), "the report stays on screen");
+
+  await advance(2000);
+  assert.deepEqual([requests.length, within(container).queryByRole("alert")], [3, null]);
 });

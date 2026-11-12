@@ -23,6 +23,7 @@ import {
   deleteSessionFileWithArtifacts,
   getLeafEntryId,
   inventorySessionFiles,
+  isGone,
   listSessionArtifactTranscripts,
   loadSessionFile,
   MAX_SESSION_LOAD_BYTES,
@@ -31,7 +32,7 @@ import {
   setSessionTitle,
   writeSessionFileAtomicSync,
 } from "../omp/session-files";
-import { readModelsConfig } from "../omp/models-config";
+import { readModelsConfig, type ModelsFileConfig } from "../omp/models-config";
 import { getSessionsDir } from "../omp/paths";
 import { preparePoolProject, type PreparedPoolProject } from "../pooled-projects";
 import { projectIdentityKey, sessionPathKey } from "../paths";
@@ -67,7 +68,7 @@ import { SUBAGENT_ID_RE } from "../subagent-types";
 import { isRecord } from "../type-guards";
 import type { ArchivedSessionInfo, ManagedProject, ProjectLaunchConfig, SessionContext, SessionInfo, SessionTitleSource } from "../types";
 import { invalidateUsageCache, parseSessionUsage, USAGE_PARSER_VERSION } from "../usage-service";
-import type { UsageReadRequest, UsageRecordsPage, UsageSessionStamps, UsageTranscriptIndex, UsageTranscriptRecords, UsageTranscriptStamp } from "../usage-types";
+import type { UsageReadRequest, UsageRecord, UsageRecordsPage, UsageSessionStamps, UsageTranscriptIndex, UsageTranscriptRecords, UsageTranscriptStamp } from "../usage-types";
 import { resolveProject } from "../worktree";
 
 export type OpResult<T> = { ok: true; value: T } | { ok: false; status: number; code: string; error: string };
@@ -317,15 +318,24 @@ function usageStamp(path: string): UsageTranscriptStamp | null {
   try {
     stats = statSync(path);
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    if (isGone(error)) return null;
     throw error;
   }
   return stats.isFile() && stats.size > 0 ? { path, mtimeMs: stats.mtimeMs, size: stats.size } : null;
 }
 
-/** Main drops the rows of every transcript the usage ops leave out or report missing, so a transcript that cannot be
- * examined fails the op. */
+/** A transcript's usage, whole. Null when it was deleted since it was stamped; any other read failure throws. */
+function usageRecords(path: string, modelsConfig: ModelsFileConfig, session: string): UsageRecord[] | null {
+  try {
+    return parseSessionUsage(path, modelsConfig, session, true);
+  } catch (error) {
+    if (isGone(error)) return null;
+    throw error;
+  }
+}
+
+/** Main stores what the usage ops answer as the whole truth: it drops the rows of every transcript they leave out or
+ * report missing. So a directory or transcript that cannot be read fails the op. */
 function usageUnreadable(error: unknown): OpResult<never> {
   return fail(500, "usage_unreadable", `Usage transcripts could not be read: ${error instanceof Error ? error.message : String(error)}`);
 }
@@ -872,11 +882,11 @@ export const sessionOps: SessionOps = {
           }
           // Stamped before parsing: a write that lands during the parse changes the stamp and is read again next time.
           const stamp = transcripts?.has(path) ? usageStamp(path) : null;
-          if (!stamp) {
+          const records = stamp && usageRecords(path, modelsConfig, session);
+          if (!stamp || !records) {
             missing.push(path);
             continue;
           }
-          const records = parseSessionUsage(path, modelsConfig, session);
           files.push({ ...stamp, records });
           bytes += 256 + 512 * records.length;
           await nextTurn();
