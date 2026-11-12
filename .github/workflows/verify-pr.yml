@@ -43,8 +43,11 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      # The runner's own deps too: lib/hosts/omp-socket.test.mjs checks the host against runner/src/channel.ts.
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm ci
+          npx bun install --cwd runner --frozen-lockfile
 
       - name: TypeScript typecheck
         run: npm run typecheck
@@ -59,9 +62,7 @@ jobs:
         run: npm run build
 
       - name: Build the omp runner
-        run: |
-          npx bun install --cwd runner --frozen-lockfile
-          npx bun runner/scripts/build-binary.ts
+        run: npx bun runner/scripts/build-binary.ts
 
       - name: Smoke test
         run: npm run smoke
