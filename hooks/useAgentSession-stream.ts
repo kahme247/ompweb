@@ -6,7 +6,6 @@ import type {
   AgentMessage,
   CustomMessage,
   ExtensionStatusItem,
-  ExtensionUiRequest,
   ExtensionWidgetItem,
   SessionTreeNode,
 } from "@/lib/types";
@@ -216,14 +215,6 @@ export function toThinkingModelMeta(model: { provider?: string; id?: string; nam
   if (!model?.provider || !model.id) return null;
   return { provider: model.provider, modelId: model.id, name: model.name, reasoning: model.reasoning, thinking: model.thinking };
 }
-
-export type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" | "ask" | "form" }>;
-export type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
-// omp's rpc-ui frames add open_url (OAuth) and cancel on top of lib/types' union.
-export type IncomingExtensionUiRequest =
-  | ExtensionUiRequest
-  | { type: "extension_ui_request"; id: string; method: "open_url"; url: string; launchUrl?: string; instructions?: string }
-  | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string };
 
 export type AgentPhase =
   | { kind: "waiting_model" }

@@ -23,7 +23,7 @@ import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { isClientMessageId, readQueueSnapshot } from "./client-message-ids";
-import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
+import { createNotificationDetector } from "./notification-events";
 import { publishNotification } from "./notification-hub";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
@@ -142,16 +142,6 @@ export class WebRpcError extends Error {
   }
 }
 
-/** Shape check for an ask-dialog `answers` payload; omp validates the content. */
-function isAskAnswers(value: unknown): boolean {
-  return Array.isArray(value) && value.every((answer: unknown) =>
-    isRecord(answer)
-    && typeof answer.id === "string"
-    && Array.isArray(answer.selectedOptions)
-    && answer.selectedOptions.every((option: unknown) => typeof option === "string")
-    && (answer.customInput === undefined || typeof answer.customInput === "string"));
-}
-
 // Commands forwarded to omp verbatim (request shape already matches rpc-types).
 const PASSTHROUGH_COMMANDS = new Set([
   "abort",
@@ -202,7 +192,6 @@ const UNSUPPORTED_COMMANDS: Record<string, string> = {
   clear_queue: "Recalling queued messages is not supported over the omp RPC protocol",
   get_tools: "Per-session tool listing is not supported over the omp RPC protocol",
   set_tools: "Changing tools on a running session is not supported over the omp RPC protocol; tool presets apply to new sessions",
-  extension_ui_input: "Extension custom UI is not supported over the omp RPC protocol",
 };
 
 function toImageContents(value: unknown): Array<{ type: "image"; data: string; mimeType: string }> | undefined {
@@ -785,10 +774,10 @@ export class AgentSessionWrapper {
       if (this.hostOwnedLifecycle) {
         this.clearLiveSnapshots();
         this.recoveringUpdates = false;
-        for (const id of [...this.pendingUiRequests.keys()]) {
+        for (const [id, event] of [...this.pendingUiRequests]) {
           if (this.serverUiRequests.has(id)) continue;
           this.forgetPendingUiRequest(id);
-          this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+          this.emit({ type: "ui_end", id: event.id });
         }
       }
       void this.reconcileAfterGap();
@@ -1317,13 +1306,18 @@ export class AgentSessionWrapper {
         notifyRunningChange();
         return;
       }
-      case "extension_ui_request": {
-        if (this.trackExtensionUiRequest(event)) {
+      case "ui_request":
+        if (this.trackUiRequest(event)) {
           notifyRunningChange();
           return;
         }
         break;
-      }
+      case "ui_end":
+        this.forgetPendingUiRequest(String(event.id));
+        break;
+      case "ui":
+        this.trackPresentation(event);
+        break;
       case "host_tool_call": {
         const id = typeof event.id === "string" ? event.id : "";
         const toolName = typeof event.toolName === "string" ? event.toolName : "";
@@ -1463,7 +1457,7 @@ export class AgentSessionWrapper {
     for (const [id, resolve] of this.serverUiRequests) {
       this.serverUiRequests.delete(id);
       this.forgetPendingUiRequest(id);
-      this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+      this.emit({ type: "ui_end", id });
       resolve(false);
     }
   }
@@ -1478,46 +1472,50 @@ export class AgentSessionWrapper {
     const id = `omp-web:${randomUUID()}`;
     const { promise, resolve } = Promise.withResolvers<boolean>();
     this.serverUiRequests.set(id, resolve);
-    this.handleFrame({ type: "extension_ui_request", id, method: "confirm", title, message: "" });
+    this.handleFrame({ type: "ui_request", id, method: "confirm", args: [title, ""] });
     return promise;
   }
 
-  private trackExtensionUiRequest(event: UnsequencedAgentEvent): boolean {
-    const method = event.method as string;
-    const id = event.id as string;
-    if (method === "cancel") {
-      this.forgetPendingUiRequest(event.targetId as string);
-      return false;
-    }
-    // Only the “Allow tool: <name>” confirmation is covered. Other extension
-    // prompts, including login/editor confirmations, remain interactive.
-    if (method === "confirm" && typeof event.title === "string" && /^allow tool\s*:/i.test(event.title) && this.host.autoApproveExtension()) {
-      this.forgetPendingUiRequest(id);
-      this.proc.sendFrame({ type: "extension_ui_response", id, confirmed: true });
-      return true;
-    }
-    // Blocking dialogs stay pending until the client answers (replayed to
-    // newly-attached SSE listeners so dialogs survive reconnects).
-    if (BLOCKING_UI_METHODS.has(method)) {
-      this.forgetPendingUiRequest(id);
-      const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
-      if (timeout && timeout > 0) {
-        event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
-        timer.unref?.();
-        this.uiExpiryTimers.set(id, timer);
+  /** Records a runner dialog as pending; true when it was answered here (auto-approve) and must not reach the browser. */
+  private trackUiRequest(event: UnsequencedAgentEvent): boolean {
+    const id = String(event.id);
+    const args = Array.isArray(event.args) ? event.args : [];
+    if (this.host.autoApproveExtension()) {
+      // Only tool approvals and the “Allow tool: <name>” confirmation are covered.
+      // Other extension prompts, including login/editor confirmations, remain interactive.
+      const value = event.method === "approve" ? "once"
+        : event.method === "confirm" && typeof args[0] === "string" && /^allow tool\s*:/i.test(args[0]) ? true
+        : undefined;
+      if (value !== undefined) {
+        this.forgetPendingUiRequest(id);
+        this.proc.sendFrame({ type: "ui_response", id: event.id, value });
+        return true;
       }
-      this.pendingUiRequests.set(id, event);
-      return false;
     }
+    // Pending until answered or ended (replayed to newly-attached SSE listeners so dialogs survive reconnects).
+    this.forgetPendingUiRequest(id);
+    // The dialog options are the last positional argument: (questions|html|prompt, options) or (title, x, options).
+    const options = args[event.method === "askDialog" || event.method === "formDialog" || event.method === "approve" ? 1 : 2];
+    const timeout = isRecord(options) && typeof options.timeout === "number" ? options.timeout : undefined;
+    if (timeout && timeout > 0) {
+      event.expiresAt = Date.now() + timeout;
+      const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+      timer.unref?.();
+      this.uiExpiryTimers.set(id, timer);
+    }
+    this.pendingUiRequests.set(id, event);
+    return false;
+  }
+
+  /** Keeps the extension status/widget state a newly attached tab is sent. */
+  private trackPresentation(event: UnsequencedAgentEvent): void {
+    const method = event.method;
     if (method === "setStatus") {
       const key = event.statusKey as string;
       const text = event.statusText as string | undefined;
       if (text === undefined) this.extensionStatuses.delete(key);
       else this.extensionStatuses.set(key, text);
-      return false;
-    }
-    if (method === "setWidget") {
+    } else if (method === "setWidget") {
       const key = event.widgetKey as string;
       const lines = event.widgetLines as string[] | undefined;
       if (lines === undefined) {
@@ -1530,7 +1528,6 @@ export class AgentSessionWrapper {
         });
       }
     }
-    return false;
   }
 
   /**
@@ -2787,31 +2784,36 @@ export class AgentSessionWrapper {
         return { success: true };
       }
 
-      case "extension_ui_response": {
-        const { id, ...rest } = command as { id: string; [key: string]: unknown };
-        const pendingAsk = this.pendingUiRequests.get(id)?.method === "ask";
-        // A pending ask accepts only its answers or a cancel; anything else would
-        // drop it from reconnect replay while omp rejects the payload.
-        if (("answers" in rest || pendingAsk) && !isAskAnswers(rest.answers) && !(pendingAsk && rest.cancelled === true)) {
-          throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
+      case "ui_response": {
+        const { id, value } = command;
+        if (typeof id !== "number" && typeof id !== "string") throw new WebRpcError("Invalid dialog id", "invalid_ui_response");
+        const key = String(id);
+        const method = this.pendingUiRequests.get(key)?.method;
+        // A malformed answer would drop the dialog from reconnect replay while omp rejects it.
+        if (value !== undefined && (method === "askDialog" || method === "formDialog") && !isRecord(value)) {
+          throw new WebRpcError("Invalid dialog answer", "invalid_ui_response");
         }
-        if (this.pendingUiRequests.get(id)?.method === "form" && !isRecord(rest.data) && rest.cancelled !== true) {
-          throw new WebRpcError("Invalid form dialog answer", "invalid_form_answer");
+        if (value !== undefined && method === "formDialog" && isRecord(value) && !isRecord(value.data)) {
+          throw new WebRpcError("Invalid form dialog answer", "invalid_ui_response");
         }
-        const wasPending = this.pendingUiRequests.has(id);
-        this.forgetPendingUiRequest(id);
-        const serverRequest = this.serverUiRequests.get(id);
+        const wasPending = this.pendingUiRequests.has(key);
+        this.forgetPendingUiRequest(key);
+        const serverRequest = this.serverUiRequests.get(key);
         if (serverRequest) {
-          this.serverUiRequests.delete(id);
-          serverRequest(rest.confirmed === true);
+          this.serverUiRequests.delete(key);
+          serverRequest(value === true);
         } else {
-          this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
+          this.proc.sendFrame({ type: "ui_response", id, value });
         }
-        // omp sends no cancel for an answered dialog; other tabs on this
+        // omp sends no ui_end for a dialog the host answered; other tabs on this
         // session would keep showing it, so settle it for them here.
-        if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+        if (wasPending) this.emit({ type: "ui_end", id });
         return null;
       }
+
+      case "ui_input":
+        this.proc.sendFrame({ type: "ui_input", id: command.id, data: command.data });
+        return null;
 
       case "bash": {
         const proc = this.proc;

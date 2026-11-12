@@ -7,20 +7,14 @@ import { LINK_LIMITS } from "../hosts/link-protocol";
 
 /**
  * Process + protocol layer for ompweb's omp (`ompweb-omp --headless`), which speaks the channel of
- * runner/src/channel.ts as NDJSON over stdio. This layer translates at the boundary so the rest of
- * ompweb keeps RPC's frame shapes:
+ * runner/src/channel.ts as NDJSON over stdio. Frames pass through as `{type: t, ...rest}`, except:
  *
  *   hello                          → readiness (`waitReady` resolves `{type:"ready", ...hello}`)
  *   event {event}                  → the event object itself
  *   res {id, ok, data?, error?}    → settles `sendCommand`
- *   ui_request {id, method, args}  → `extension_ui_request` (formDialog → method "form" with `html`)
- *   ui_end {id}                    → `extension_ui_request` method "cancel", targetId
- *   ui {method, ...}               → `extension_ui_request` (notify, setStatus, setWidget, custom, …)
- *   {t, ...rest}                   → `{type: t, ...rest}`
  *
- * and back: `sendCommand({type, ...args})` → `cmd {id, op: type, args}`, `extension_ui_response`
- * → `ui_response {id, value}` (the omp method's return value), `extension_ui_input` → `ui_input`,
- * any other `{type, ...rest}` → `{t: type, ...rest}`.
+ * and back: `sendCommand({type, ...args})` → `cmd {id, op: type, args}`, any other `{type, ...rest}`
+ * → `{t: type, ...rest}` (`ui_response`, `ui_input`, `host_tool_result`, …).
  */
 
 export type RpcFrame = { type: string; [key: string]: unknown };
@@ -57,12 +51,6 @@ interface PendingCommand {
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
   onReply?: (success: boolean, id: string) => void;
-}
-
-/** An open omp dialog: the `ExtensionUIContext` method and its positional arguments. */
-interface OpenDialog {
-  method: string;
-  args: unknown[];
 }
 
 export interface RpcProcessOptions {
@@ -109,110 +97,9 @@ function parseLine(line: string): unknown {
   }
 }
 
-const REQUEST_TYPES = new Set(["host_tool_call", "host_uri_request", "extension_ui_request"]);
-const requestId = (frame: RpcFrame) => (REQUEST_TYPES.has(frame.type) && typeof frame.id === "string" ? frame.id : null);
-
-const recordOf = (value: unknown): Record<string, unknown> => (isRecord(value) ? value : {});
-const stringsOf = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
-
-/** `timeout` of the `ExtensionUIDialogOptions` argument, when set. */
-function timeoutOf(options: unknown): { timeout?: number } {
-  const { timeout } = recordOf(options);
-  return typeof timeout === "number" ? { timeout } : {};
-}
-
-/** Labels of an approval prompt as omp's select fallback lists them (tools/approval.ts `approvalChoiceLabels`). */
-function approvalLabels(prompt: Record<string, unknown>): string[] {
-  const grants = stringsOf(prompt.grants).map(recordOf);
-  return [
-    ...grants.map((grant) => String(grant.label)),
-    ...grants.map((grant) => String(grant.alwaysLabel)),
-    grants.length > 0 ? "Approve Once" : "Approve",
-    ...(typeof prompt.session === "string" ? [prompt.session] : []),
-    "Deny",
-  ];
-}
-
-/** The approval a label from `approvalLabels` stands for (tools/approval.ts `approvalAnswerForChoice`). */
-function approvalAnswer(prompt: Record<string, unknown>, choice: unknown): unknown {
-  const grants = stringsOf(prompt.grants).map(recordOf);
-  if (choice === (grants.length > 0 ? "Approve Once" : "Approve")) return "once";
-  if (typeof prompt.session === "string" && choice === prompt.session) return "session";
-  for (const grant of grants) {
-    if (choice === grant.label) return { grant: grant.scope, always: false };
-    if (choice === grant.alwaysLabel) return { grant: grant.scope, always: true };
-  }
-  return "deny";
-}
-
-/** omp's `ExtensionAskDialogSubmitResult` for the browser's `answers` (one per question, by id); unknown labels drop. */
-function askResult(questions: unknown, answers: unknown): unknown {
-  if (!Array.isArray(answers)) return undefined;
-  return {
-    kind: "submit",
-    results: stringsOf(questions).map(recordOf).map((question) => {
-      const answer = recordOf(answers.find((entry) => isRecord(entry) && entry.id === question.id));
-      const labels = stringsOf(question.options).map((option) => recordOf(option).label);
-      const custom = typeof answer.customInput === "string" ? answer.customInput.trim() : "";
-      return {
-        id: question.id,
-        question: question.question,
-        options: labels,
-        multi: question.multi === true,
-        selectedOptions: stringsOf(answer.selectedOptions).filter((label) => typeof label === "string" && labels.includes(label)),
-        ...(custom ? { customInput: custom } : {}),
-      };
-    }),
-  };
-}
-
-/** ompweb's `extension_ui_request` for an omp dialog; null for a method the browser cannot show. */
-function dialogRequest(id: string, { method, args }: OpenDialog): RpcFrame | null {
-  const base = { type: "extension_ui_request", id };
-  switch (method) {
-    case "select":
-      return { ...base, method, title: args[0], options: stringsOf(args[1]).map((option) => (typeof option === "string" ? option : recordOf(option).label)), ...timeoutOf(args[2]) };
-    case "confirm":
-      return { ...base, method, title: args[0], message: args[1], ...timeoutOf(args[2]) };
-    case "input":
-      return { ...base, method, title: args[0], placeholder: args[1], ...(recordOf(args[2]).secret === true ? { secret: true } : {}), ...timeoutOf(args[2]) };
-    case "editor":
-      return { ...base, method, title: args[0], prefill: args[1], ...(recordOf(args[3]).promptStyle === true ? { promptStyle: true } : {}), ...timeoutOf(args[2]) };
-    case "askDialog":
-      return { ...base, method: "ask", questions: args[0], ...timeoutOf(args[1]) };
-    case "formDialog":
-      return { ...base, method: "form", html: args[0], ...timeoutOf(args[1]) };
-    case "approve": {
-      const prompt = recordOf(args[0]);
-      return { ...base, method: "select", title: prompt.full, options: approvalLabels(prompt), ...timeoutOf(args[1]) };
-    }
-    default:
-      return null;
-  }
-}
-
-/**
- * The omp method's return value for the browser's `extension_ui_response`; null sends nothing.
- * A browser-side timeout sends nothing: omp runs the dialog's own timeout and then ends it.
- */
-function dialogValue({ method, args }: OpenDialog, response: Record<string, unknown>): { value: unknown } | null {
-  if (response.cancelled === true) {
-    if (response.timedOut === true) return null;
-    return { value: method === "confirm" ? false : method === "approve" ? "deny" : undefined };
-  }
-  switch (method) {
-    case "confirm":
-      return { value: response.confirmed === true };
-    case "approve":
-      return { value: approvalAnswer(recordOf(args[0]), response.value) };
-    case "askDialog":
-      return { value: askResult(args[0], response.answers) };
-    case "formDialog":
-      return { value: isRecord(response.data) ? { data: response.data } : undefined };
-    default:
-      return { value: typeof response.value === "string" ? response.value : undefined };
-  }
-}
+const REQUEST_TYPES = new Set(["host_tool_call", "host_uri_request", "ui_request"]);
+const requestId = (frame: RpcFrame) =>
+  REQUEST_TYPES.has(frame.type) && (typeof frame.id === "string" || typeof frame.id === "number") ? String(frame.id) : null;
 
 /** Spawns ompweb's omp headless with the sanitized child environment. */
 export function spawnOmpTransport(options: RpcProcessOptions): RpcTransport {
@@ -240,8 +127,6 @@ export class RpcProcess {
   private readonly frameListeners = new Set<(frame: RpcFrame) => void>();
   private readyPromise: Promise<RpcFrame>;
   private readonly resolveReady: (frame: RpcFrame) => void;
-  /** omp's open dialogs by ompweb request id (the wire id as a string), until answered or ended. */
-  private readonly dialogs = new Map<string, OpenDialog>();
   /** An adopted child's frames, held until `release` (see RpcProcessOptions.adopted), and the bytes of its lines since. */
   private heldFrames: RpcFrame[] | null = null;
   private heldBytes = 0;
@@ -251,7 +136,6 @@ export class RpcProcess {
   private readonly replayedRequests = new Set<string>();
   // The daemon maps each link's ids onto its own, so a plain counter cannot meet another server's.
   private nextId = 1;
-  private nextUiId = 1;
   private stderrTail = "";
   private exited = false;
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null;
@@ -386,30 +270,6 @@ export class RpcProcess {
       case "event":
         if (isRecord(rest.event) && typeof rest.event.type === "string") this.dispatch(rest.event as RpcFrame, replayed);
         return;
-      case "ui_request": {
-        if (typeof rest.id !== "number" || typeof rest.method !== "string") return;
-        const id = String(rest.id);
-        const dialog = { method: rest.method, args: stringsOf(rest.args) };
-        const frame = dialogRequest(id, dialog);
-        if (!frame) {
-          // Nothing here can answer it: cancel instead of leaving omp waiting.
-          this.writeFrame({ t: "ui_response", id: rest.id }, () => {});
-          return;
-        }
-        this.dialogs.set(id, dialog);
-        this.dispatch(frame, replayed);
-        return;
-      }
-      case "ui_end": {
-        if (typeof rest.id !== "number") return;
-        const targetId = String(rest.id);
-        this.dialogs.delete(targetId);
-        this.dispatch({ type: "extension_ui_request", id: `${targetId}:end`, method: "cancel", targetId }, replayed);
-        return;
-      }
-      case "ui":
-        this.dispatch({ ...rest, type: "extension_ui_request", id: rest.id === undefined ? `ui:${this.nextUiId++}` : String(rest.id) }, replayed);
-        return;
       default:
         this.dispatch({ type: t, ...rest, ...(COMMAND_ID_FRAMES.has(t) && typeof rest.id === "number" ? { id: String(rest.id) } : {}) }, replayed);
     }
@@ -482,23 +342,10 @@ export class RpcProcess {
     });
   }
 
-  /** Fire-and-forget frame in ompweb's shape (extension_ui_response, host_tool_result, login_input_response, …). */
+  /** Fire-and-forget frame (ui_response, ui_input, host_tool_result, login_input_response, …). */
   sendFrame(frame: { type: string; [key: string]: unknown }): void {
     if (this.exited) return;
     const { type, ...rest } = frame;
-    if (type === "extension_ui_response") {
-      const id = String(rest.id);
-      const dialog = this.dialogs.get(id);
-      const answer = dialog && dialogValue(dialog, rest);
-      if (!answer) return;
-      this.dialogs.delete(id);
-      this.writeFrame({ t: "ui_response", id: Number(id), ...answer }, () => {});
-      return;
-    }
-    if (type === "extension_ui_input") {
-      this.writeFrame({ t: "ui_input", id: Number(rest.id), data: rest.data }, () => {});
-      return;
-    }
     this.writeFrame({ t: type, ...rest }, () => {});
   }
 

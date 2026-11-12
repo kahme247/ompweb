@@ -15,6 +15,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "@oh-my-pi/pi-coding-agent@18.19.0": "patches/@oh-my-pi%2Fpi-coding-agent@18.19.0.patch",
+  },
   "packages": {
     "@babel/helper-string-parser": ["@babel/helper-string-parser@7.29.14", "", {}, "sha512-CXvKMFvM80ihI7Vox9jb+kQjnyjESQNPM+vB7U0Zz6TWuZA+Z/FL0QPMH300h33qJtIx+REeBhXqWOPW48TcAQ=="],
 

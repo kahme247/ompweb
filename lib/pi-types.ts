@@ -242,27 +242,6 @@ export interface RpcAskDialogAnswer {
 export type HtmlFormData = Record<string, string | number | string[]>;
 
 /**
- * omp's rpc-ui extension UI request frames, including the methods missing from
- * the browser-facing union in lib/types.ts (`open_url`, `cancel`). The wrapper
- * adds `expiresAt` when a timeout is present so reconnecting clients can
- * expire stale dialogs.
- */
-export type OmpExtensionUiRequest =
-  | { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "ask"; questions: RpcAskDialogQuestion[]; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "form"; html: string; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
-  | { type: "extension_ui_request"; id: string; method: "notify"; message: string; notifyType?: "info" | "warning" | "error" }
-  | { type: "extension_ui_request"; id: string; method: "setStatus"; statusKey: string; statusText: string | undefined }
-  | { type: "extension_ui_request"; id: string; method: "setWidget"; widgetKey: string; widgetLines: string[] | undefined; widgetPlacement?: "aboveEditor" | "belowEditor" }
-  | { type: "extension_ui_request"; id: string; method: "setTitle"; title: string }
-  | { type: "extension_ui_request"; id: string; method: "set_editor_text"; text: string }
-  | { type: "extension_ui_request"; id: string; method: "open_url"; url: string; launchUrl?: string; instructions?: string };
-
-/**
  * omp's RPC host-tool bridge: omp-web registers host tools (set_host_tools)
  * that the agent can call; the server emits host_tool_call frames the UI
  * executes, and the UI answers with host_tool_result. Mirrors

@@ -2,13 +2,9 @@
  * Headless omp: `ompweb-omp --headless [omp flags]`, spawned by `ompweb host`, which speaks the
  * channel (`channel.ts`) on this process's stdin/stdout. Nothing else may write to stdout.
  *
- * Startup is omp's own `--mode rpc-ui` launch, with RPC's server module swapped for this one
- * (`rpc-mode-swap.ts`): that
- * path runs all of `runRootCommand` (settings, auth, models, --resume/--continue, extensions, MCP,
- * plugins, settings watch, subagent revival) and hands over the finished session with
- * `hasUI` set, as rpc-ui does. The injectable `--mode acp` path was the alternative, but its
- * per-session factory drops the resolved --resume/--continue session, forces MCP off and skips the
- * post-session startup, so it would mean re-deriving those here.
+ * Startup is omp's own `runRootCommand` (settings, auth, models, --resume/--continue, extensions,
+ * MCP, plugins, settings watch, subagent revival); its `runSessionHost` hook hands the finished
+ * session to `runHeadless` instead of the TUI or print mode.
  *
  * Unsolicited frames:
  *   omp → host  {t:"extension_error", extensionPath, event, error}   an extension handler threw
@@ -16,15 +12,14 @@
  */
 import type { ExtensionUIContext, ExtensionUiComponent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { timedOutAskDialogResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { SessionHostContext } from "@oh-my-pi/pi-coding-agent/main";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { type Terminal, TUI } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type CustomFactory, HostChannel } from "./channel";
-import { rpcModeSwap } from "./rpc-mode-swap";
 
 // shortcut: custom components render at a fixed width; take the browser's width when a host sends one.
 const CUSTOM_COLUMNS = 100;
@@ -32,6 +27,7 @@ const CUSTOM_ROWS = 40;
 
 let headless = false;
 let writeChannel: (line: string) => void = () => {};
+let stdin: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
 /** Whether this process is a headless omp (`--headless`). */
 export function isHeadless(): boolean {
@@ -48,16 +44,9 @@ export function enterHeadless(argv: string[]): string[] {
 	// Extensions and libraries may print; on stdout that would corrupt the channel.
 	process.stdout.write = process.stderr.write.bind(process.stderr);
 	console.log = console.info = console.debug = console.error;
-	Bun.plugin(rpcModeSwap);
-	return [...argv.filter(arg => arg !== "--headless"), "--mode", "rpc-ui"];
-}
-
-/** What `runRootCommand` passes RPC's `runRpcMode` (`RpcModeOptions`), as far as headless uses it. */
-interface StartupHandoff {
-	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
-	subagentEventBus?: EventBus;
-	/** stdin, claimed before extensions load so none can read it. */
-	input?: ReadableStream<Uint8Array>;
+	// Locked now, before extensions load, so none can read the host's frames.
+	stdin = Bun.stdin.stream().getReader();
+	return argv.filter(arg => arg !== "--headless");
 }
 
 /** Byte sink: the stand-in TUI renders through `requestRender` below, never through a terminal. */
@@ -159,7 +148,7 @@ function hostUi(channel: HostChannel): ExtensionUIContext {
 		formDialog: (...args) => channel.dialog("formDialog", args, () => undefined),
 		approve: (...args) => channel.dialog("approve", args, () => "deny" as const),
 		custom: (factory, options) => channel.custom(factory, mirrored => showCustom(mirrored, options?.signal)),
-		// As RPC: there is no local editor to paste into.
+		// There is no local editor to paste into.
 		pasteToEditor: text => presenter.setEditorText(text),
 		getEditorText: () => "",
 		onTerminalInput: () => () => {},
@@ -182,23 +171,22 @@ function hostUi(channel: HostChannel): ExtensionUIContext {
 	};
 }
 
-/**
- * Stands in for RPC's `runRpcMode` (see `enterHeadless`): serve the host on stdio until stdin
- * ends, then dispose the session and exit, as RPC does.
- */
-export async function runRpcMode(session: AgentSession, handoff: StartupHandoff = {}): Promise<never> {
+/** `runRootCommand`'s session host for `--headless`: serve the host on stdio until stdin ends, then exit. */
+export async function runHeadless(session: AgentSession, host: SessionHostContext): Promise<void> {
+	if (!stdin) throw new Error("runHeadless needs enterHeadless first");
 	// Terminal notifications write BEL/OSC to the terminal, which is the channel here.
 	process.env.PI_NOTIFICATIONS = "off";
-	const channel = HostChannel.stdio(session, handoff.subagentEventBus, writeChannel);
+	const channel = HostChannel.stdio(session, host.subagentEventBus, writeChannel);
 	const ui = hostUi(channel);
-	handoff.setToolUIContext?.(ui, true);
+	host.setToolUIContext(ui, true);
 	// Read now: `session_start` handlers may wait on a dialog only the host can answer.
-	const reading = channel.read(handoff.input ?? Bun.stdin.stream());
+	const reading = channel.read(stdin);
 	const exit = async (): Promise<never> => {
 		await session.dispose().catch(err => logger.error("headless omp: dispose failed", { error: String(err) }));
 		process.exit(0);
 	};
 	await initializeExtensions(session, {
+		// What extensions see: a UI-capable remote client, as they did under rpc-ui.
 		mode: "rpc",
 		uiContext: ui,
 		reportSendError: (action, err) => writeFrame({ t: "extension_error", action, error: err.message }),
@@ -209,7 +197,7 @@ export async function runRpcMode(session: AgentSession, handoff: StartupHandoff 
 	});
 	channel.release();
 	await reading.catch(err => logger.warn("headless omp: stdin failed", { error: String(err) }));
-	return exit();
+	await exit();
 }
 
 function writeFrame(frame: { t: string } & Record<string, unknown>): void {

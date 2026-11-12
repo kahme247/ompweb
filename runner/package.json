@@ -13,5 +13,8 @@
   "devDependencies": {
     "@types/bun": "1.4.4",
     "typescript": "7.0.2"
+  },
+  "patchedDependencies": {
+    "@oh-my-pi/pi-coding-agent@18.19.0": "patches/@oh-my-pi%2Fpi-coding-agent@18.19.0.patch"
   }
 }

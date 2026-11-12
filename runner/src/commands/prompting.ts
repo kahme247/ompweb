@@ -1,7 +1,6 @@
 /**
  * User input and what steers it: prompts, the steering/follow-up queue, aborts, queue modes,
- * handoff, goal mode, todos and `!` bash. Ported from RPC's handlers (`modes/rpc/rpc-mode.ts`);
- * prompt outcomes reuse RPC's transport-free `RpcPromptResults`, goal mode its `RpcGoalController`.
+ * handoff, goal mode, todos and `!` bash. Prompt outcomes are `../prompt-results`, goal mode `../goal`.
  *
  * Unsolicited frames (omp → host):
  *   {t:"prompt_result", id, agentInvoked, status, error?, sessionSettled}
@@ -15,13 +14,6 @@
  */
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { loadSkillPrompt, parseSkillInvocation } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import { type RpcGoalCommand, RpcGoalController, type RpcGoalOp } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
-import {
-	RpcExtensionUserMessageTracker,
-	RpcPromptResults,
-	type RpcPromptTicket,
-	watchAndReportPromptResult,
-} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -29,6 +21,8 @@ import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-com
 import { logger } from "@oh-my-pi/pi-utils";
 import { type ClientMessageClaim, claimClientMessage, submitCorrelated } from "../correlation";
 import { checkSettled, scheduledTurnProbe } from "../events";
+import { GOAL_OPS, GoalController } from "../goal";
+import { PromptResults, type PromptTicket, reportPromptResult } from "../prompt-results";
 import type { CommandContext, CommandTable, FrameTable } from "./types";
 
 type ImageContent = NonNullable<Parameters<AgentSession["steer"]>[1]>[number];
@@ -44,16 +38,14 @@ interface UserInput {
 	streamingBehavior: StreamingBehavior | undefined;
 	/** Accept order; an abort or session change accepted later voids input not yet dispatched. */
 	sequence: number;
-	ticket?: RpcPromptTicket;
+	ticket?: PromptTicket;
 	claim?: ClientMessageClaim;
 }
 
-/** Per-session prompting state: prompt results, goal mode, and RPC's ordered user-input gate. */
+/** Per-session prompting state: prompt results, goal mode, and the ordered user-input gate. */
 export class Prompting {
-	readonly results: RpcPromptResults;
-	readonly goals: RpcGoalController;
-	/** Never fed: the TUI owns extension bindings, so extension-scheduled turns are not tracked. */
-	readonly tracker = new RpcExtensionUserMessageTracker();
+	readonly results: PromptResults;
+	readonly goals: GoalController;
 	/** Builtin commands whose work outlives the prompt (`/mcp reauth`); aborts tear them down. */
 	readonly builtinAborts = new Set<AbortController>();
 	#tail: Promise<void> = Promise.resolve();
@@ -61,12 +53,12 @@ export class Prompting {
 	#validFrom = 0;
 
 	constructor(session: AgentSession, send: CommandContext["send"]) {
-		this.goals = new RpcGoalController(session, () => checkSettled(session));
-		this.results = new RpcPromptResults(
+		this.goals = new GoalController(session, () => checkSettled(session));
+		this.results = new PromptResults(
 			session,
-			({ type, id, ...rest }) => send({ t: type, id: id === undefined ? undefined : Number(id), ...rest }),
+			send,
 			scheduledTurnProbe(session, () => this.goals.continuationPending),
-			{ costCapRefusal: () => session.costCapRefusal, settledWithoutRun: () => checkSettled(session) },
+			() => checkSettled(session),
 		);
 		session.subscribe(event => {
 			// Goal first: a continuation decided at this agent_end is pending before results read settlement.
@@ -210,13 +202,7 @@ function dispatchInput(ctx: CommandContext, input: UserInput): Promise<InputOutc
 		const ticket = input.ticket;
 		if (!ticket) return "cancelled";
 		const report = (startPrompt: (onPromptAdmitted: () => void) => Promise<boolean>) =>
-			watchAndReportPromptResult({
-				ticket,
-				startPrompt,
-				results: state.results,
-				onError: onPromptError(ctx, input),
-				extensionUserMessageTracker: state.tracker,
-			});
+			reportPromptResult(ticket, state.results, onPromptError(ctx, input), startPrompt);
 		if (input.op === "prompt") {
 			const parsed = session.skillsSettings?.enableSkillCommands ? parseSkillInvocation(text) : undefined;
 			const skill = parsed && session.skills.find(candidate => candidate.name === parsed.name);
@@ -326,14 +312,12 @@ function readQueueMode(op: string, mode: unknown): "all" | "one-at-a-time" {
 	return mode;
 }
 
-const GOAL_OPS: readonly RpcGoalOp[] = ["get", "create", "resume", "pause", "drop"];
-
 export const promptingCommands: CommandTable = {
 	async prompt(ctx, args) {
 		const input = readInput(ctx, "prompt", args);
 		const { results } = prompting(ctx);
 		// Taken before dispatch so a builtin that schedules a turn (`/retry`) cannot run ahead of it.
-		const ticket = results.begin(String(input.id));
+		const ticket = results.begin(input.id);
 		input.ticket = ticket;
 		try {
 			// Answered after admission, so a queue edit sent after the answer finds the message.
@@ -396,7 +380,7 @@ export const promptingCommands: CommandTable = {
 			input.claim?.release();
 			throw error;
 		}
-		const ticket = state.results.begin(String(input.id));
+		const ticket = state.results.begin(input.id);
 		input.ticket = ticket;
 		void dispatchInput(ctx, input).then(
 			outcome => {
@@ -446,8 +430,7 @@ export const promptingCommands: CommandTable = {
 		if (args.token_budget !== undefined && typeof args.token_budget !== "number") {
 			throw new Error("goal: token_budget must be a number");
 		}
-		const command: RpcGoalCommand = { op, objective: args.objective, token_budget: args.token_budget };
-		return prompting(ctx).goals.handle(command);
+		return prompting(ctx).goals.handle({ op, objective: args.objective, token_budget: args.token_budget });
 	},
 	async set_todos({ session }, args) {
 		const phases = args.phases;

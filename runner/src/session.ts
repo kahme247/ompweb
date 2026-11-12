@@ -12,8 +12,8 @@ import { isHeadless } from "./headless";
  * A headless omp serves the host on stdio instead, from `headless.ts`.
  */
 export async function createHostedAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	// rpc-ui throws when a resumed session's model cannot be restored; ompweb instead opens it on the
-	// default model, or none, so a logged-out user can still open old sessions and log in from them.
+	// A non-interactive launch throws when a resumed session's model cannot be restored; ompweb instead
+	// opens it on the default model, or none, so a logged-out user can still open old sessions and log in from them.
 	if (isHeadless()) return createAgentSession({ ...options, allowSessionModelFallback: true });
 	const result = await createAgentSession(options);
 	const channel = await HostChannel.connect(result.session, result.subagentEventBus);

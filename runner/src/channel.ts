@@ -12,7 +12,7 @@
  *                                                     dialog options without `signal`. With a TUI it shows there too.
  *   host → omp   {t:"ui_response", id, value}         the method's return value; first answer wins
  *   omp  → host  {t:"ui_end", id}                     omp closed the dialog itself (TUI answer, abort, timeout)
- *   omp  → host  {t:"ui", method, ...fields}          a presentation call, with RPC's fire-and-forget fields:
+ *   omp  → host  {t:"ui", method, ...fields}          a presentation call, fire-and-forget:
  *                                                     notify{message, notifyType}, setStatus{statusKey, statusText},
  *                                                     setWidget{widgetKey, widgetLines, widgetPlacement},
  *                                                     setTitle{title}, set_editor_text{text}, setWorkingMessage{message},
@@ -134,7 +134,7 @@ export class HostChannel {
 		notify: (message, type) => this.#send({ t: "ui", method: "notify", message, notifyType: type }),
 		setStatus: (key, text) => this.#send({ t: "ui", method: "setStatus", statusKey: key, statusText: text }),
 		setWidget: (key, content, options) => {
-			// As RPC: component factories need a terminal, so only plain lines reach the host.
+			// Component factories need a terminal, so only plain lines reach the host.
 			if (content !== undefined && !Array.isArray(content)) return;
 			this.#send({ t: "ui", method: "setWidget", widgetKey: key, widgetLines: content, widgetPlacement: options?.placement });
 		},
@@ -167,11 +167,13 @@ export class HostChannel {
 	}
 
 	/** Read host lines from `input` until it ends, then close the channel. */
-	async read(input: ReadableStream<Uint8Array>): Promise<void> {
+	async read(input: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
 		const feed = this.#lineReader();
 		const decoder = new TextDecoder();
 		try {
-			for await (const chunk of input) feed(decoder.decode(chunk, { stream: true }));
+			for (let chunk = await input.read(); !chunk.done; chunk = await input.read()) {
+				feed(decoder.decode(chunk.value, { stream: true }));
+			}
 		} finally {
 			this.#close();
 		}

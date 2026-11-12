@@ -88,7 +88,7 @@ export const COMMAND_DEDUPE_MS = 600_000;
  * omp without awaiting its reply (lib/rpc-manager.ts dispatchCommand). */
 export const NO_OMP_REPLY_COMMANDS: ReadonlySet<string> = new Set([
   "predict_word", "predict_word_feedback", "get_btw_history", "btw_cancel",
-  "host_tool_result", "host_uri_result", "extension_ui_response",
+  "host_tool_result", "host_uri_result", "ui_response", "ui_input",
   "outbox_add", "outbox_remove", "outbox_scope",
 ]);
 

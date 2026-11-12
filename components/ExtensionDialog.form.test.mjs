@@ -12,8 +12,8 @@ afterEach(cleanup);
 function renderForm(html) {
   const responses = [];
   render(React.createElement(ExtensionDialog, {
-    request: { type: "extension_ui_request", id: "form-1", method: "form", html },
-    onRespond: (_request, response) => responses.push(response),
+    request: { type: "ui_request", id: 1, method: "formDialog", args: [html] },
+    onRespond: (_request, value) => responses.push(value),
     attached: true,
   }));
   return responses;
