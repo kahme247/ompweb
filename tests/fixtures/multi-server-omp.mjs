@@ -16,7 +16,6 @@ let streaming = false;
 let messages = [];
 let timer;
 let promptNumber = 0;
-let question;
 const saved = fs.readFileSync(sessionFile, "utf8").trim().split("\n").map(JSON.parse);
 let parentId = saved.findLast((entry) => entry.type !== "session" && entry.id)?.id ?? null;
 let entryNumber = 0;
@@ -38,7 +37,6 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (command.t === "ui_response") {
     // ompweb names the dialog by its wire id as a string.
     record({ type: "answer", id: String(command.id) });
-    question = undefined;
     return end();
   }
   if (command.t !== "cmd") return;
@@ -64,7 +62,6 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       persist(user, args.clientMessageId);
       out({ type: "message_end", messageId: `u${n}`, message: user, ...correlation });
       if (args.message === "ask") {
-        question = n;
         send({ t: "ui_request", id: n, method: "askDialog", args: [[{ id: "pick", question: "Pick one", options: [{ label: "A" }, { label: "B" }] }]] });
         return;
       }
