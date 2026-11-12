@@ -96,6 +96,10 @@ test("a URL session the list lacks clears the previous selection once; the app's
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(pending, 1);
     assert.deepEqual(selected, ["first"]);
+    // From a new-chat view (no selected session) the missing target is pending too.
+    view.rerender(React.createElement(SessionSidebar, { ...props, selectedSessionId: null, initialSessionId: null }));
+    view.rerender(React.createElement(SessionSidebar, { ...props, selectedSessionId: null, initialSessionId: "also-missing" }));
+    await waitFor(() => assert.equal(pending, 2));
   } finally {
     restore();
   }
