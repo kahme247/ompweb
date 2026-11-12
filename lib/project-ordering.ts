@@ -60,7 +60,8 @@ export function projectTargetId(project: { poolId?: string; hostId?: string }, p
  *  hosts by label. Every known host gets a group, empty or not, so it can
  *  still be added to; projects of a host that is not listed are dropped.
  *  With `pools`, the first pool's members have no group: their own projects
- *  follow the pool's projects in the pool's group. */
+ *  join the pool's projects in the pool's group. Each group keeps the given
+ *  order, so the cluster sorts and pins as one list. */
 export function groupProjectsByHost<T extends { hostId?: string; poolId?: string }>(
   projects: T[],
   hosts: { id: string; label: string }[],
@@ -73,9 +74,8 @@ export function groupProjectsByHost<T extends { hostId?: string; poolId?: string
   });
   return ordered.map((host) => ({
     host,
-    // The sort is stable: pool projects first, each kind in the given order. A pool project's own target is `pool:<id>`, which also holds for the sidebar's entries (their `hostId` is that target).
-    projects: projects.filter((project) => projectTargetId(project, pools) === host.id)
-      .sort((a, b) => Number(projectTargetId(b).startsWith("pool:")) - Number(projectTargetId(a).startsWith("pool:"))),
+    // A pool project (or a sidebar entry for one) already has `pool:<id>` as its target; a member's own project carries its host id and folds into the cluster through the membership check.
+    projects: projects.filter((project) => projectTargetId(project, pools) === host.id),
   }));
 }
 

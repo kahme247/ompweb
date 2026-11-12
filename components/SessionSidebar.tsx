@@ -1118,78 +1118,98 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, [loadProjects, t]);
 
-  /** Projects of one host that Move up/down and drag can reorder: all of them
-   *  in manual mode, only the pinned ones while a sort is active (the rest
-   *  follow the sort). Order and pins are per host. */
+  /** Projects of one sidebar group that Move up/down and drag can reorder: all
+   *  of them in manual mode, only the pinned ones while a sort is active (the
+   *  rest follow the sort). Order and pins are per group; the cluster is one
+   *  group, pool projects and its members' own projects together. */
   const reorderableProjects = useCallback(
-    (hostId: string) => sortedProjects.filter((project) => projectTargetId(project) === hostId && (!pinsActive || project.pinOrder !== undefined)),
-    [pinsActive, sortedProjects],
+    (targetId: string) => sortedProjects.filter((project) => projectTargetId(project, pools) === targetId && (!pinsActive || project.pinOrder !== undefined)),
+    [pinsActive, pools, sortedProjects],
   );
 
   // One ordering write (reorder or pin) at a time: each computes its payload
   // from the list on screen, which is stale until the previous write reloads it.
   const orderWriteBusyRef = useRef(false);
 
-  /** Persist one whole-list order as a single atomic batched PATCH. */
-  const persistProjectOrder = useCallback(async (next: ManagedProject[], hostId: string) => {
+  /** Persist one group's whole order: one batched PATCH per store (the pool
+   *  registry, or one host's registry), each project at its index in `next`. */
+  const persistProjectOrder = useCallback(async (next: ManagedProject[]) => {
     if (orderWriteBusyRef.current) return;
     orderWriteBusyRef.current = true;
-    try {
-      // One batched request: the server applies every entry in a single
-      // atomic registry save, so per-project writes can't interleave and lose
-      // updates. Discovered projects included here are registered server-side.
-      const response = await fetch("/api/projects", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...(hostId.startsWith("pool:") ? { poolId: hostId.slice(5) } : { hostId: remoteHostId(hostId) }),
-          updates: next.map((project, index) => ({
-            ...(project.poolId ? { projectId: project.projectId } : { cwd: project.path }),
-            ...(pinsActive ? { pinOrder: index } : { sortOrder: index }),
-          })),
-        }),
+    // A cluster group spans the pool's registry and each member host's.
+    const batches = new Map<string, { target: Record<string, string | undefined>; updates: Record<string, unknown>[] }>();
+    next.forEach((project, index) => {
+      // Only what moved: an unchanged store (an offline member's, say) gets no request it would have to answer.
+      if ((pinsActive ? project.pinOrder : project.sortOrder) === index) return;
+      const store = project.poolId ? `pool:${project.poolId}` : hostOf(project);
+      const batch = batches.get(store) ?? { target: project.poolId ? { poolId: project.poolId } : { hostId: remoteHostId(project.hostId) }, updates: [] };
+      batch.updates.push({
+        ...(project.poolId ? { projectId: project.projectId } : { cwd: project.path }),
+        ...(pinsActive ? { pinOrder: index } : { sortOrder: index }),
       });
-      if (!response.ok) throw new Error(t("projects.reorderFailed"));
+      batches.set(store, batch);
+    });
+    // A move that must change an offline member's positions is refused before anything is written.
+    const offline = [...batches.keys()].map((store) => (store.startsWith("pool:") ? null : hostUnavailableReason(store))).find((reason) => reason !== null);
+    if (offline) {
+      toast.error(offline);
+      orderWriteBusyRef.current = false;
+      return;
+    }
+    let failed = false;
+    try {
+      // shortcut: one request per store, not atomic across stores; a store that fails unexpectedly keeps its old indices until a later move reaches it.
+      for (const { target, updates } of batches.values()) {
+        // Within a store the server applies every entry in a single atomic
+        // registry save, so per-project writes can't interleave and lose
+        // updates. Discovered projects included here are registered server-side.
+        // Every store is tried: one that cannot answer must not hold back the others.
+        const response = await fetch("/api/projects", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...target, updates }),
+        }).catch(() => null);
+        if (!response?.ok) failed = true;
+      }
+      if (failed) toast.error(t("projects.reorderFailed"));
       await loadProjects();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       orderWriteBusyRef.current = false;
     }
-  }, [loadProjects, pinsActive, t]);
+  }, [hostUnavailableReason, loadProjects, pinsActive, t]);
 
   const handleProjectDrop = useCallback(async (target: ManagedProject) => {
     const source = draggedProject;
     setDraggedProject(null);
     // Order is per host: a drop onto another host's project means nothing.
-    if (!source || projectTargetId(source) !== projectTargetId(target)) return;
-    const next = [...reorderableProjects(projectTargetId(target))];
+    if (!source || projectTargetId(source, pools) !== projectTargetId(target, pools)) return;
+    const next = [...reorderableProjects(projectTargetId(target, pools))];
     const from = next.findIndex((project) => projectIdentity(project) === projectIdentity(source));
     const to = next.findIndex((project) => projectIdentity(project) === projectIdentity(target));
     if (from < 0 || to < 0 || from === to) return;
     const [moved] = next.splice(from, 1);
     if (!moved) return;
     next.splice(to, 0, moved);
-    await persistProjectOrder(next, projectTargetId(target));
-  }, [draggedProject, reorderableProjects, persistProjectOrder]);
+    await persistProjectOrder(next);
+  }, [draggedProject, pools, reorderableProjects, persistProjectOrder]);
 
   /** Keyboard-accessible reorder: move one project up/down the list. */
   const handleMoveProject = useCallback(async (project: ManagedProject, delta: -1 | 1) => {
-    const next = [...reorderableProjects(projectTargetId(project))];
+    const next = [...reorderableProjects(projectTargetId(project, pools))];
     const index = next.findIndex((candidate) => projectIdentity(candidate) === projectIdentity(project));
     const target = index + delta;
     if (index < 0 || target < 0 || target >= next.length) return;
     const [moved] = next.splice(index, 1);
     if (!moved) return;
     next.splice(target, 0, moved);
-    await persistProjectOrder(next, projectTargetId(project));
-  }, [reorderableProjects, persistProjectOrder]);
+    await persistProjectOrder(next);
+  }, [pools, reorderableProjects, persistProjectOrder]);
 
   /** Pin to the end of the pinned group, or unpin. */
   const handleTogglePin = useCallback(async (project: ManagedProject) => {
     if (orderWriteBusyRef.current) return;
     orderWriteBusyRef.current = true;
-    const pinOrder = project.pinOrder !== undefined ? null : nextPinOrder(sortedProjects.filter((other) => projectTargetId(other) === projectTargetId(project)));
+    const pinOrder = project.pinOrder !== undefined ? null : nextPinOrder(sortedProjects.filter((other) => projectTargetId(other, pools) === projectTargetId(project, pools)));
     try {
       await handleUpdateProjectPresentation(project, { pinOrder });
     } catch {
@@ -1197,7 +1217,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     } finally {
       orderWriteBusyRef.current = false;
     }
-  }, [sortedProjects, handleUpdateProjectPresentation]);
+  }, [pools, sortedProjects, handleUpdateProjectPresentation]);
 
   // The menu closes itself on a menu item click and returns focus to the trigger.
   const chooseProjectSortMode = useCallback((mode: ProjectSortMode) => {
@@ -1818,7 +1838,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                   onMoveProject={(target, delta) => void handleMoveProject(target, delta)}
                   pinnable={pinsActive}
                   onTogglePin={handleTogglePin}
-                  isDragTarget={draggedProject !== null && projectTargetId(draggedProject) === projectTargetId(project) && projectIdentity(draggedProject) !== projectKey && (!pinsActive || project.pinOrder !== undefined)}
+                  isDragTarget={draggedProject !== null && projectTargetId(draggedProject, pools) === projectTargetId(project, pools) && projectIdentity(draggedProject) !== projectKey && (!pinsActive || project.pinOrder !== undefined)}
                   removeBusy={removeProjectKey === projectKey}
                   onSelectSession={handleSelectSessionFromList}
                   searchQuery={trimmedSearchQuery || undefined}
