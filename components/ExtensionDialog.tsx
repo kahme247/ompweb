@@ -6,7 +6,6 @@ import type { HtmlFormData } from "@/lib/pi-types";
 import type { UiApprovalAnswer, UiDialogRequest, UiDialogValue } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
-import { useTouchTargets } from "@/hooks/useTouchTargets";
 import { matchMobileViewport } from "@/hooks/useIsMobile";
 
 // The Other text lives as long as the question: choosing a regular option only
@@ -247,7 +246,6 @@ const DROPPED_TAGS: Record<string, true> = {
 const INPUT_TYPES: Record<string, true> = {
   radio: true, checkbox: true, text: true, number: true, range: true, email: true, url: true, tel: true, search: true, date: true, time: true, hidden: true,
 };
-const FIELD_STYLE = { padding: "7px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12.5, fontFamily: "inherit" } as const;
 
 /** A radio/checkbox group that offers a free-text "Other" answer, as omp's html-form adds one. */
 interface OtherGroup { type: string; name: string; required: boolean }
@@ -333,7 +331,8 @@ function otherBox({ type, name, required }: OtherGroup, ctx: FormCtx, key: strin
       if (type === "radio" && box.value.trim() !== "" && box.form) for (const radio of namedInputs(box.form, name, type)) radio.checked = false;
       if (box.form) syncOtherValidity(box.form);
     },
-    style: { ...FIELD_STYLE, width: "100%", boxSizing: "border-box" },
+    className: "extension-field",
+    style: { width: "100%" },
   });
 }
 
@@ -345,7 +344,7 @@ function formNode(node: ChildNode, ctx: FormCtx, key: string): ReactNode {
   let out = formElement(element, ctx, key);
   const label = ctx.rows.get(element);
   if (label) {
-    out = createElement("div", { key, style: { display: "flex", alignItems: "center", gap: 8 } }, out, formElement(label, ctx, `${key}.label`));
+    out = createElement("div", { key, className: "extension-choice" }, out, formElement(label, ctx, `${key}.label`));
   }
   const other = ctx.others.get(element);
   return other ? createElement(Fragment, { key }, out, otherBox(other, ctx, `${key}.other`)) : out;
@@ -363,7 +362,7 @@ function formElement(element: Element, ctx: FormCtx, key: string): ReactNode {
   if (id) props.id = `${ctx.prefix}-${id}`;
   if (tag === "label" && attr("for")) props.htmlFor = `${ctx.prefix}-${attr("for")}`;
   // Each radio/checkbox option sits on its own row, its control spaced from its label.
-  if (tag === "label" && Array.from(element.querySelectorAll("input")).some(choiceType)) props.style = { display: "flex", alignItems: "center", gap: 8 };
+  if (tag === "label" && Array.from(element.querySelectorAll("input")).some(choiceType)) props.className = "extension-choice";
   if (tag === "input" || tag === "select" || tag === "textarea") {
     Object.assign(props, { name: attr("name"), required: element.hasAttribute("required") && !ctx.grouped.has(element), disabled: element.hasAttribute("disabled") });
   }
@@ -372,14 +371,14 @@ function formElement(element: Element, ctx: FormCtx, key: string): ReactNode {
     const type = INPUT_TYPES[rawType] ? rawType : "text";
     Object.assign(props, { type, placeholder: attr("placeholder"), min: attr("min"), max: attr("max"), step: attr("step"), pattern: attr("pattern"), minLength: length("minlength"), maxLength: length("maxlength") });
     if (type === "radio" || type === "checkbox") {
-      Object.assign(props, { value: attr("value") ?? "on", defaultChecked: element.hasAttribute("checked"), style: { accentColor: "var(--accent-strong)" } });
+      Object.assign(props, { value: attr("value") ?? "on", defaultChecked: element.hasAttribute("checked") });
     } else {
-      Object.assign(props, { defaultValue: attr("value") ?? "", style: FIELD_STYLE });
+      Object.assign(props, { defaultValue: attr("value") ?? "", className: "extension-field" });
     }
     return createElement("input", props);
   }
   if (tag === "textarea") {
-    Object.assign(props, { placeholder: attr("placeholder"), rows: length("rows"), minLength: length("minlength"), maxLength: length("maxlength"), defaultValue: element.textContent ?? "", style: { ...FIELD_STYLE, width: "100%", resize: "vertical" } });
+    Object.assign(props, { placeholder: attr("placeholder"), rows: length("rows"), minLength: length("minlength"), maxLength: length("maxlength"), defaultValue: element.textContent ?? "", className: "extension-field", style: { width: "100%", resize: "vertical" } });
     return createElement("textarea", props);
   }
   if (tag === "select") {
@@ -387,7 +386,7 @@ function formElement(element: Element, ctx: FormCtx, key: string): ReactNode {
     const selected = Array.from(element.querySelectorAll("option"))
       .filter((option) => option.hasAttribute("selected"))
       .map((option) => option.getAttribute("value") ?? option.textContent ?? "");
-    Object.assign(props, { multiple, defaultValue: multiple ? selected : selected[0], style: FIELD_STYLE });
+    Object.assign(props, { multiple, defaultValue: multiple ? selected : selected[0], className: "extension-field" });
   }
   if (tag === "option") Object.assign(props, { value: attr("value") ?? element.textContent ?? "", disabled: element.hasAttribute("disabled") });
   if (tag === "optgroup") props.label = attr("label");
@@ -462,7 +461,6 @@ export function ExtensionDialog({
   const awaitingNext = request.method === "select" && answeredId === request.id;
   const [askDrafts, setAskDrafts] = useState(() => initialAskDrafts(request));
   const viewportMaxHeight = useViewportMaxHeight();
-  const { touchTargets } = useTouchTargets();
   const formRef = useRef<HTMLFormElement>(null);
   // Parsed in an inert document and never attached: only formNode's elements reach the page.
   const otherLabel = t("chatWindow.askOther");
@@ -647,26 +645,22 @@ export function ExtensionDialog({
         }}
       >
         <div className="extension-dialog-content" style={{ minWidth: 0, minHeight: 0, overflowY: "auto", overflowX: "hidden", overflowWrap: "anywhere" }}>
-        <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650, whiteSpace: "pre-wrap" }}>{title}</div>
-          <div style={{ marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>{t("chatWindow.extensionRequest")}</div>
+        <div className="extension-dialog-header">
+          <div style={{ color: "var(--text)", fontSize: 14, lineHeight: "20px", fontWeight: 650, whiteSpace: "pre-wrap" }}>{title}</div>
+          <div style={{ marginTop: 2, color: "var(--text-dim)", fontSize: 11, lineHeight: "16px", fontFamily: "var(--font-mono)" }}>{t("chatWindow.extensionRequest")}</div>
         </div>
 
-        <div style={{ padding: 14 }}>
+        <div className="extension-dialog-body">
           {request.method === "confirm" && (
             <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{request.args[1]}</div>
           )}
           {request.method === "approve" && (
-            <div style={{ display: "grid", gap: 8 }}>
-              <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", fontFamily: "var(--font-mono)" }}>
+            <div style={{ display: "grid", gap: 6 }}>
+              <div style={{ marginBottom: 6, padding: "8px 12px", borderRadius: 8, background: "var(--tool-bg)", color: "var(--text-muted)", fontSize: 12, lineHeight: "18px", whiteSpace: "pre-wrap", fontFamily: "var(--font-mono)" }}>
                 {request.args[0].full.split("\n").slice(1).join("\n")}
               </div>
               {approvalChoices(request, t("settingsConfig.allow"), t("settingsConfig.deny")).map((choice) => (
-                <button
-                  key={choice.label}
-                  onClick={() => respond(choice.value)}
-                  style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 12.5, fontFamily: "inherit" }}
-                >
+                <button key={choice.label} className="extension-choice" onClick={() => respond(choice.value)}>
                   {choice.label}
                 </button>
               ))}
@@ -675,11 +669,12 @@ export function ExtensionDialog({
           {request.method === "select" && (() => {
             const [, items, dialogOptions] = request.args;
             return (
-            <div style={{ display: "grid", gap: 8 }}>
+            <div style={{ display: "grid", gap: 6 }}>
               {items.map((item, index) => {
                 const option = typeof item === "string" ? item : item.label;
                 const selected = selectedOption === option;
-                const checkbox = dialogOptions?.selectionMarker === "checkbox" && index < (dialogOptions.markableCount ?? items.length);
+                const markable = dialogOptions?.selectionMarker === "checkbox";
+                const checkbox = markable && index < (dialogOptions.markableCount ?? items.length);
                 const checked = checkbox && (dialogOptions.checkedIndices?.includes(index) ?? false);
                 // A checkbox toggle goes out at once even when attached: staging it for Next would let the
                 // next row (often "Done selecting") silently replace it, and a stray toggle is undone by one tap.
@@ -687,31 +682,21 @@ export function ExtensionDialog({
                 return (
                   <button
                     key={option}
+                    // A row past omp's markable ones ("Done selecting") is an action, not an answer.
+                    className={markable && !checkbox ? "extension-choice extension-choice-action" : "extension-choice"}
+                    data-checked={selected || checked || undefined}
                     onClick={() => stage ? setSelectedOption(option) : respond(option)}
                     disabled={awaitingNext}
                     aria-pressed={stage ? selected : undefined}
-                    style={{
-                      width: "100%",
-                      padding: "7px 10px",
-                      borderRadius: 6,
-                      border: `1px solid ${selected ? "var(--accent)" : "var(--border)"}`,
-                      background: selected ? "color-mix(in srgb, var(--accent) 10%, var(--bg-panel))" : "var(--bg-panel)",
-                      color: "var(--text)",
-                      cursor: "pointer",
-                      textAlign: "left",
-                      fontSize: 12.5,
-                      fontFamily: "inherit",
-                      transition: attached ? undefined : "background-color var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm)",
-                    }}
-                    onMouseEnter={attached ? undefined : (e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={attached ? undefined : (e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
                   >
-                    {checkbox && <span aria-hidden="true" style={{ marginRight: 6, color: checked ? "var(--accent)" : "var(--text-dim)" }}>{checked ? "☑" : "☐"}</span>}
-                    {option}
-                    {typeof item !== "string" && item.description && (
-                      <span style={{ display: "block", marginTop: 2, color: "var(--text-muted)", fontSize: 12 }}>{item.description}</span>
-                    )}
-                    {checkbox && <span className="sr-only">, {t(checked ? "chatWindow.optionChecked" : "chatWindow.optionUnchecked")}</span>}
+                    {checkbox && <span aria-hidden="true" className="extension-choice-mark">{checked ? "☑" : "☐"}</span>}
+                    <span style={{ minWidth: 0 }}>
+                      {option}
+                      {typeof item !== "string" && item.description && (
+                        <span style={{ display: "block", marginTop: 2, color: "var(--text-muted)", fontSize: 12, lineHeight: "18px" }}>{item.description}</span>
+                      )}
+                      {checkbox && <span className="sr-only">, {t(checked ? "chatWindow.optionChecked" : "chatWindow.optionUnchecked")}</span>}
+                    </span>
                   </button>
                 );
               })}
@@ -739,17 +724,8 @@ export function ExtensionDialog({
                   onKeyDown={(e) => {
                     if (e.key === "Enter") submitValue();
                   }}
-                  style={{
-                    width: "100%",
-                    padding: isSensitive ? "7px 34px 7px 10px" : "7px 10px",
-                    borderRadius: 6,
-                    border: "1px solid var(--border)",
-                    background: "var(--bg-panel)",
-                    color: "var(--text)",
-                    outline: "none",
-                    fontSize: 12,
-                    fontFamily: "inherit",
-                  }}
+                  className="extension-field"
+                  style={{ width: "100%", paddingRight: isSensitive ? 36 : undefined }}
                 />
                 {isSensitive && (
                   <button
@@ -759,7 +735,7 @@ export function ExtensionDialog({
                     onClick={() => setShowPassword((prev) => !prev)}
                     style={{
                       position: "absolute",
-                      right: 6,
+                      right: 8,
                       top: "50%",
                       transform: "translateY(-50%)",
                       width: 24,
@@ -790,16 +766,11 @@ export function ExtensionDialog({
               onKeyDown={(e) => {
                 if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitValue();
               }}
+              className="extension-field"
               style={{
                 width: "100%",
                 height: "min(220px, 30dvh)",
                 minHeight: 80,
-                padding: 10,
-                borderRadius: 7,
-                border: "1px solid var(--border)",
-                background: "var(--bg-panel)",
-                color: "var(--text)",
-                outline: "none",
                 resize: "vertical",
                 fontSize: request.args[3]?.promptStyle ? "var(--chat-font-size)" : 13,
                 lineHeight: 1.55,
@@ -808,7 +779,7 @@ export function ExtensionDialog({
             />
           )}
           {request.method === "askDialog" && (
-            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 20 }}>
               {request.args[0].map((question, index) => {
                 const draft = askDraftAt(index);
                 const chooseKeptOther = () => {
@@ -816,10 +787,10 @@ export function ExtensionDialog({
                   updateAskDraft(index, (current) => ({ ...current, selected: question.multi ? current.selected : [], otherChosen: true }));
                 };
                 return (
-                  <fieldset key={question.id} style={{ margin: 0, padding: 0, border: "none", minWidth: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8 }}>
-                    <legend style={{ padding: 0, marginBottom: 8, color: "var(--text)", fontSize: 13, fontWeight: 600, lineHeight: 1.5 }}>
+                  <fieldset key={question.id} style={{ margin: 0, padding: 0, border: "none", minWidth: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 6 }}>
+                    <legend style={{ padding: 0, marginBottom: 8, color: "var(--text)", fontSize: 13, fontWeight: 600, lineHeight: "20px" }}>
                       {question.header && (
-                        <span style={{ display: "inline-block", marginRight: 6, padding: "0 7px", borderRadius: 999, border: "1px solid var(--border)", background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 11, fontWeight: 500 }}>
+                        <span style={{ display: "inline-block", marginRight: 8, padding: "0 6px", borderRadius: 4, background: "var(--bg-hover)", color: "var(--text-muted)", fontSize: 11, lineHeight: "18px", fontWeight: 500, verticalAlign: "1px" }}>
                           {question.header}
                         </span>
                       )}
@@ -828,22 +799,7 @@ export function ExtensionDialog({
                     {question.options.map((option, optionIndex) => {
                       const checked = draft.selected.includes(option.label);
                       return (
-                        <label
-                          key={option.label}
-                          style={{
-                            display: "flex",
-                            alignItems: "flex-start",
-                            gap: 8,
-                            minWidth: 0,
-                            padding: "8px 10px",
-                            borderRadius: 7,
-                            border: `1px solid ${checked ? "var(--accent)" : "var(--border)"}`,
-                            background: checked ? "color-mix(in srgb, var(--accent) 10%, var(--bg-panel))" : "var(--bg-panel)",
-                            color: "var(--text)",
-                            cursor: "pointer",
-                            fontSize: 13,
-                          }}
-                        >
+                        <label key={option.label} className="extension-choice">
                           <input
                             type={question.multi ? "checkbox" : "radio"}
                             name={`ask-${request.id}-${index}`}
@@ -857,7 +813,6 @@ export function ExtensionDialog({
                                 ? { ...current, selected: current.selected.includes(option.label) ? current.selected.filter((label) => label !== option.label) : [...current.selected, option.label] }
                                 : { ...current, selected: [option.label], otherChosen: false });
                             }}
-                            style={{ margin: "2px 0 0", accentColor: "var(--accent-strong)" }}
                           />
                           <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>
                             {option.label}
@@ -868,7 +823,7 @@ export function ExtensionDialog({
                               <span style={{ display: "block", marginTop: 2, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{option.description}</span>
                             )}
                             {option.preview && (
-                              <span style={{ display: "block", marginTop: 6, padding: "6px 8px", borderRadius: 6, background: "var(--tool-bg)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{option.preview}</span>
+                              <span style={{ display: "block", marginTop: 6, padding: 8, border: "1px solid var(--border)", borderRadius: 6, background: "var(--tool-bg)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{option.preview}</span>
                             )}
                           </span>
                         </label>
@@ -876,18 +831,7 @@ export function ExtensionDialog({
                     })}
                     {/* The Other option: its text box is the option, so what was
                         typed stays in place while another option is chosen. */}
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "flex-start",
-                        gap: 8,
-                        minWidth: 0,
-                        padding: "8px 10px",
-                        borderRadius: 7,
-                        border: `1px solid ${draft.otherChosen ? "var(--accent)" : "var(--border)"}`,
-                        background: draft.otherChosen ? "color-mix(in srgb, var(--accent) 10%, var(--bg-panel))" : "var(--bg-panel)",
-                      }}
-                    >
+                    <div className="extension-choice" data-checked={draft.otherChosen || undefined}>
                       <input
                         type={question.multi ? "checkbox" : "radio"}
                         name={`ask-${request.id}-${index}`}
@@ -898,7 +842,6 @@ export function ExtensionDialog({
                           updateAskDraft(index, (current) => ({ ...current, selected: chosen && !question.multi ? [] : current.selected, otherChosen: chosen }));
                           if (chosen) document.getElementById(`ask-${request.id}-${index}-other`)?.focus();
                         }}
-                        style={{ margin: "4px 0 0", accentColor: "var(--accent-strong)", cursor: "pointer" }}
                       />
                       <textarea
                         id={`ask-${request.id}-${index}-other`}
@@ -928,7 +871,7 @@ export function ExtensionDialog({
                           padding: 0,
                           border: "none",
                           background: "none",
-                          color: draft.otherChosen ? "var(--text)" : "var(--text-muted)",
+                          color: "var(--text)",
                           outline: "none",
                           resize: "none",
                           fontSize: "var(--chat-font-size)",
@@ -951,7 +894,7 @@ export function ExtensionDialog({
               ref={formRef}
               onChange={(event) => syncOtherValidity(event.currentTarget)}
               onSubmit={(event) => { event.preventDefault(); submitValue(); }}
-              style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8, color: "var(--text)", fontSize: 13, lineHeight: 1.55 }}
+              className="extension-dialog-form"
             >
               {formContent}
             </form>
@@ -959,75 +902,20 @@ export function ExtensionDialog({
         </div>
         </div>
 
-        <div className="extension-dialog-footer" style={{ display: "flex", flexShrink: 0, justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
-          <button
-            onClick={cancel}
-            style={{
-              padding: "6px 10px",
-              minHeight: touchTargets === "accessible" ? 44 : undefined,
-              borderRadius: 6,
-              border: "1px solid var(--border)",
-              background: "var(--bg)",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              transition: "background-color var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg)"; e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
+        <div className="extension-dialog-footer" style={{ display: "flex", flexShrink: 0, justifyContent: "flex-end", gap: 8, padding: "10px 16px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+          <button className="extension-dialog-button" onClick={cancel}>
             {t("chatWindow.cancel")}
           </button>
           {request.method === "confirm" ? (
-            <button
-              onClick={submitValue}
-              style={{
-                padding: "6px 10px",
-                minHeight: touchTargets === "accessible" ? 44 : undefined,
-                borderRadius: 6,
-                border: "1px solid var(--accent-strong)",
-                background: "var(--accent-strong)",
-                color: "var(--on-accent)",
-                cursor: "pointer",
-                transition: "background-color var(--dur-fast) var(--ease-out-warm)",
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.12)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
-            >
+            <button className="extension-dialog-button extension-dialog-button-primary" onClick={submitValue}>
               {t("chatWindow.confirm")}
             </button>
           ) : (request.method === "select" && attached) || request.method === "askDialog" ? (
-            <button
-              onClick={submitValue}
-              disabled={!canSubmit || awaitingNext}
-              style={{
-                padding: "6px 10px",
-                minHeight: touchTargets === "accessible" ? 44 : undefined,
-                borderRadius: 6,
-                border: "1px solid var(--accent-strong)",
-                background: canSubmit ? "var(--accent-strong)" : "var(--bg-subtle)",
-                color: canSubmit ? "var(--on-accent)" : "var(--text-dim)",
-                cursor: canSubmit ? "pointer" : "not-allowed",
-                opacity: canSubmit ? 1 : 0.65,
-              }}
-            >
+            <button className="extension-dialog-button extension-dialog-button-primary" onClick={submitValue} disabled={!canSubmit || awaitingNext}>
               {request.method === "askDialog" ? t("chatWindow.submit") : t("chatWindow.next")}
             </button>
           ) : request.method !== "select" && request.method !== "approve" ? (
-            <button
-              onClick={submitValue}
-              style={{
-                padding: "6px 10px",
-                minHeight: touchTargets === "accessible" ? 44 : undefined,
-                borderRadius: 6,
-                border: "1px solid var(--accent-strong)",
-                background: "var(--accent-strong)",
-                color: "var(--on-accent)",
-                cursor: "pointer",
-                transition: "background-color var(--dur-fast) var(--ease-out-warm)",
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.12)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
-            >
+            <button className="extension-dialog-button extension-dialog-button-primary" onClick={submitValue}>
               {t("chatWindow.submit")}
             </button>
           ) : null}
