@@ -1,7 +1,6 @@
 /**
  * Host-provided tools and URI schemes, `/btw` side questions, word prediction, dictation and live voice.
- * Reuses omp's transport-free RPC bridges (`host-tools`, `host-uris`, `rpc-btw`, `rpc-dictation`,
- * `rpc-live`); their `{type}` frames go out as `{t}` frames with the same fields.
+ * The session-side bridges live in `../host-bridge`.
  *
  *   omp  → host  {t:"host_tool_call", id, toolCallId, toolName, arguments}   run a tool registered by set_host_tools
  *   omp  → host  {t:"host_tool_cancel", id, targetId}                        the call `targetId` was aborted
@@ -19,12 +18,6 @@
  *   omp  → host  {t:"live_phase", phase} | {t:"live_levels", input, output}
  *   omp  → host  {t:"live_transcript", role, turn, text, final} | {t:"live_end", error?}
  */
-import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-tools";
-import { isRpcHostUriResult, RpcHostUriBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-uris";
-import { RpcBtwController } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-btw";
-import { RpcDictationBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-dictation";
-import { RpcLiveBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-live";
-import type { RpcHostToolDefinition, RpcHostUriSchemeDefinition } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { cfgSpellingAutocomplete } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { requestTextPrediction, textPredictionBackend } from "@oh-my-pi/pi-coding-agent/predict/client";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -37,16 +30,16 @@ import {
 	wordCompletionQuery,
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { BtwBridge, DictationBridge, type HostToolDefinition, HostToolBridge, HostUriBridge, type HostUriSchemeDefinition, LiveBridge } from "../host-bridge";
 import type { CommandContext, CommandTable, FrameTable } from "./types";
 
 interface ToolsState {
-	hostTools: RpcHostToolBridge;
-	hostUris: RpcHostUriBridge;
-	btw: RpcBtwController;
-	dictation: RpcDictationBridge;
-	live: RpcLiveBridge;
+	hostTools: HostToolBridge;
+	hostUris: HostUriBridge;
+	btw: BtwBridge;
+	dictation: DictationBridge;
+	live: LiveBridge;
 	predictor: WordPredictor;
-	lastDictationError: string | undefined;
 }
 
 const states = new WeakMap<AgentSession, ToolsState>();
@@ -61,45 +54,40 @@ function optionalString(op: string, args: Record<string, unknown>, field: string
 function stateOf(ctx: CommandContext): ToolsState {
 	let state = states.get(ctx.session);
 	if (state) return state;
-	const output = ({ type, ...frame }: { type: string } & object) => ctx.send({ t: type, ...frame });
-	const created: ToolsState = {
-		hostTools: new RpcHostToolBridge(output),
-		hostUris: new RpcHostUriBridge(output),
-		btw: new RpcBtwController(ctx.session, output),
-		dictation: new RpcDictationBridge(ctx.session, frame => {
-			output(frame);
-			if (frame.type === "dictation_end" && frame.error) created.lastDictationError = frame.error;
-		}),
-		live: new RpcLiveBridge(ctx.session, output),
+	const send = ctx.send;
+	state = {
+		hostTools: new HostToolBridge(send),
+		hostUris: new HostUriBridge(send),
+		btw: new BtwBridge(ctx.session, send),
+		dictation: new DictationBridge(ctx.session, send),
+		live: new LiveBridge(ctx.session, send),
 		predictor: new WordPredictor(),
-		lastDictationError: undefined,
 	};
-	state = created;
 	states.set(ctx.session, state);
 	return state;
 }
 
 /**
  * Call before the session is replaced (new_session, switch_session, branch, fork, navigate_tree,
- * open_session), as RPC does: stops dictation and lands every `/btw` checkpoint. Throws when a
+ * open_session): stops dictation and lands every `/btw` checkpoint. Throws when a
  * side answer cannot be saved, so the caller keeps the session instead of losing it.
  */
 export async function settleToolsBeforeSessionChange(session: AgentSession): Promise<void> {
 	const state = states.get(session);
 	if (!state) return;
-	const previousError = state.lastDictationError;
+	const previousError = state.dictation.lastError;
 	try {
 		await state.dictation.stop();
 	} catch (cause) {
 		// Only a transcription failure already reported in `dictation_end` lets the change proceed.
-		if (state.dictation.active || state.lastDictationError === previousError || !(cause instanceof Error) || cause.message !== state.lastDictationError) throw cause;
+		if (state.dictation.active || state.dictation.lastError === previousError || !(cause instanceof Error) || cause.message !== state.dictation.lastError) throw cause;
 		logger.warn("Dictation failed while changing sessions", { error: String(cause) });
 	}
 	await state.btw.close();
 }
 
 /**
- * Call when the host link closes, as RPC does on client disconnect: pending host tool and URI calls
+ * Call when the host link closes: pending host tool and URI calls
  * fail instead of hanging the agent, host schemes leave the process-wide router, mic and call stop.
  */
 export async function closeToolsForHost(session: AgentSession): Promise<void> {
@@ -107,12 +95,12 @@ export async function closeToolsForHost(session: AgentSession): Promise<void> {
 	if (!state) return;
 	states.delete(session);
 	state.hostTools.close("ompweb host disconnected before host tool execution completed");
-	state.hostUris.clear("ompweb host disconnected before host URI request completed");
+	state.hostUris.close("ompweb host disconnected before host URI request completed");
 	state.dictation.dispose();
 	await state.live.stop();
 }
 
-function hostToolDefinitions(value: unknown): RpcHostToolDefinition[] {
+function hostToolDefinitions(value: unknown): HostToolDefinition[] {
 	if (!Array.isArray(value)) throw new Error("set_host_tools: tools must be an array");
 	return value.map((tool: unknown, index) => {
 		if (!isRecord(tool)) throw new Error(`set_host_tools: tool at index ${index} must be an object`);
@@ -137,7 +125,7 @@ function hostToolDefinitions(value: unknown): RpcHostToolDefinition[] {
 	});
 }
 
-function hostUriSchemes(value: unknown): RpcHostUriSchemeDefinition[] {
+function hostUriSchemes(value: unknown): HostUriSchemeDefinition[] {
 	if (!Array.isArray(value)) throw new Error("set_host_uri_schemes: schemes must be an array");
 	// The bridge validates and normalizes each scheme name.
 	return value.map((scheme: unknown, index) => {
@@ -172,7 +160,7 @@ function wordQueryAt(text: string, cursor: number): WordCompletionQuery | undefi
 }
 
 /**
- * RPC's `RpcWordPredictor` (it lives in rpc-mode.ts): one engine request in flight, and a newer
+ * One engine request in flight, and a newer
  * request replaces the one waiting behind it (which answers `null`), so a burst of typing costs the
  * shared daemon at most two inferences.
  */
@@ -216,12 +204,12 @@ async function liveStart(ctx: CommandContext, args: Record<string, unknown>, op:
 	return state.live.start({ voice, instructions, sdpOffer: typeof sdpOffer === "string" ? sdpOffer : undefined });
 }
 
-// shortcut: RPC also refuses live_start/live_connect/dictation_start while a session change or shutdown runs;
+// shortcut: live_start/live_connect/dictation_start should also be refused while a session change or shutdown runs;
 // that counter lives with the session-change commands, so add it when they export one.
 export const toolsCommands: CommandTable = {
 	set_host_tools: async (ctx, args) => {
 		const tools = hostToolDefinitions(args.tools);
-		await ctx.session.refreshRpcHostTools(stateOf(ctx).hostTools.setTools(tools));
+		await ctx.session.refreshRpcHostTools(stateOf(ctx).hostTools.tools(tools));
 		return { toolNames: tools.map(tool => tool.name) };
 	},
 	set_host_uri_schemes: async (ctx, args) => ({ schemes: stateOf(ctx).hostUris.setSchemes(hostUriSchemes(args.schemes)) }),
@@ -273,25 +261,8 @@ export const toolsCommands: CommandTable = {
 	},
 };
 
-/** The RPC bridges' guards check `type`; the channel's frames carry it as `t`. */
-function asRpcFrame(frame: Record<string, unknown>): Record<string, unknown> {
-	return { ...frame, type: frame.t };
-}
-
 export const toolsFrames: FrameTable = {
-	host_tool_result: (ctx, frame) => {
-		const rpc = asRpcFrame(frame);
-		if (!isRpcHostToolResult(rpc)) throw new Error("host_tool_result: needs a string id and a result with content[]");
-		stateOf(ctx).hostTools.handleResult(rpc);
-	},
-	host_tool_update: (ctx, frame) => {
-		const rpc = asRpcFrame(frame);
-		if (!isRpcHostToolUpdate(rpc)) throw new Error("host_tool_update: needs a string id and a partialResult with content[]");
-		stateOf(ctx).hostTools.handleUpdate(rpc);
-	},
-	host_uri_result: (ctx, frame) => {
-		const rpc = asRpcFrame(frame);
-		if (!isRpcHostUriResult(rpc)) throw new Error("host_uri_result: needs a string id");
-		stateOf(ctx).hostUris.handleResult(rpc);
-	},
+	host_tool_result: (ctx, frame) => stateOf(ctx).hostTools.result(frame),
+	host_tool_update: (ctx, frame) => stateOf(ctx).hostTools.update(frame),
+	host_uri_result: (ctx, frame) => stateOf(ctx).hostUris.result(frame),
 };

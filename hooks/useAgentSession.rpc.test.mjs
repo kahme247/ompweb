@@ -1267,8 +1267,8 @@ test("an answered dialog handoff cannot clear the next unanswered request", asyn
   resetWorld();
   primeSession("dialog-handoff", [userMsg("u0", "q")]);
   const { w, es } = await startRun("dialog-handoff", "ask me");
-  const first = { type: "extension_ui_request", id: "first", method: "editor", title: "First question" };
-  const next = { ...first, id: "next", title: "Next question" };
+  const first = { type: "ui_request", id: 1, method: "editor", args: ["First question"] };
+  const next = { ...first, id: 2, args: ["Next question"] };
   await act(() => es.emit(first));
   await settle(300);
   assert.equal(w.latest.extensionDialog?.id, first.id, "unanswered requests have no clear timer");
@@ -1276,11 +1276,11 @@ test("an answered dialog handoff cannot clear the next unanswered request", asyn
   let release;
   const acknowledgement = new Promise((resolve) => { release = resolve; });
   world.holds.push({
-    match: (method, _url, body) => method === "POST" && body?.type === "extension_ui_response",
+    match: (method, _url, body) => method === "POST" && body?.type === "ui_response",
     produce: () => acknowledgement,
   });
   let response;
-  await act(async () => { response = w.latest.respondToExtensionUi(first, { value: "My answer" }); });
+  await act(async () => { response = w.latest.respondToExtensionUi(first, "My answer"); });
   await act(() => es.emit(next));
   await act(async () => {
     release({ value: { success: true, data: {} } });
@@ -1296,26 +1296,70 @@ for (const failure of ["HTTP rejection", "connection failure"]) {
     const sid = `answer-failure-${failure}`;
     primeSession(sid, [userMsg("u0", "q")]);
     const { w, es } = await startRun(sid, "ask");
-    const request = { type: "extension_ui_request", id: "retry-answer", method: "editor", title: "Answer" };
+    const request = { type: "ui_request", id: 5, method: "editor", args: ["Answer"] };
     await act(() => es.emit(request));
     world.holds.push({
-      match: (method, _url, body) => method === "POST" && body?.type === "extension_ui_response",
+      match: (method, _url, body) => method === "POST" && body?.type === "ui_response",
       produce: async () => {
         if (failure === "connection failure") throw new Error("connection lost");
         return { status: 500, value: { error: "answer delivery failed" } };
       },
     });
-    await act(async () => { await w.latest.respondToExtensionUi(request, { value: "my retained answer" }); });
+    await act(async () => { await w.latest.respondToExtensionUi(request, "my retained answer"); });
     await settle(300);
     assert.equal(w.latest.extensionDialog?.id, request.id, "failure must not unmount and erase the answer");
     assert.equal(w.latest.notices.at(-1)?.type, "error");
     await act(() => es.emit({ ...request }));
     assert.equal(w.latest.extensionDialog?.id, request.id);
-    await act(async () => { await w.latest.respondToExtensionUi(request, { value: "my retained answer" }); });
+    await act(async () => { await w.latest.respondToExtensionUi(request, "my retained answer"); });
     await settle(300);
     assert.equal(w.latest.extensionDialog, null, "a successful retry closes the answered question");
   });
 }
+
+test("dialog answers go out as ui_response with omp's value; a cancel carries none", async () => {
+  resetWorld();
+  primeSession("ui-answers", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("ui-answers", "ask");
+  const confirm = { type: "ui_request", id: 8, method: "confirm", args: ["Keep going?", ""] };
+  await act(() => es.emit(confirm));
+  await act(async () => { await w.latest.respondToExtensionUi(confirm, true); });
+  await act(async () => { await w.latest.respondToExtensionUi(confirm, undefined); });
+  const sent = world.calls.filter((c) => c.body?.type === "ui_response").map((c) => c.body);
+  assert.deepEqual(sent.map(({ type, id, value }) => ({ type, id, value })), [
+    { type: "ui_response", id: 8, value: true },
+    { type: "ui_response", id: 8, value: undefined },
+  ]);
+  assert.equal("value" in JSON.parse(JSON.stringify(sent[1])), false, "a cancel sends no value");
+});
+
+test("ui_end closes another tab's dialog; presentation ui frames drive notices, status, widgets and custom UI", async () => {
+  resetWorld();
+  primeSession("ui-frames", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("ui-frames", "ask");
+  await act(() => es.emit({ type: "ui_request", id: 9, method: "select", args: ["Which?", ["A", "B"]] }));
+  assert.equal(w.latest.extensionDialog?.id, 9);
+  await act(() => es.emit({ type: "ui_end", id: 9 }));
+  assert.equal(w.latest.extensionDialog, null);
+
+  await act(() => {
+    es.emit({ type: "ui", method: "notify", message: "Heads up", notifyType: "warning" });
+    es.emit({ type: "ui", method: "setStatus", statusKey: "lint", statusText: "3 issues" });
+    es.emit({ type: "ui", method: "setWidget", widgetKey: "todo", widgetLines: ["one"] });
+    es.emit({ type: "ui", method: "custom", id: 4, lines: ["hello"] });
+  });
+  assert.equal(w.latest.notices.at(-1)?.message, "Heads up");
+  assert.equal(w.latest.notices.at(-1)?.type, "warning");
+  assert.deepEqual(w.latest.extensionStatuses, [{ key: "lint", text: "3 issues" }]);
+  assert.deepEqual(w.latest.extensionWidgets, [{ key: "todo", lines: ["one"], placement: "aboveEditor" }]);
+  assert.deepEqual(w.latest.extensionCustomUi?.lines, ["hello"]);
+
+  await act(async () => { await w.latest.sendExtensionCustomInput(w.latest.extensionCustomUi, "x"); });
+  const input = world.calls.find((c) => c.body?.type === "ui_input")?.body;
+  assert.deepEqual({ id: input?.id, data: input?.data }, { id: 4, data: "x" });
+  await act(() => es.emit({ type: "ui", method: "custom", id: 4, lines: [], closed: true }));
+  assert.equal(w.latest.extensionCustomUi, null);
+});
 
 test("a stale local queue action reports that its target is unavailable", async () => {
   resetWorld();
@@ -3670,7 +3714,7 @@ test("busy foreground catch-up restores missing middle messages without overwrit
   await act(async () => {
     visibilityState = "visible"; document.dispatchEvent(new Event("visibilitychange"));
     await sleep(20);
-    es.emit({ type: "extension_ui_request", id: "question", method: "confirm", title: "Keep going?" });
+    es.emit({ type: "ui_request", id: "question", method: "confirm", args: ["Keep going?", ""] });
     es.emit({ type: "message_update", message: assistantMsg("current", "newer tokens") });
     release();
   });
@@ -6034,12 +6078,12 @@ test("the answering tab keeps its dialog mounted during a synchronized cancel ha
   primeSession("s1", [userMsg("u0", "q")]);
   const { w, es } = await startStreamingRun("s1");
   await act(async () => {
-    es.emit({ type: "extension_ui_request", id: "question", method: "confirm", title: "Keep going?" });
+    es.emit({ type: "ui_request", id: "question", method: "confirm", args: ["Keep going?", ""] });
   });
   assert.equal(w.latest.extensionDialog?.id, "question");
   await act(async () => {
-    const response = w.latest.respondToExtensionUi(w.latest.extensionDialog, { confirmed: true });
-    es.emit({ type: "extension_ui_request", id: "cancel:question", method: "cancel", targetId: "question" });
+    const response = w.latest.respondToExtensionUi(w.latest.extensionDialog, true);
+    es.emit({ type: "ui_end", id: "question" });
     await response;
   });
   assert.equal(w.latest.extensionDialog?.id, "question", "the local hand-off window must survive its own synchronized cancel");

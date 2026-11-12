@@ -7,7 +7,7 @@ import { type Args, parseArgs, reportCliUsageError } from "@oh-my-pi/pi-coding-a
 import { launchHelp } from "@oh-my-pi/pi-coding-agent/commands/launch-help";
 import { prepareAcpTerminalAuthArgs } from "@oh-my-pi/pi-coding-agent/modes/acp/terminal-auth";
 import { Command } from "@oh-my-pi/pi-utils/cli";
-import { enterHeadless, isHeadless } from "./headless";
+import { enterHeadless, isHeadless, runHeadless } from "./headless";
 import { createHostedAgentSession } from "./session";
 
 export default class Index extends Command {
@@ -32,8 +32,7 @@ export default class Index extends Command {
 			}
 			throw error;
 		}
-		// RPC's server module is ompweb's headless runner here (see `rpc-mode-swap.ts`).
-		if (!isHeadless() && (parsed.mode === "rpc" || parsed.mode === "rpc-ui")) {
+		if (parsed.mode === "rpc" || parsed.mode === "rpc-ui") {
 			process.stderr.write("Error: ompweb-omp has no RPC mode; ompweb host starts it with --headless\n");
 			process.exitCode = 2;
 			return;
@@ -41,7 +40,10 @@ export default class Index extends Command {
 		// Startup boundary, as upstream: the session graph loads only once argv is accepted.
 		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
 		try {
-			await runRootCommand(parsed, args, { createAgentSession: createHostedAgentSession });
+			await runRootCommand(parsed, args, {
+				createAgentSession: createHostedAgentSession,
+				runSessionHost: isHeadless() ? runHeadless : undefined,
+			});
 		} catch (error) {
 			if (reportCliUsageError(error)) process.exit(2);
 			throw error;

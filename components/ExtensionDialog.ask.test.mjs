@@ -25,11 +25,23 @@ const extras = {
   recommended: 2,
 };
 
+/** omp's ExtensionAskDialogResultItem for `question`. */
+function result(question, selectedOptions, customInput) {
+  return {
+    id: question.id,
+    question: question.question,
+    options: question.options.map((option) => option.label),
+    multi: question.multi ?? false,
+    selectedOptions,
+    ...(customInput === undefined ? {} : { customInput }),
+  };
+}
+
 function renderAsk(questions) {
   const responses = [];
   render(React.createElement(ExtensionDialog, {
-    request: { type: "extension_ui_request", id: "ask-1", method: "ask", questions },
-    onRespond: (_request, response) => responses.push(response),
+    request: { type: "ui_request", id: 1, method: "askDialog", args: [questions] },
+    onRespond: (_request, value) => responses.push(value),
     attached: true,
   }));
   return responses;
@@ -77,10 +89,11 @@ test("submit sends answers in question order: single choice, multi choices in op
   await user.click(screen.getByRole("radio", { name: "S" }));
   await user.click(screen.getByRole("button", { name: "Submit" }));
   assert.deepEqual(responses, [{
-    answers: [
-      { id: "color", selectedOptions: ["Green"] },
-      { id: "extras", selectedOptions: ["Cheese", "Egg"], customInput: "pickles" },
-      { id: "size", selectedOptions: ["S"] },
+    kind: "submit",
+    results: [
+      { id: "color", question: "Pick a color", options: ["Red", "Green", "Blue"], multi: false, selectedOptions: ["Green"] },
+      { id: "extras", question: "Extras?", options: ["Cheese", "Ham", "Egg"], multi: true, selectedOptions: ["Cheese", "Egg"], customInput: "pickles" },
+      { id: "size", question: "Pick a size", options: ["S", "M"], multi: false, selectedOptions: ["S"] },
     ],
   }]);
 });
@@ -93,7 +106,7 @@ test("typing in Other chooses it and replaces the radio choice", async () => {
   assert.equal(other.checked, true);
   assert.equal(screen.getByRole("radio", { name: /Green/ }).checked, false);
   await user.click(screen.getByRole("button", { name: "Submit" }));
-  assert.deepEqual(responses.pop(), { answers: [{ id: "color", selectedOptions: [], customInput: "Teal" }] });
+  assert.deepEqual(responses.pop(), { kind: "submit", results: [result(color, [], "Teal")] });
 });
 
 test("the Other text stays when another option is chosen and counts again when Other is", async () => {
@@ -106,12 +119,12 @@ test("the Other text stays when another option is chosen and counts again when O
   assert.equal(field.value, "Teal", "the typed text outlives the choice");
   assert.equal(other.checked, false);
   await user.click(screen.getByRole("button", { name: "Submit" }));
-  assert.deepEqual(responses.pop(), { answers: [{ id: "color", selectedOptions: ["Red"] }] }, "an unchosen Other is not sent");
+  assert.deepEqual(responses.pop(), { kind: "submit", results: [result(color, ["Red"])] }, "an unchosen Other is not sent");
 
   await user.click(other);
   assert.equal(document.activeElement, field, "choosing Other puts the cursor in its text");
   await user.click(screen.getByRole("button", { name: "Submit" }));
-  assert.deepEqual(responses.pop(), { answers: [{ id: "color", selectedOptions: [], customInput: "Teal" }] });
+  assert.deepEqual(responses.pop(), { kind: "submit", results: [result(color, [], "Teal")] });
 });
 
 test("going back into the kept Other text chooses Other again", async () => {
@@ -124,7 +137,7 @@ test("going back into the kept Other text chooses Other again", async () => {
   assert.equal(screen.getByRole("radio", { name: "Other: type your own answer" }).checked, true);
   assert.equal(screen.getByRole("radio", { name: "Red" }).checked, false);
   await user.click(screen.getByRole("button", { name: "Submit" }));
-  assert.deepEqual(responses, [{ answers: [{ id: "color", selectedOptions: [], customInput: "Teal" }] }]);
+  assert.deepEqual(responses, [{ kind: "submit", results: [result(color, [], "Teal")] }]);
 });
 
 test("a chosen but blank Other blocks single-select Submit, and clearing the text unchooses it", async () => {
@@ -152,12 +165,12 @@ test("multi-select Other is a checkbox alongside the options, and unchecking kee
   assert.equal(other.checked, false);
   assert.equal(field.value, "Pickles");
   await user.click(screen.getByRole("button", { name: "Submit" }));
-  assert.deepEqual(responses, [{ answers: [{ id: "extras", selectedOptions: ["Cheese"] }] }]);
+  assert.deepEqual(responses, [{ kind: "submit", results: [result(extras, ["Cheese"])] }]);
 });
 
-test("Cancel answers cancelled", async () => {
+test("Cancel answers with no value", async () => {
   const user = userEvent.setup();
   const responses = renderAsk([color]);
   await user.click(screen.getByRole("button", { name: "Cancel" }));
-  assert.deepEqual(responses, [{ cancelled: true }]);
+  assert.deepEqual(responses, [undefined]);
 });

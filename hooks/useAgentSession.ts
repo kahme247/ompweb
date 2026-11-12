@@ -14,6 +14,10 @@ import type {
   SessionInfo,
   SessionTreeNode,
   ToolResultMessage,
+  UiCustomFrame,
+  UiDialogRequest,
+  UiDialogValue,
+  UiPresentationFrame,
   UserMessage,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
@@ -39,7 +43,7 @@ import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { validateOutgoingPrompt } from "@/lib/image-attachments";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
-import type { HostToolDefinition, HostUriSchemeDefinition, HtmlFormData, RpcAskDialogAnswer, RpcAvailableSlashCommand, SessionStatsInfo, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
+import type { HostToolDefinition, HostUriSchemeDefinition, RpcAvailableSlashCommand, SessionStatsInfo, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
 import { EVENT_STREAM_CLOSED, EVENT_STREAM_OPEN, addToOutbox, dropFromOutbox, newOutboxId, openEventStream, subscribeOutbox, type EventStream, type LocalOutboxEntry } from "@/lib/event-stream";
@@ -97,7 +101,6 @@ import {
   extractMessageText,
   historyEntryToSubagentInfo,
   isQuotaLikeError,
-  isSafeOpenUrl,
   runHostTool,
   normalizeThinkingLevel,
   pruneSubagentIdMap,
@@ -119,9 +122,6 @@ import type {
   CompactResultInfo,
   EventStreamConnectionResult,
   EventStreamConnectionStatus,
-  ExtensionUiCustomRequest,
-  ExtensionUiDialogRequest,
-  IncomingExtensionUiRequest,
   LastAssistantTextResponse,
   ModelEntry,
   ModelsResponse,
@@ -510,9 +510,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }, []);
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
-  const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
+  const [extensionDialog, setExtensionDialog] = useState<UiDialogRequest | null>(null);
   const extensionDialogClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const locallyAnsweredDialogRef = useRef<string | null>(null);
+  const locallyAnsweredDialogRef = useRef<UiDialogRequest["id"] | null>(null);
   useEffect(() => () => {
     if (extensionDialogClearTimerRef.current) clearTimeout(extensionDialogClearTimerRef.current);
   }, []);
@@ -548,7 +548,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // a prompt increment runId before the stale pre-prompt state arrives and
   // clobbers the new run's derived state (model/fast-mode).
   const initialHydrationPendingRef = useRef(false);
-  const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
+  const [extensionCustomUi, setExtensionCustomUi] = useState<UiCustomFrame | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessagesState] = useState<QueuedMessages>(EMPTY_QUEUE);
@@ -1915,12 +1915,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     await respondHostUri(sid, id, { isError: true, error: `Unknown pi-web resource: ${resource}` });
   }, [respondHostUri]);
 
-  const sendExtensionCustomInput = useCallback(async (request: ExtensionUiCustomRequest, data: string) => {
+  const sendExtensionCustomInput = useCallback(async (request: UiCustomFrame, data: string) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
       await sendAgentCommand(sid, {
-        type: "extension_ui_input",
+        type: "ui_input",
         id: request.id,
         data,
       });
@@ -1946,8 +1946,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice]);
 
   const respondToExtensionUi = useCallback(async (
-    request: ExtensionUiDialogRequest,
-    response: { value: string } | { confirmed: boolean } | { cancelled: true } | { answers: RpcAskDialogAnswer[] } | { data: HtmlFormData },
+    request: UiDialogRequest,
+    value: UiDialogValue | undefined,
   ): Promise<boolean> => {
     const sid = sessionIdRef.current;
     if (!sid) {
@@ -1960,11 +1960,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // when a genuinely new request arrives.
     locallyAnsweredDialogRef.current = request.id;
     try {
-      await sendAgentCommand(sid, {
-        type: "extension_ui_response",
-        id: request.id,
-        ...response,
-      });
+      await sendAgentCommand(sid, { type: "ui_response", id: request.id, value });
       if (!hookAliveRef.current || sessionIdRef.current !== sid) return true;
       // Keep the answered panel mounted briefly while the next question arrives.
       clearTimeout(extensionDialogClearTimerRef.current ?? undefined);
@@ -2013,84 +2009,55 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     throw new EventStreamConnectionError(current && result.status === "timeout" ? "timeout" : "closed");
   }, [addNotice, connectEvents]);
 
-  const handleExtensionUiRequest = useCallback((request: IncomingExtensionUiRequest) => {
-    switch (request.method) {
-      case "select":
-      case "confirm":
-      case "input":
-      case "editor":
-      case "ask":
-      case "form":
-        if (extensionDialogClearTimerRef.current) {
-          clearTimeout(extensionDialogClearTimerRef.current);
-          extensionDialogClearTimerRef.current = null;
-        }
-        locallyAnsweredDialogRef.current = null;
-        setExtensionDialog(request);
+  const openExtensionDialog = useCallback((request: UiDialogRequest) => {
+    if (extensionDialogClearTimerRef.current) {
+      clearTimeout(extensionDialogClearTimerRef.current);
+      extensionDialogClearTimerRef.current = null;
+    }
+    locallyAnsweredDialogRef.current = null;
+    setExtensionDialog(request);
+  }, []);
+
+  const endExtensionDialog = useCallback((id: UiDialogRequest["id"]) => {
+    // Another tab's answer or omp's own close; this tab's answer keeps its hand-off window.
+    if (id !== locallyAnsweredDialogRef.current) {
+      setExtensionDialog((current) => current?.id === id ? null : current);
+    }
+  }, []);
+
+  const handleExtensionUiFrame = useCallback((frame: UiPresentationFrame) => {
+    switch (frame.method) {
+      case "notify":
+        addNotice({ message: frame.message, type: frame.notifyType ?? "info" });
         break;
-      case "cancel":
-        if (request.targetId !== locallyAnsweredDialogRef.current) {
-          setExtensionDialog((current) => current?.id === request.targetId ? null : current);
-        }
-        break;
-      case "open_url": {
-        // OAuth and similar flows: try to open a tab (often blocked outside a
-        // user gesture), and always surface the URL as a notice fallback.
-        // Reject unsafe schemes (javascript:/data:/file:/protocol-relative).
-        const url = request.launchUrl ?? request.url;
-        const safeUrl = isSafeOpenUrl(url) ? url : "";
-        if (safeUrl) {
-          try {
-            window.open(safeUrl, "_blank", "noopener,noreferrer");
-          } catch {
-            // Pop-up blocked — the notice below still carries the URL.
-          }
-        }
-        addNotice({
-          id: request.id,
-          type: "info",
-          message: safeUrl
-            ? (request.instructions ? `${request.instructions}\n${safeUrl}` : translate("agentSession.openInBrowser", { url: safeUrl }))
-            : translate("agentSession.unsafeUrlBlocked"),
-        });
-        break;
-      }
-      case "notify": {
-        addNotice({
-          id: request.id,
-          message: request.message,
-          type: request.notifyType ?? "info",
-        });
-        break;
-      }
       case "setStatus":
         setExtensionStatuses((prev) => {
-          const rest = prev.filter((item) => item.key !== request.statusKey);
-          return request.statusText ? [...rest, { key: request.statusKey, text: request.statusText }] : rest;
+          const rest = prev.filter((item) => item.key !== frame.statusKey);
+          return frame.statusText ? [...rest, { key: frame.statusKey, text: frame.statusText }] : rest;
         });
         break;
       case "setWidget":
         setExtensionWidgets((prev) => {
-          const rest = prev.filter((item) => item.key !== request.widgetKey);
-          return request.widgetLines
+          const rest = prev.filter((item) => item.key !== frame.widgetKey);
+          return frame.widgetLines
             ? [...rest, {
-                key: request.widgetKey,
-                lines: request.widgetLines,
-                placement: request.widgetPlacement ?? "aboveEditor",
+                key: frame.widgetKey,
+                lines: frame.widgetLines,
+                placement: frame.widgetPlacement ?? "aboveEditor",
               }]
             : rest;
         });
         break;
       case "setTitle":
-        if (request.title) document.title = request.title;
+        if (frame.title) document.title = frame.title;
         break;
       case "set_editor_text":
-        opts.chatInputRef?.current?.insertText(request.text);
+        opts.chatInputRef?.current?.insertText(frame.text);
         break;
       case "custom":
         setExtensionCustomUi((current) => {
-          if (request.closed) return current?.id === request.id ? null : current;
-          return request as ExtensionUiCustomRequest;
+          if (frame.closed) return current?.id === frame.id ? null : current;
+          return frame;
         });
         break;
     }
@@ -3199,11 +3166,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
       }
-      case "extension_ui_request":
-        handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
+      case "ui_request":
+        openExtensionDialog(event as unknown as UiDialogRequest);
+        break;
+      case "ui_end":
+        if (typeof event.id === "number" || typeof event.id === "string") endExtensionDialog(event.id);
+        break;
+      case "ui":
+        handleExtensionUiFrame(event as unknown as UiPresentationFrame);
         break;
     }
-  }, [addNotice, addUnconfirmedRunErrorNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, receiveCorrelatedMessage, reconcileAgentState, refreshLiveModelState, refreshSubagentRoster, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, setCompacting, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
+  }, [addNotice, addUnconfirmedRunErrorNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, endExtensionDialog, finishPromptWithoutStream, handleExtensionUiFrame, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, openExtensionDialog, receiveCorrelatedMessage, reconcileAgentState, refreshLiveModelState, refreshSubagentRoster, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, setCompacting, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
   handleAgentEventRef.current = handleAgentEvent;
   syncActionsRef.current = {
     metadata: (context, version, hasLive = liveModelMeta !== null || currentModelOverride !== null) => {

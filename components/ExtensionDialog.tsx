@@ -2,24 +2,12 @@
 
 import { createElement, Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import { Eye, EyeOff } from "lucide-react";
-import type { ExtensionUiRequest } from "@/lib/types";
-import type { HtmlFormData, RpcAskDialogAnswer } from "@/lib/pi-types";
+import type { HtmlFormData } from "@/lib/pi-types";
+import type { UiApprovalAnswer, UiDialogRequest, UiDialogValue } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useTouchTargets } from "@/hooks/useTouchTargets";
 import { matchMobileViewport } from "@/hooks/useIsMobile";
-
-export type ExtensionDialogRequest = Extract<
-  ExtensionUiRequest,
-  { method: "select" | "confirm" | "input" | "editor" | "ask" | "form" }
->;
-
-export type ExtensionDialogResponse =
-  | { value: string }
-  | { confirmed: boolean }
-  | { cancelled: true }
-  | { answers: RpcAskDialogAnswer[] }
-  | { data: HtmlFormData };
 
 // The Other text lives as long as the question: choosing a regular option only
 // unchooses it, so the text is still in its row when Other is chosen again.
@@ -212,12 +200,38 @@ export function isSensitivePrompt(title?: string, placeholder?: string): boolean
 }
 
 /** Single-select questions start on their recommended option. */
-function initialAskDrafts(request: ExtensionDialogRequest): AskDraft[] {
-  if (request.method !== "ask") return [];
-  return request.questions.map((question) => {
+function initialAskDrafts(request: UiDialogRequest): AskDraft[] {
+  if (request.method !== "askDialog") return [];
+  return request.args[0].map((question) => {
     const recommended = question.multi || question.recommended === undefined ? undefined : question.options[question.recommended];
     return { selected: recommended ? [recommended.label] : [], other: "", otherChosen: false };
   });
+}
+
+function dialogTitle(request: UiDialogRequest, askTitle: string): string {
+  switch (request.method) {
+    case "askDialog":
+    case "formDialog":
+      return askTitle;
+    case "approve":
+      return request.args[0].full.split("\n", 1)[0];
+    default:
+      return request.args[0];
+  }
+}
+
+/** omp's approval choices, in its order: this call, the session, each grant, then no. */
+function approvalChoices(request: Extract<UiDialogRequest, { method: "approve" }>, allow: string, deny: string): { label: string; value: UiApprovalAnswer }[] {
+  const [prompt] = request.args;
+  return [
+    { label: allow, value: "once" },
+    ...(prompt.session ? [{ label: prompt.session, value: "session" as const }] : []),
+    ...(prompt.grants ?? []).flatMap((grant) => [
+      { label: grant.label, value: { grant: grant.scope, always: false } },
+      { label: grant.alwaysLabel, value: { grant: grant.scope, always: true } },
+    ]),
+    { label: deny, value: "deny" },
+  ];
 }
 
 // The agent's form markup becomes React elements: these tags render as themselves with only the
@@ -413,8 +427,8 @@ export function readFormData(form: HTMLFormElement): HtmlFormData {
 }
 
 /**
- * Overlay dialog for `select` / `confirm` / `input` / `editor` / `ask` extension UI
- * requests. Polished UX:
+ * Overlay dialog for omp's `ExtensionUIContext` dialogs as the runner sends them.
+ * Polished UX:
  *   - entrance animation (fade backdrop + scale-in panel)
  *   - focus trap: focus moves into the dialog on open and is returned to the
  *     opener on close; Tab/Shift-Tab wrap inside (via useModalDialog)
@@ -427,14 +441,14 @@ export function ExtensionDialog({
   onRespond,
   attached = false,
 }: {
-  request: ExtensionDialogRequest;
-  /** Resolves `false` when the answer could not be sent, so the panel takes another answer. */
-  onRespond: (request: ExtensionDialogRequest, response: ExtensionDialogResponse) => void | Promise<boolean>;
+  request: UiDialogRequest;
+  /** Answers with omp's return value (`undefined` cancels); resolves `false` when it could not be sent. */
+  onRespond: (request: UiDialogRequest, value: UiDialogValue | undefined) => void | Promise<boolean>;
   /** Render as a composer panel instead of a full-chat overlay. */
   attached?: boolean;
 }) {
   const { t } = useI18n();
-  const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
+  const [value, setValue] = useState(request.method === "editor" ? request.args[1] ?? "" : "");
   const [showPassword, setShowPassword] = useState(false);
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const requestIdRef = useRef(request.id);
@@ -443,7 +457,7 @@ export function ExtensionDialog({
   const pressPointerRef = useRef<string | null>(null);
   // omp takes one answer per request id and the panel stays up until the next request arrives, so the
   // select controls are disabled in that window instead of sending a tap omp would silently drop.
-  const [answeredId, setAnsweredId] = useState<string | null>(null);
+  const [answeredId, setAnsweredId] = useState<UiDialogRequest["id"] | null>(null);
   const awaitingNext = request.method === "select" && answeredId === request.id;
   const [askDrafts, setAskDrafts] = useState(() => initialAskDrafts(request));
   const viewportMaxHeight = useViewportMaxHeight();
@@ -452,8 +466,8 @@ export function ExtensionDialog({
   // Parsed in an inert document and never attached: only formNode's elements reach the page.
   const otherLabel = t("chatWindow.askOther");
   const formContent = useMemo(() => {
-    if (request.method !== "form") return null;
-    const doc = new window.DOMParser().parseFromString(request.html, "text/html");
+    if (request.method !== "formDialog") return null;
+    const doc = new window.DOMParser().parseFromString(request.args[0], "text/html");
     const root = doc.querySelector("form") ?? doc.body;
     const ctx = planForm(root, `form-${request.id}`, otherLabel);
     return Array.from(root.childNodes, (node, index) => formNode(node, ctx, String(index)));
@@ -467,7 +481,7 @@ export function ExtensionDialog({
     // SSE reconnects replay the same request as a fresh object, not a new question.
     if (requestIdRef.current === request.id) return;
     requestIdRef.current = request.id;
-    setValue(request.method === "editor" ? request.prefill ?? "" : "");
+    setValue(request.method === "editor" ? request.args[1] ?? "" : "");
     setShowPassword(false);
     setSelectedOption(null);
     setAskDrafts(initialAskDrafts(request));
@@ -478,18 +492,18 @@ export function ExtensionDialog({
     setAskDrafts((drafts) => drafts.map((draft, i) => i === index ? update(draft) : draft));
   // A chosen Other counts only with text. Multi-select may stay empty;
   // single-select needs a choice or an answer.
-  const canSubmit = request.method === "ask"
-    ? request.questions.every((question, index) => {
+  const canSubmit = request.method === "askDialog"
+    ? request.args[0].every((question, index) => {
       const { selected, other, otherChosen } = askDraftAt(index);
       return question.multi || selected.length > 0 || (otherChosen && other.trim() !== "");
     })
     : request.method !== "select" || selectedOption !== null;
-  const title = request.method === "ask" || request.method === "form" ? t("chatWindow.askTitle") : request.title;
+  const title = dialogTitle(request, t("chatWindow.askTitle"));
 
   // Answering removes the panel. Release its text field first, in the same
   // task, so the phone keyboard closes once instead of flashing as the
   // focused field disappears from under it.
-  const respond = (response: ExtensionDialogResponse) => {
+  const respond = (response: UiDialogValue | undefined) => {
     if (request.method === "select") {
       if (awaitingNext) return;
       setAnsweredId(request.id);
@@ -501,7 +515,7 @@ export function ExtensionDialog({
       if (sent === false) setAnsweredId((current) => current === id ? null : current);
     });
   };
-  const cancel = () => respond({ cancelled: true });
+  const cancel = () => respond(undefined);
 
   // useModalDialog gives us: focus-in on open, focus-restore on close,
   // document-level Escape (top-of-stack), and Tab wrapping inside the panel.
@@ -542,28 +556,33 @@ export function ExtensionDialog({
 
   const submitValue = () => {
     if (request.method === "confirm") {
-      respond({ confirmed: true });
+      respond(true);
     } else if (request.method === "select") {
-      if (selectedOption) respond({ value: selectedOption });
-    } else if (request.method === "ask") {
+      if (selectedOption !== null) respond(selectedOption);
+    } else if (request.method === "askDialog") {
       if (!canSubmit) return;
       respond({
-        answers: request.questions.map((question, index) => {
+        kind: "submit",
+        results: request.args[0].map((question, index) => {
           const draft = askDraftAt(index);
           const customInput = draft.otherChosen ? draft.other.trim() : "";
+          const options = question.options.map((option) => option.label);
           return {
             id: question.id,
-            selectedOptions: question.options.map((option) => option.label).filter((label) => draft.selected.includes(label)),
+            question: question.question,
+            options,
+            multi: question.multi ?? false,
+            selectedOptions: options.filter((label) => draft.selected.includes(label)),
             ...(customInput ? { customInput } : {}),
           };
         }),
       });
-    } else if (request.method === "form") {
+    } else if (request.method === "formDialog") {
       const form = formRef.current;
       if (form) syncOtherValidity(form);
       if (form?.reportValidity()) respond({ data: readFormData(form) });
-    } else {
-      respond({ value });
+    } else if (request.method !== "approve") {
+      respond(value);
     }
   };
 
@@ -634,21 +653,40 @@ export function ExtensionDialog({
 
         <div style={{ padding: 14 }}>
           {request.method === "confirm" && (
-            <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{request.message}</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{request.args[1]}</div>
           )}
-          {request.method === "select" && (
+          {request.method === "approve" && (
             <div style={{ display: "grid", gap: 8 }}>
-              {request.options.map((option, index) => {
+              <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", fontFamily: "var(--font-mono)" }}>
+                {request.args[0].full.split("\n").slice(1).join("\n")}
+              </div>
+              {approvalChoices(request, t("settingsConfig.allow"), t("settingsConfig.deny")).map((choice) => (
+                <button
+                  key={choice.label}
+                  onClick={() => respond(choice.value)}
+                  style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 12.5, fontFamily: "inherit" }}
+                >
+                  {choice.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {request.method === "select" && (() => {
+            const [, items, dialogOptions] = request.args;
+            return (
+            <div style={{ display: "grid", gap: 8 }}>
+              {items.map((item, index) => {
+                const option = typeof item === "string" ? item : item.label;
                 const selected = selectedOption === option;
-                const checkbox = request.selectionMarker === "checkbox" && index < (request.markableCount ?? request.options.length);
-                const checked = checkbox && (request.checkedIndices?.includes(index) ?? false);
+                const checkbox = dialogOptions?.selectionMarker === "checkbox" && index < (dialogOptions.markableCount ?? items.length);
+                const checked = checkbox && (dialogOptions.checkedIndices?.includes(index) ?? false);
                 // A checkbox toggle goes out at once even when attached: staging it for Next would let the
                 // next row (often "Done selecting") silently replace it, and a stray toggle is undone by one tap.
                 const stage = attached && !checkbox;
                 return (
                   <button
                     key={option}
-                    onClick={() => stage ? setSelectedOption(option) : respond({ value: option })}
+                    onClick={() => stage ? setSelectedOption(option) : respond(option)}
                     disabled={awaitingNext}
                     aria-pressed={stage ? selected : undefined}
                     style={{
@@ -669,15 +707,20 @@ export function ExtensionDialog({
                   >
                     {checkbox && <span aria-hidden="true" style={{ marginRight: 6, color: checked ? "var(--accent)" : "var(--text-dim)" }}>{checked ? "☑" : "☐"}</span>}
                     {option}
+                    {typeof item !== "string" && item.description && (
+                      <span style={{ display: "block", marginTop: 2, color: "var(--text-muted)", fontSize: 12 }}>{item.description}</span>
+                    )}
                     {checkbox && <span className="sr-only">, {t(checked ? "chatWindow.optionChecked" : "chatWindow.optionUnchecked")}</span>}
                   </button>
                 );
               })}
             </div>
-          )}
+            );
+          })()}
           {request.method === "input" && (() => {
-            const isSensitive = Boolean(request.secret || request.password) ||
-              (request.secret !== false && request.password !== false && isSensitivePrompt(request.title, request.placeholder));
+            const [inputTitle, placeholder, dialogOptions] = request.args;
+            const isSensitive = Boolean(dialogOptions?.secret) ||
+              (dialogOptions?.secret !== false && isSensitivePrompt(inputTitle, placeholder ?? undefined));
             return (
               <div style={{ position: "relative", width: "100%" }}>
                 <input
@@ -688,9 +731,9 @@ export function ExtensionDialog({
                   autoCapitalize={isSensitive ? "off" : undefined}
                   spellCheck={isSensitive ? false : undefined}
                   data-1p-ignore={isSensitive ? "true" : undefined}
-                  aria-label={request.title || request.placeholder || "Input value"}
+                  aria-label={inputTitle || placeholder || "Input value"}
                   value={value}
-                  placeholder={request.placeholder}
+                  placeholder={placeholder ?? undefined}
                   onChange={(e) => setValue(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") submitValue();
@@ -740,7 +783,7 @@ export function ExtensionDialog({
           {request.method === "editor" && (
             <textarea
               autoFocus
-              aria-label={request.title || "Input value"}
+              aria-label={request.args[0] || "Input value"}
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
@@ -757,15 +800,15 @@ export function ExtensionDialog({
                 color: "var(--text)",
                 outline: "none",
                 resize: "vertical",
-                fontSize: request.promptStyle ? "var(--chat-font-size)" : 13,
+                fontSize: request.args[3]?.promptStyle ? "var(--chat-font-size)" : 13,
                 lineHeight: 1.55,
-                fontFamily: request.promptStyle ? "inherit" : "var(--font-mono)",
+                fontFamily: request.args[3]?.promptStyle ? "inherit" : "var(--font-mono)",
               }}
             />
           )}
-          {request.method === "ask" && (
+          {request.method === "askDialog" && (
             <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 16 }}>
-              {request.questions.map((question, index) => {
+              {request.args[0].map((question, index) => {
                 const draft = askDraftAt(index);
                 const chooseKeptOther = () => {
                   if (draft.otherChosen || !draft.other.trim()) return;
@@ -901,7 +944,7 @@ export function ExtensionDialog({
               })}
             </div>
           )}
-          {request.method === "form" && (
+          {request.method === "formDialog" && (
             <form
               key={request.id}
               ref={formRef}
@@ -951,7 +994,7 @@ export function ExtensionDialog({
             >
               {t("chatWindow.confirm")}
             </button>
-          ) : (request.method === "select" && attached) || request.method === "ask" ? (
+          ) : (request.method === "select" && attached) || request.method === "askDialog" ? (
             <button
               onClick={submitValue}
               disabled={!canSubmit || awaitingNext}
@@ -966,9 +1009,9 @@ export function ExtensionDialog({
                 opacity: canSubmit ? 1 : 0.65,
               }}
             >
-              {request.method === "ask" ? t("chatWindow.submit") : t("chatWindow.next")}
+              {request.method === "askDialog" ? t("chatWindow.submit") : t("chatWindow.next")}
             </button>
-          ) : request.method !== "select" ? (
+          ) : request.method !== "select" && request.method !== "approve" ? (
             <button
               onClick={submitValue}
               style={{

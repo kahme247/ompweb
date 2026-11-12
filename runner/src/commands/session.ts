@@ -4,18 +4,16 @@
  * Unsolicited frame (see {@link watchSessionIdentity}):
  *   omp → host  {t:"session", sessionId, sessionFile, cwd}   the session now writes to another file
  *
- * Errors carry RPC's `code` (`session_busy`, `entry_not_found`, `unknown_since`, `stale_cursor`,
- * `ask_reanswer_unsupported`) as a `CommandError`, with RPC's message.
- *
- * Reuses `modes/rpc/rpc-messages` (transport-free paging).
+ * Errors carry a `code` (`session_busy`, `entry_not_found`, `unknown_since`, `stale_cursor`,
+ * `ask_reanswer_unsupported`) as a `CommandError`.
  */
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-messages";
 import { type AgentSession, SessionBusyError } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { probeSessionLeases } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { afterSessionChange } from "../events";
 import { prompting } from "./prompting";
 import { settleToolsBeforeSessionChange } from "./tools";
@@ -87,6 +85,94 @@ async function changeSession<T extends { cancelled: boolean }>(
 		await afterSessionChange(ctx.session);
 	}
 	return result;
+}
+
+const DEFAULT_MESSAGE_PAGE_LIMIT = 100;
+const MAX_MESSAGE_PAGE_LIMIT = 256;
+// Bounds one page so a run of large tool outputs never becomes one huge frame.
+const MAX_MESSAGE_PAGE_BYTES = 768 * 1024;
+const MAX_MESSAGE_CURSOR_CHARS = 2048;
+
+/** The transcript a cursor pages; any change (new message, branch, other session) makes it stale. */
+interface MessageSnapshot {
+	sessionId: string;
+	leafId: string | null;
+	messageCount: number;
+}
+
+function encodeCursor(snapshot: MessageSnapshot, offset: number): string {
+	return Buffer.from(JSON.stringify({ version: 1, ...snapshot, offset }), "utf8").toString("base64url");
+}
+
+function decodeCursor(cursor: string): MessageSnapshot & { offset: number } {
+	const invalid = new Error("Invalid message cursor");
+	if (cursor.length === 0 || cursor.length > MAX_MESSAGE_CURSOR_CHARS || !/^[A-Za-z0-9_-]+$/.test(cursor)) throw invalid;
+	const bytes = Buffer.from(cursor, "base64url");
+	if (bytes.toString("base64url") !== cursor) throw invalid;
+	let value: unknown;
+	try {
+		value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+	} catch {
+		throw invalid;
+	}
+	if (!isRecord(value)) throw invalid;
+	const { version, sessionId, leafId, messageCount, offset } = value;
+	if (
+		version !== 1 ||
+		typeof sessionId !== "string" ||
+		sessionId.length === 0 ||
+		sessionId.length > 256 ||
+		!((typeof leafId === "string" && leafId.length > 0 && leafId.length <= 256) || leafId === null) ||
+		typeof messageCount !== "number" ||
+		!Number.isSafeInteger(messageCount) ||
+		messageCount < 0 ||
+		typeof offset !== "number" ||
+		!Number.isSafeInteger(offset) ||
+		offset < 0 ||
+		offset > messageCount
+	)
+		throw invalid;
+	return { sessionId, leafId, messageCount, offset };
+}
+
+/** One page of the in-memory transcript, from `cursor` on, bounded by `limit` messages and the byte budget. */
+function pageMessages(session: AgentSession, cursor: string | undefined, limit = DEFAULT_MESSAGE_PAGE_LIMIT) {
+	if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_MESSAGE_PAGE_LIMIT) {
+		throw new Error(`Message page limit must be between 1 and ${MAX_MESSAGE_PAGE_LIMIT}`);
+	}
+	const messages = session.messages;
+	const snapshot: MessageSnapshot = {
+		sessionId: session.sessionId,
+		leafId: session.sessionManager.getLeafId(),
+		messageCount: messages.length,
+	};
+	let offset = 0;
+	if (cursor !== undefined) {
+		const decoded = decodeCursor(cursor);
+		if (
+			decoded.sessionId !== snapshot.sessionId ||
+			decoded.leafId !== snapshot.leafId ||
+			decoded.messageCount !== snapshot.messageCount
+		) {
+			throw new CommandError("Message cursor is stale", "stale_cursor");
+		}
+		offset = decoded.offset;
+	}
+	const page: typeof messages = [];
+	let pageBytes = 2;
+	while (offset + page.length < messages.length && page.length < limit) {
+		const message = messages[offset + page.length];
+		const messageBytes = Buffer.byteLength(JSON.stringify(message), "utf8") + (page.length === 0 ? 0 : 1);
+		if (page.length > 0 && pageBytes + messageBytes > MAX_MESSAGE_PAGE_BYTES) break;
+		page.push(message);
+		pageBytes += messageBytes;
+	}
+	const nextOffset = offset + page.length;
+	return {
+		messages: page,
+		...(nextOffset < messages.length ? { nextCursor: encodeCursor(snapshot, nextOffset) } : {}),
+		totalMessages: messages.length,
+	};
 }
 
 /** new_session and switch_session detach a live run unless they were cancelled. */
@@ -257,17 +343,10 @@ export const sessionCommands: CommandTable = {
 		const cursor = optionalString("get_messages_page", args, "cursor");
 		const { limit } = args;
 		if (limit !== undefined && typeof limit !== "number") throw new Error("get_messages_page: limit must be a number");
-		if (session.isStreaming || session.isCompacting) throw new CommandError(RPC_MESSAGES_PAGE_BUSY_ERROR, "session_busy");
-		const messages = session.messages;
-		try {
-			return pageRpcMessages(
-				messages,
-				{ sessionId: session.sessionId, leafId: session.sessionManager.getLeafId(), messageCount: messages.length },
-				{ cursor, limit },
-			);
-		} catch (err) {
-			throw err instanceof RpcMessagesPageError ? new CommandError(err.message, err.code) : err;
+		if (session.isStreaming || session.isCompacting) {
+			throw new CommandError("Cannot page messages while the session is changing", "session_busy");
 		}
+		return pageMessages(session, cursor, limit);
 	},
 	async get_branch_messages({ session }) {
 		return { messages: session.getUserMessagesForBranching() };

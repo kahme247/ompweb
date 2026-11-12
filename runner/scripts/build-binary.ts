@@ -14,7 +14,6 @@ import * as path from "node:path";
 import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
 import { createJsonParsePlugin } from "../node_modules/@oh-my-pi/pi-coding-agent/scripts/json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "../node_modules/@oh-my-pi/pi-coding-agent/scripts/legacy-pi-virtual-module";
-import { rpcModeSwap } from "../src/rpc-mode-swap";
 
 interface Target {
 	/** Native addon platform tag (`process.platform`). */
@@ -151,7 +150,7 @@ async function build(id: string, target: Target, statsClient: Record<string, str
 		// (`pi-tui/src/render/types.ts`, `pi-coding-agent/src/dap/types.ts`) emit identical chunks.
 		naming: { chunk: "chunks/[dir]/[name]-[hash].[ext]" },
 		minify: { identifiers: true, keepNames: true },
-		plugins: [rpcModeSwap, createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin()],
+		plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin()],
 		compile: {
 			execArgv: [`--user-agent=${USER_AGENT}`],
 			target: target.bun,
