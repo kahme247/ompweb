@@ -1139,6 +1139,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     // A cluster group spans the pool's registry and each member host's.
     const batches = new Map<string, { target: Record<string, string | undefined>; updates: Record<string, unknown>[] }>();
     next.forEach((project, index) => {
+      // Only what moved: an unchanged store (an offline member's, say) gets no request it would have to answer.
+      if ((pinsActive ? project.pinOrder : project.sortOrder) === index) return;
       const store = project.poolId ? `pool:${project.poolId}` : hostOf(project);
       const batch = batches.get(store) ?? { target: project.poolId ? { poolId: project.poolId } : { hostId: remoteHostId(project.hostId) }, updates: [] };
       batch.updates.push({

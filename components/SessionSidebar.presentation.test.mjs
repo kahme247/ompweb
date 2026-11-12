@@ -142,7 +142,8 @@ test("the sidebar orders a cluster's pool projects and its members' projects as 
     assert.ok(reason?.textContent.includes("Build box"), "the button is described by the unavailable reason");
     assert.ok(screen.queryByRole("button", { name: /On This machine/ }), "this machine's pinned project names its node");
 
-    // Moving this machine's project below the pool's one writes the cluster's whole order, one batch per store.
+    // Moving this machine's project below the pool's one writes the moved positions, one batch per store; the
+    // offline member's project keeps its position, so its store gets no request.
     const errors = [];
     const originalError = toast.error;
     toast.error = (message) => { errors.push(message); };
@@ -157,7 +158,6 @@ test("the sidebar orders a cluster's pool projects and its members' projects as 
     assert.deepEqual(writes, [
       { poolId: "cluster", updates: [{ projectId: "x", sortOrder: 0 }] },
       { updates: [{ cwd: "/l", sortOrder: 1 }] },
-      { hostId: "h1", updates: [{ cwd: "/a", sortOrder: 2 }] },
     ]);
   } finally {
     cleanup();
