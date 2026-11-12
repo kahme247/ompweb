@@ -119,7 +119,7 @@ export function renderNotification(event: NotificationEvent, t: Translate): Rend
 const MODEL_SWITCH_NOTICE_SOURCES = new Set(["prewalk", "plan-yolo"]);
 
 /** Extension UI methods that block the agent until the user answers (rpc-manager replays these too). */
-export const BLOCKING_UI_METHODS = new Set(["select", "confirm", "input", "editor", "ask", "open_url"]);
+export const BLOCKING_UI_METHODS = new Set(["select", "confirm", "input", "editor", "ask", "form", "open_url"]);
 
 const NOTIFICATION_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import type { ExtensionUiRequest } from "@/lib/types";
 import type { RpcAskDialogAnswer } from "@/lib/pi-types";
@@ -8,17 +8,19 @@ import { useI18n } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useTouchTargets } from "@/hooks/useTouchTargets";
 import { matchMobileViewport } from "@/hooks/useIsMobile";
+import { FormDialog } from "./FormDialog";
 
 export type ExtensionDialogRequest = Extract<
   ExtensionUiRequest,
-  { method: "select" | "confirm" | "input" | "editor" | "ask" }
+  { method: "select" | "confirm" | "input" | "editor" | "ask" | "form" }
 >;
 
 export type ExtensionDialogResponse =
   | { value: string }
   | { confirmed: boolean }
-  | { cancelled: true }
-  | { answers: RpcAskDialogAnswer[] };
+  | { cancelled: true; timedOut?: boolean }
+  | { answers: RpcAskDialogAnswer[] }
+  | { data: Record<string, string | number | string[]> };
 
 // The Other text lives as long as the question: choosing a regular option only
 // unchooses it, so the text is still in its row when Other is chosen again.
@@ -241,6 +243,9 @@ export function ExtensionDialog({
   attached?: boolean;
 }) {
   const { t } = useI18n();
+  const formId = useId();
+  const answeredFormRef = useRef<string | null>(null);
+  const formDeadlineRef = useRef<{ id: string; at: number } | null>(null);
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
   const [showPassword, setShowPassword] = useState(false);
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
@@ -277,7 +282,7 @@ export function ExtensionDialog({
       return question.multi || selected.length > 0 || (otherChosen && other.trim() !== "");
     })
     : request.method !== "select" || selectedOption !== null;
-  const title = request.method === "ask" ? t("chatWindow.askTitle") : request.title;
+  const title = request.method === "ask" || request.method === "form" ? t("chatWindow.askTitle") : request.title;
 
   // Answering removes the panel. Release its text field first, in the same
   // task, so the phone keyboard closes once instead of flashing as the
@@ -287,11 +292,18 @@ export function ExtensionDialog({
       if (awaitingNext) return;
       setAnsweredId(request.id);
     }
+    if (request.method === "form") {
+      if (answeredFormRef.current === request.id) return;
+      answeredFormRef.current = request.id;
+    }
     const active = document.activeElement;
     if (active instanceof HTMLElement && panelRef.current?.contains(active)) active.blur();
     const id = request.id;
     void Promise.resolve(onRespond(request, response)).then((sent) => {
-      if (sent === false) setAnsweredId((current) => current === id ? null : current);
+      if (sent === false) {
+        setAnsweredId((current) => current === id ? null : current);
+        if (answeredFormRef.current === id) answeredFormRef.current = null;
+      }
     });
   };
   const cancel = () => respond({ cancelled: true });
@@ -332,6 +344,26 @@ export function ExtensionDialog({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [attached, panelRef, request.id]);
+
+  useEffect(() => {
+    if (request.method !== "form") return;
+    if (formDeadlineRef.current?.id !== request.id) {
+      formDeadlineRef.current = {
+        id: request.id,
+        at: request.expiresAt ?? (request.timeout && request.timeout > 0 ? Date.now() + request.timeout : Infinity),
+      };
+    }
+    const deadline = formDeadlineRef.current.at;
+    if (!Number.isFinite(deadline)) return;
+    const timer = setTimeout(() => {
+      if (answeredFormRef.current === request.id) return;
+      answeredFormRef.current = request.id;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && panelRef.current?.contains(active)) active.blur();
+      onRespond(request, { cancelled: true, timedOut: true });
+    }, Math.max(0, deadline - Date.now()));
+    return () => clearTimeout(timer);
+  }, [request, onRespond, panelRef]);
 
   const submitValue = () => {
     if (request.method === "confirm") {
@@ -422,6 +454,9 @@ export function ExtensionDialog({
         </div>
 
         <div style={{ padding: 14 }}>
+          {request.method === "form" && (
+            <FormDialog key={request.id} html={request.html} formId={formId} onSubmit={(data) => respond({ data })} />
+          )}
           {request.method === "confirm" && (
             <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{request.message}</div>
           )}
@@ -748,7 +783,9 @@ export function ExtensionDialog({
             </button>
           ) : request.method !== "select" ? (
             <button
-              onClick={submitValue}
+              type={request.method === "form" ? "submit" : "button"}
+              form={request.method === "form" ? formId : undefined}
+              onClick={request.method === "form" ? undefined : submitValue}
               style={{
                 padding: "6px 10px",
                 minHeight: touchTargets === "accessible" ? 44 : undefined,

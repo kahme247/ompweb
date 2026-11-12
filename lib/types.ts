@@ -243,6 +243,14 @@ export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
       id: string;
+      method: "form";
+      html: string;
+      timeout?: number;
+      expiresAt?: number;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
       method: "notify";
       message: string;
       notifyType?: "info" | "warning" | "error";
