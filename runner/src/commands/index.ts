@@ -1,3 +1,5 @@
+import { correlationCommands } from "../correlation";
+import { eventsCommands } from "../events";
 import { agentsCommands, agentsFrames } from "./agents";
 import { modelCommands, modelFrames } from "./model";
 import { promptingCommands, promptingFrames } from "./prompting";
@@ -12,6 +14,8 @@ export const commands: CommandTable = {
 	...sessionCommands,
 	...toolsCommands,
 	...agentsCommands,
+	...eventsCommands,
+	...correlationCommands,
 };
 
 /** Every non-command host frame by `t`; each group file owns its frame types. */
