@@ -414,10 +414,15 @@ const CONFIG_PLUGINS: readonly string[] = ["none", "pending", "current", "failed
 /** A daemon's ConfigState (`config_state`, the `clusterConfig` result). Throws LinkProtocolError. */
 export function decodeConfigState(value: unknown): ConfigState {
   if (!isObj(value)) fail("config state must be an object");
-  const { files, plugins } = value;
+  const { files, plugins, syncedAt } = value;
   if (typeof files !== "string" || !CONFIG_FILES.includes(files)) fail("Invalid files state");
   if (typeof plugins !== "string" || !CONFIG_PLUGINS.includes(plugins)) fail("Invalid plugins state");
-  return { version: nullable(value, "version", str), files: files as ConfigState["files"], plugins: plugins as ConfigState["plugins"], error: nullable(value, "error", str), missingCommands: strings(value, "missingCommands") };
+  // Optional: a daemon before it never sends one.
+  if (syncedAt !== undefined && (typeof syncedAt !== "number" || !Number.isFinite(syncedAt))) fail("Invalid syncedAt");
+  return {
+    version: nullable(value, "version", str), files: files as ConfigState["files"], plugins: plugins as ConfigState["plugins"], error: nullable(value, "error", str), missingCommands: strings(value, "missingCommands"),
+    ...(syncedAt === undefined ? {} : { syncedAt: syncedAt as number }),
+  };
 }
 
 function capacitySample(value: unknown): HostCapacity {

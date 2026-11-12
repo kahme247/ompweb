@@ -30,6 +30,12 @@ async function call(method: string, url: string, body?: unknown): Promise<Record
 }
 
 const failure = (error: unknown) => toast.error(error instanceof Error ? error.message : String(error));
+const two = (n: number) => String(n).padStart(2, "0");
+/** `YYYY-MM-DD HH:mm` in the viewer's time zone, the same in every locale. */
+const syncTime = (ms: number) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+};
 
 export function CopyField({ label, value }: { label: string; value: string }) {
   const { t } = useI18n();
@@ -230,7 +236,8 @@ function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave 
       : !config ? updating
         : config.version !== null && !config.owned ? t("hostsConfig.configHeldElsewhere")
           : config.error ? t("hostsConfig.configFailed", { reason: config.error })
-            : config.current ? t("hostsConfig.configCurrent") : updating;
+            : !config.current ? updating
+              : config.syncedAt === undefined ? t("hostsConfig.configSynced") : t("hostsConfig.configSyncedAt", { time: syncTime(config.syncedAt) });
 
   return (
     <li className="settings-card" style={{ flexWrap: "wrap", listStyle: "none" }}>

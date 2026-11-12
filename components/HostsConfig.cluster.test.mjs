@@ -293,12 +293,13 @@ const configState = (fields = {}) => ({ version: "a".repeat(64), files: "current
 const configLines = (name) => within(rowOf(name)).queryAllByText(/^(Configuration:|Not installed on this host:|Update ompweb on this host first)/).map((line) => line.textContent);
 
 for (const [label, overrides, lines] of [
-  ["current", { clusterConfig: configState() }, ["Configuration: same as the master"]],
+  ["current, with its last sync in the viewer's time zone", { clusterConfig: configState({ syncedAt: new Date(2026, 10, 11, 23, 45, 59).getTime() }) }, ["Configuration: synchronized (last sync: 2026-11-11 23:45)"]],
+  ["current, from a daemon that sends no sync time", { clusterConfig: configState() }, ["Configuration: synchronized"]],
   ["updating", { clusterConfig: configState({ plugins: "pending", current: false }) }, ["Configuration: updating…"]],
   ["not reported yet", {}, ["Configuration: updating…"]],
   ["failed", { clusterConfig: configState({ files: "failed", error: "the master answered 500 for the manifest", current: false }) }, ["Configuration: failed — the master answered 500 for the manifest"]],
   ["held by another server", { clusterConfig: configState({ owned: false, current: false }) }, ["Configuration: held by another ompweb server; remove it from that server's cluster first"]],
-  ["current, with commands it lacks", { clusterConfig: configState({ missingCommands: ["uvx", "docker"] }) }, ["Configuration: same as the master", "Not installed on this host: uvx, docker"]],
+  ["current, with commands it lacks", { clusterConfig: configState({ missingCommands: ["uvx", "docker"] }) }, ["Configuration: synchronized", "Not installed on this host: uvx, docker"]],
   ["below link protocol 10, never reporting", { hostVersion: 9 }, ["Update ompweb on this host first"]],
   ["offline, with its last report", { status: "offline", clusterConfig: configState({ missingCommands: ["uvx"] }) }, []],
   ["offline, never reported", { status: "offline" }, []],

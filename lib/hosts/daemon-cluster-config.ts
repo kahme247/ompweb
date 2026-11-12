@@ -11,7 +11,8 @@ import { loadWebServerSettings, saveWebServerSettings } from "../web-settings";
 import { CONFIG_LIMITS, isManagedPath, mergeLocalSettings, MIRRORED, type ConfigManifest, type ConfigRoot, type ManifestFile, type PluginEntry } from "./cluster-config";
 import { HostOpError } from "./link-protocol";
 
-export interface ConfigState { version: string | null; files: "none" | "current" | "failed"; plugins: "none" | "pending" | "current" | "failed"; error: string | null; missingCommands: string[] }
+/** `syncedAt` (Date.now()): the last time the files and plugins of `version` were confirmed in place; absent before one, and from older daemons. */
+export interface ConfigState { version: string | null; files: "none" | "current" | "failed"; plugins: "none" | "pending" | "current" | "failed"; error: string | null; missingCommands: string[]; syncedAt?: number }
 /** Every request to the master, its body included, must finish within `fetchMs`; a failed plugin step runs again at most
  * once per `pluginRetryMs` (the hub's sync interval). Tests shorten them. */
 export const clusterConfigTimings = { fetchMs: 30_000, pluginRetryMs: 30_000 };
@@ -179,6 +180,7 @@ export function createClusterConfig(deps: {
   let missingCommands: string[] = [];
   /** When the last plugin step started (Date.now()). */
   let pluginsTried = 0;
+  let syncedAt: number | null = null;
   let stopped = false;
   // Restores called and not yet finished: while one is, ensure is refused.
   let restoring = 0;
@@ -191,7 +193,7 @@ export function createClusterConfig(deps: {
   /** The server whose configuration this host holds, from its first apply until its restore (`own-config/server.json`): one cluster per host. */
   let owner: string | null = null;
 
-  const state = (): ConfigState => ({ version: applied?.version ?? null, files, plugins, error: filesError ?? pluginsError, missingCommands: [...missingCommands] });
+  const state = (): ConfigState => ({ version: applied?.version ?? null, files, plugins, error: filesError ?? pluginsError, missingCommands: [...missingCommands], ...(syncedAt === null ? {} : { syncedAt }) });
   const report = () => deps.onState(state());
   // A holder this daemon no longer links to (re-linked at a new address, or removed) holds nothing back: the server asking takes over.
   const foreign = (serverUrl: string) =>
@@ -223,12 +225,28 @@ export function createClusterConfig(deps: {
     return new HostOpError(409, "cluster_config_failed", reason);
   }
 
-  /** The applied files are the asked version's: a failure of another version no longer counts. */
+  /** The applied files are the asked version's: a failure of another version no longer counts. With its plugins in place too, the version is confirmed in sync. */
   function current() {
-    if (files === "current" && filesError === null) return;
+    const synced = plugins === "current";
+    if (!synced && files === "current" && filesError === null) return;
     files = "current";
     filesError = null;
+    if (synced) stamp();
     report();
+  }
+
+  /** The applied version's files and plugins are in place now: kept in `state.json`, so the time outlives a restart. Best effort. */
+  function stamp() {
+    if (applied === null) return;
+    syncedAt = Date.now();
+    const { stateFile } = dirs();
+    // Only rewritten: without it no version counts as applied on disk (a swap or a restore under way), and none may.
+    if (!exists(stateFile)) return;
+    try {
+      writeAtomic(stateFile, JSON.stringify({ version: applied.version, plugins: applied.plugins, syncedAt }));
+    } catch (error) {
+      deps.log(`cluster-config: state.json cannot be written (${(error as NodeJS.ErrnoException).code ?? "error"})`);
+    }
   }
 
   /** A request to the master: answered, body included, within clusterConfigTimings.fetchMs, and cut short by stop(). */
@@ -514,6 +532,7 @@ export function createClusterConfig(deps: {
     const missing = await missingMcpCommands().catch(() => missingCommands);
     if (stopped) return; // cut short: still pending, and run again from state.json at the next start
     plugins = failed === null ? "current" : "failed";
+    if (failed === null) stamp();
     pluginsError = failed;
     missingCommands = missing;
     report();
@@ -602,6 +621,7 @@ export function createClusterConfig(deps: {
     files = "none";
     filesError = null;
     missingCommands = [];
+    syncedAt = null;
     if (stopped) {
       // The plugins were cut short: the backup's list stays, and the next start finishes them.
       plugins = "pending";
@@ -641,6 +661,7 @@ export function createClusterConfig(deps: {
   if (isRecord(saved) && typeof saved.version === "string" && Array.isArray(saved.plugins) && saved.plugins.every(isPlugin)) {
     const target = saved.plugins;
     applied = { version: saved.version, plugins: target };
+    if (typeof saved.syncedAt === "number" && Number.isFinite(saved.syncedAt)) syncedAt = saved.syncedAt;
     files = "current";
     plugins = "pending";
     enqueue(() => syncPlugins(target)).catch((error) => deps.log(`cluster-config: ${messageOf(error)}`));
