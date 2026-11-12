@@ -308,6 +308,7 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - The binary needs `process.env.NODE_ENV` defined as `"production"` at build time (`scripts/build-binary.ts`): a plain `bun build --compile` inlines `"development"`, and the server then never writes the daemon's link. `npm run smoke -- --binary` catches that (no session lists).
 - `Bun.serve` turns on `SO_REUSEPORT` when `development` is false, so a second omp-web would share the port instead of failing; `startServer` passes `reusePort: false`, and `startProduction` (`server/app.ts`) reports an `EADDRINUSE` in one line.
 - The web-server in-app update worker runs on Node (`OMP_WEB_NODE_BIN`, the launcher's `process.execPath`), not Bun. The compiled web server updates by download (`lib/self-update.ts`). Host-daemon updates use their own helper in `lib/hosts/update-worker.ts`, including for binary hosts; never reuse the web-server worker to restart a host.
+- Both updaters run the new release's `ompweb preflight` (`lib/hosts/preflight.ts`) in the live environment before they stop anything, and abort on failure: it starts the session omp the release resolves (the web worker sets `OMP_WEB_PACKAGE_DIR` to the scratch-installed candidate) and requires its hello on `CHANNEL_PROTO`. A candidate with a runner but no preflight command is refused; a compiled release is recognized by `PREFLIGHT_MARKER`, which only `preflight.ts` may embed. A failed or aborted web update writes `complete.json` so the armed launcher disarms.
 - The daemon-owned watcher (`lib/hosts/workspace-watch.ts`) re-stats ~50 ms after every event to catch burst saves (Bun may drop native events within ~2 ms); main only routes its sequenced watch events.
 - `bun:sqlite` `.get()` returns `null` for no row (not `undefined`).
 - `bun:sqlite` `close()` keeps the database file open while prepared statements are alive (until GC), so Windows cannot remove or replace it: the stores close with `close(true)`, which finalizes them (`closeNotificationStore`, `closeUsageDatabase`).
@@ -641,14 +642,13 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     after it saves; neither may await between reading the pools and saving.
   - **Protocol 10.** `open.launch.configVersion` is the master's version (64 hex digits,
     `CONFIG_VERSION_RE`). The hub sets it for a cluster member's process start (not for a join of a
-    running channel), after reading `pools.json` a second time so a host that left meanwhile gets none; a member
-    below v10 is refused 426 `host_upgrade_required`. The daemon strips `shareCredentials`,
+    running channel), after reading `pools.json` a second time so a host that left meanwhile gets none. The daemon strips `shareCredentials`,
     `credentialsServer` and `configVersion` from every wire launch and sets them only for the opening link
     (`forStart`); a launch with a version needs `credentialsServer` and applies it first
     (`createClusterConfig.ensure`) or the start is refused 409 `cluster_config_failed`. `config_state
     { state, owned }` is an unsequenced daemon report (like `capacity`, never replayed), at link up, on each
     change and after each `host.json` reload; one that finds the send window full is not dropped: the latest goes at
-    the link's next flush (main's ack, or the poll of a full socket buffer). The hub ignores it below v10. The
+    the link's next flush (main's ack, or the poll of a full socket buffer). The
     `clusterConfig` op is `{ action: "apply", version }` or `{ action: "restore" }` and answers `{ state, owned }`.
     **The version is never persisted in the resume manifest:** `ChannelTable.running()` drops it and
     `host-running.json` has no field for it, so a recovered session starts on the version already applied.
@@ -680,10 +680,11 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     `startPooledSession` says why: "still receiving the configuration" or "Update
     ompweb on the pool's workers". A start pinned to one member applies first and is refused with the reason; a
     plugin difference does not refuse it.
-  - **Upgrade.** Every cluster member needs a daemon at protocol 10 (`CLUSTER_CONFIG_SINCE_VERSION`; also the
-    join rule `CLUSTER_SINCE_VERSION`). Until then starts there are refused and placement skips it.
+  - **Upgrade.** Every linked daemon speaks protocol 10 or newer (`MIN_LINK_PROTOCOL_VERSION`; an older one is refused
+    at the link), so every member takes the configuration; joining also needs the `gitOrigins` op and an omp that
+    shares credentials (`clusterJoinBlock`).
   - **Settings.** Rows carry `clusterConfig { …state, owned, current }` (`listHosts`); the member line shows
-    current, updating (none while `masterConfigError` is set), failed (reason), held by another server, needs update (below v10), and the MCP commands
+    current, updating (none while `masterConfigError` is set), failed (reason), held by another server, needs update (`clusterJoinBlock` says "upgrade"), and the MCP commands
     missing there. For a cluster session on another member (`isClusterTarget` with a member host) the MCP,
     Skills, Plugins and Agents panels use no cwd and no session (the user-level routes above); MCP alone keeps
     the session for `?attach=1`, read-only (`McpConfig liveOnly`).
