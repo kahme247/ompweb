@@ -76,14 +76,18 @@ interface Props {
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: () => void;
+  /** The URL names a session the list does not have yet; the previous selection must not stay active. */
+  onRestorePending?: () => void;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
   /** Host `selectedCwd` lives on (this machine when absent). */
   selectedHostId?: string | null;
   selectedLogicalProjectKey?: string | null;
-  onCwdChange?: (cwd: string | null, projectRoot: string | null, hostId: string, project?: ManagedProject) => void;
-  onWorkspaceOptionsChange?: (projects: ManagedProject[], selectedProject: string | null, cwd: string | null, hostId: string) => void;
+  /** `automatic` marks the sidebar's own top-project pick, which must not add a history entry. */
+  onCwdChange?: (cwd: string | null, projectRoot: string | null, hostId: string, project?: ManagedProject, automatic?: boolean) => void;
+  /** `loaded` is false until the first project fetch settles (success or failure). */
+  onWorkspaceOptionsChange?: (projects: ManagedProject[], selectedProject: string | null, cwd: string | null, hostId: string, loaded: boolean) => void;
   /** The active Git workspace's worktrees and actions (null when the active
    *  workspace is not a Git top-level repo); rendered by the file panel. */
   onWorktreeContextChange?: (ctx: WorktreeContext | null) => void;
@@ -141,7 +145,7 @@ function loadCollapsedHosts(): Set<string> {
   }
 }
 
-export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, selectedHostId: selectedHostIdProp, selectedLogicalProjectKey, onCwdChange, onWorkspaceOptionsChange, onWorktreeContextChange, addProjectOpen, addProjectHostId = LOCAL_HOST_ID, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, navigation, updateAvailable, settingsOpen = false, onClose, onSearchQueryChange, onOpenSearchMatch }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, onRestorePending, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, selectedHostId: selectedHostIdProp, selectedLogicalProjectKey, onCwdChange, onWorkspaceOptionsChange, onWorktreeContextChange, addProjectOpen, addProjectHostId = LOCAL_HOST_ID, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, navigation, updateAvailable, settingsOpen = false, onClose, onSearchQueryChange, onOpenSearchMatch }: Props) {
 
 
   const { t } = useI18n();
@@ -187,6 +191,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const selectedPoolProject = projects.find((project) => project.poolId && projectIdentity(project) === selectedPoolKey);
   const [draggedProject, setDraggedProject] = useState<ManagedProject | null>(null);
   const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [projectsSettled, setProjectsSettled] = useState(false);
   // Add-project picker state.
   const [addProjectBusy, setAddProjectBusy] = useState(false);
   const [addProjectError, setAddProjectError] = useState<string | null>(null);
@@ -346,9 +351,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       setProjects(data.projects ?? []);
       setProjectsError(null);
       projectsLoadedRef.current = true;
+      setProjectsSettled(true);
     } catch (e) {
       if (seq !== projectsLoadSeqRef.current) return;
       setProjectsError(t("projects.loadFailed", { detail: e instanceof Error ? e.message : String(e) }));
+      setProjectsSettled(true);
     }
   }, [t]);
 
@@ -606,12 +613,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // Notify parent only when the effective cwd actually changes (not when
   // projectRootFor identity changes due to session/worktree refreshes).
   const lastNotifiedCwdRef = useRef<string | null>(null);
+  // Notify key of the automatic top-project pick, so the parent can replace the URL instead of pushing.
+  const autoSelectedKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const notifyKey = selectedPoolKey ?? (selectedCwd === null ? null : hostProjectKey(selectedHostId, selectedCwd));
     if (lastNotifiedCwdRef.current === notifyKey) return;
     if (selectedPoolKey && !selectedPoolProject) return;
     lastNotifiedCwdRef.current = notifyKey;
-    onCwdChange?.(selectedPoolProject ? null : selectedCwd, selectedPoolProject ? selectedPoolKey : projectRootFor(selectedCwd, selectedHostId), selectedHostId, selectedPoolProject);
+    const automatic = autoSelectedKeyRef.current === notifyKey;
+    autoSelectedKeyRef.current = null;
+    onCwdChange?.(selectedPoolProject ? null : selectedCwd, selectedPoolProject ? selectedPoolKey : projectRootFor(selectedCwd, selectedHostId), selectedHostId, selectedPoolProject, automatic);
   }, [selectedCwd, selectedHostId, selectedPoolKey, selectedPoolProject, onCwdChange, projectRootFor]);
 
   // Sync the worktree switcher to the selected session's cwd. Sessions of all
@@ -843,8 +854,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, [hasPendingNewSession, orderingKey, sortedProjectsBase]);
   useEffect(() => {
-    onWorkspaceOptionsChange?.(sortedProjects, selectedProject, selectedCwd, selectedHostId);
-  }, [onWorkspaceOptionsChange, sortedProjects, selectedProject, selectedCwd, selectedHostId]);
+    onWorkspaceOptionsChange?.(sortedProjects, selectedProject, selectedCwd, selectedHostId, projectsSettled);
+  }, [onWorkspaceOptionsChange, sortedProjects, selectedProject, selectedCwd, selectedHostId, projectsSettled]);
   const sessionsByProject = useMemo(
     () => groupSessionsByProject(sortedProjects, visibleSessions),
     [sortedProjects, visibleSessions],
@@ -1000,7 +1011,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   useEffect(() => {
     if (restoreTargetRef.current !== initialSessionId) {
       restoreTargetRef.current = initialSessionId;
-      restoredRef.current = false;
+      // A URL the app wrote for its own selection (click, new or forked session) needs no restore.
+      restoredRef.current = Boolean(initialSessionId) && initialSessionId === selectedSessionId;
       restoreRetryRef.current = 0;
       clearTimeout(restoreRetryTimerRef.current ?? undefined);
       restoreRetryTimerRef.current = null;
@@ -1026,6 +1038,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         return;
       }
       if (restoreRetryRef.current < INITIAL_RESTORE_MAX_ATTEMPTS) {
+        if (restoreRetryRef.current === 0 && selectedSessionId) onRestorePending?.();
         restoreRetryRef.current += 1;
         if (restoreRetryTimerRef.current) {
           clearTimeout(restoreRetryTimerRef.current);
@@ -1053,9 +1066,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     setSelectedPoolKey(top.poolId ? projectIdentity(top) : null);
     setSelectedCwd(top.poolId ? null : top.path);
     setSelectedHostId(projectTargetId(top));
+    autoSelectedKeyRef.current = top.poolId ? projectIdentity(top) : hostProjectKey(projectTargetId(top), top.path);
     expandProject(workspaceKeyOf(top), projectTargetId(top));
     provisionalSelectionRef.current = allSessions.length === 0;
-  }, [allSessions, selectedCwd, selectedPoolKey, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, sortedProjects, expandProject, loadSessions]);
+  }, [allSessions, selectedCwd, selectedPoolKey, initialSessionId, selectedSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, onRestorePending, sortedProjects, expandProject, loadSessions]);
 
   // Default expansion: when the user has never stored an expansion choice,
   // expand only the active project.

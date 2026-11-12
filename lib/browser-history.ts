@@ -38,20 +38,34 @@ class BrowserHistory {
         ?? window.history.length > 1);
     this.position = entry && !entry.guard ? entry.position : 0;
     this.end = this.position;
+    let exiting = false;
     try {
       const stored = JSON.parse(window.sessionStorage.getItem(STORAGE_KEY) ?? "null");
-      if (stored?.id === this.id && Number.isInteger(stored.end)) {
-        this.end = Math.max(this.position, stored.end);
+      if (stored?.id === this.id) {
+        if (Number.isInteger(stored.end)) this.end = Math.max(this.position, stored.end);
+        // Entries from before a reload belong to another document, so Back or
+        // Leave onto the guard loads it afresh instead of firing popstate. A
+        // last live in-app position tells that exit apart from Forward re-entry.
+        // shortcut: a history-menu jump past the guard leaves that position set, so a later Forward onto the guard exits again; use navigation.activation once Safari and Firefox ship it.
+        exiting = Boolean(entry?.guard) && Number.isInteger(stored.at) && stored.at >= 0;
       }
     } catch { /* Private browsing can disable storage. */ }
     if (!entry) {
       this.write(-1, true, false);
       this.write(0, false, true);
-      this.persist();
     }
     window.addEventListener("popstate", this.onPopState);
     window.addEventListener("pageshow", this.onPageShow);
-    if (entry?.guard) {
+    if (!entry?.guard) {
+      this.persist();
+    } else if (exiting && this.previous) {
+      // Unload already ran the draft prompt (beforeunload), or Leave authorized it.
+      this.persist(-1);
+      window.history.back();
+    } else {
+      // A direct launch has nowhere to go back to: ask an installed shell to
+      // close, and restore the app view if it refuses.
+      if (exiting && window.matchMedia?.("(display-mode: standalone)").matches) window.close();
       this.pending = "recover";
       window.history.forward();
     }
@@ -64,9 +78,9 @@ class BrowserHistory {
     }, "", url);
   }
 
-  private persist() {
+  private persist(at = this.position) {
     try {
-      window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ id: this.id, end: this.end }));
+      window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ id: this.id, end: this.end, at }));
     } catch { /* History still works without reloadable forward bounds. */ }
   }
 
@@ -94,6 +108,7 @@ class BrowserHistory {
 
   private finishExit() {
     if (this.previous) {
+      this.persist(-1);
       window.history.back();
     } else {
       // A direct-launch root cannot go back. Restore its view before asking
@@ -123,6 +138,7 @@ class BrowserHistory {
     const pending = this.pending;
     this.pending = null;
     this.position = entry.position;
+    this.persist();
     this.search = window.location.search;
     if (pending === "confirm") {
       this.exitGuard?.confirm();

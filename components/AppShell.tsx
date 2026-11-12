@@ -160,7 +160,7 @@ export function AppShell({ appName }: { appName: string }) {
     setNewSessionCreation((current) => current.id === newSessionCreationId && current.initialization === undefined ? { ...current, initialization } : current);
   }, [newSessionCreationId]);
   const [newSessionPoolProject, setNewSessionPoolProject] = useState<ManagedProject | null>(null);
-  const [workspaceOptions, setWorkspaceOptions] = useState<{ projects: ManagedProject[]; selectedProject: string | null; cwd: string | null; hostId: string }>({ projects: [], selectedProject: null, cwd: null, hostId: LOCAL_HOST_ID });
+  const [workspaceOptions, setWorkspaceOptions] = useState<{ projects: ManagedProject[]; selectedProject: string | null; cwd: string | null; hostId: string; loaded: boolean }>({ projects: [], selectedProject: null, cwd: null, hostId: LOCAL_HOST_ID, loaded: false });
   const [addProjectOpen, setAddProjectOpen] = useState(false);
   const [addProjectHostId, setAddProjectHostId] = useState<string>(LOCAL_HOST_ID);
   const openAddProject = useCallback((open: boolean, hostId: string = LOCAL_HOST_ID) => {
@@ -168,8 +168,8 @@ export function AppShell({ appName }: { appName: string }) {
     setAddProjectOpen(open);
   }, []);
   const { hosts, pools, poolsLoaded } = useHostRows();
-  const handleWorkspaceOptionsChange = useCallback((projects: ManagedProject[], selectedProject: string | null, cwd: string | null, hostId: string) => {
-    setWorkspaceOptions({ projects, selectedProject, cwd, hostId });
+  const handleWorkspaceOptionsChange = useCallback((projects: ManagedProject[], selectedProject: string | null, cwd: string | null, hostId: string, loaded: boolean) => {
+    setWorkspaceOptions({ projects, selectedProject, cwd, hostId, loaded });
   }, []);
   const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
     () => initialNavigation.requestedCwd ? "validating" : "idle",
@@ -1133,7 +1133,8 @@ export function AppShell({ appName }: { appName: string }) {
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
     if (!requestedCwd) return;
-    if (!selectedSession && newSessionCwd === requestedCwd && newSessionHostId === remoteHostId(initialNavigation.hostId)) {
+    // A sidebar switch leaves newSessionCwd null and follows activeCwd; its own pushed URL needs no validation.
+    if (!selectedSession && (newSessionCwd ?? activeCwd) === requestedCwd && (newSessionCwd !== null ? newSessionHostId : activeHostId) === remoteHostId(initialNavigation.hostId)) {
       setInitialCwdStatus("ready");
       return;
     }
@@ -1177,12 +1178,13 @@ export function AppShell({ appName }: { appName: string }) {
       });
 
     return () => controller.abort();
-  }, [initialNavigation.requestedCwd, initialNavigation.hostId, selectedSession, newSessionCwd, newSessionHostId]);
+  }, [initialNavigation.requestedCwd, initialNavigation.hostId, selectedSession, newSessionCwd, newSessionHostId, activeCwd, activeHostId]);
 
   useEffect(() => {
     const { poolId, projectId, creationId } = initialNavigation;
     if (!poolId && !projectId) return;
-    if (!poolsLoaded) return;
+    // The sidebar reports an empty list before its first fetch; only a settled list can reject a target.
+    if (!poolsLoaded || !workspaceOptions.loaded) return;
     const project = workspaceOptions.projects.find((candidate) => candidate.poolId === poolId && candidate.projectId === projectId);
     if (!poolId || !projectId || !project) {
       setInitialCwdError(translate("agentSession.invalidPoolTarget"));
@@ -1206,7 +1208,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSessionKey((key) => key + 1);
     setInitialCwdStatus("idle");
     setInitialSessionRestored(true);
-  }, [initialNavigation, poolsLoaded, workspaceOptions.projects, newSessionPoolProject, newSessionCreation.id, selectedSession, router, sidebarOpen]);
+  }, [initialNavigation, poolsLoaded, workspaceOptions.projects, workspaceOptions.loaded, newSessionPoolProject, newSessionCreation.id, selectedSession, router, sidebarOpen]);
 
   useEffect(() => {
     if (initialNavigation.sessionId || initialNavigation.requestedCwd || initialNavigation.poolId || initialNavigation.projectId) return;
@@ -1223,7 +1225,16 @@ export function AppShell({ appName }: { appName: string }) {
     setInitialSessionRestored(true);
   }, [initialNavigation.sessionId, initialNavigation.requestedCwd, initialNavigation.poolId, initialNavigation.projectId, selectedSession, newSessionCwd, newSessionHostId, newSessionPoolProject, activePoolProject]);
 
-  const handleCwdChange = useCallback((cwd: string | null, projectRoot: string | null, hostId: string, project?: ManagedProject) => {
+  // Back/Forward to a session the list has not loaded yet must not leave the
+  // previous chat composable under the new URL; the restore reselects it.
+  const handleRestorePending = useCallback(() => {
+    setSelectedSession(null);
+    setInitialSessionRestored(false);
+  }, []);
+
+  const handleCwdChange = useCallback((cwd: string | null, projectRoot: string | null, hostId: string, project?: ManagedProject, automatic = false) => {
+    // The sidebar's own top-project pick replaces the URL: Back must not land on an emptied bare view.
+    const navigate = automatic ? router.replace : router.push;
     setActivePoolProject(project?.poolId ? project : null);
     setActiveCwd(project?.poolId ? null : cwd);
     setActiveHostId(project?.poolId ? undefined : remoteHostId(hostId));
@@ -1242,7 +1253,7 @@ export function AppShell({ appName }: { appName: string }) {
       setSystemPrompt(null);
       setSystemPromptLoading(false);
       setActiveTopPanel(null);
-      router.push(viewUrl({ poolId: project.poolId, projectId: project.projectId, creationId, sidebarOpen }));
+      navigate(viewUrl({ poolId: project.poolId, projectId: project.projectId, creationId, sidebarOpen }));
       return;
     }
     // A standalone path is never a fallback for a pending pool placement.
@@ -1279,7 +1290,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSystemPrompt(null);
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
-    router.push(viewUrl({ cwd, hostId, sidebarOpen }));
+    navigate(viewUrl({ cwd, hostId, sidebarOpen }));
   }, [router, selectedSession, newSessionPoolProject, sidebarOpen]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
@@ -1776,7 +1787,8 @@ export function AppShell({ appName }: { appName: string }) {
   const creationTargets = [...(hosts ?? []).filter((host) => !memberIds.has(host.id) && (poolsLoaded || host.id === LOCAL_HOST_ID)).map((host) => ({ id: host.id, label: hostName(t, host) })), ...pools.map((pool) => ({ id: `pool:${pool.id}`, label: pool.label }))];
   const chatHost = remoteHost ? hosts?.find((host) => host.id === currentHostId) : undefined;
   const settingsHostId = activeCwd ? activeHostId : currentHostId;
-  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null || effectivePoolProject !== null;
+  // While a URL session restore is pending, the sidebar's project must not offer a new chat in its place.
+  const showChat = selectedSession !== null || (initialSessionRestored && (effectiveNewSessionCwd !== null || effectivePoolProject !== null));
   const currentRate = generationSpeed?.current;
   const rate = currentRate ?? generationSpeed?.average;
   const speed = showChat ? formatGenerationSpeed(rate) : null;
@@ -1891,6 +1903,7 @@ export function AppShell({ appName }: { appName: string }) {
       initialSessionId={initialSessionId}
       skipInitialProjectSelection={initialNavigation.requestedCwd !== null || Boolean(initialNavigation.poolId || initialNavigation.projectId)}
       onInitialRestoreDone={handleInitialRestoreDone}
+      onRestorePending={handleRestorePending}
       refreshKey={refreshKey}
       onSessionDeleted={handleSessionDeleted}
       selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
