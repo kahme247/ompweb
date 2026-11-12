@@ -6,11 +6,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { pipeline, Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
-import { isNewerVersion } from "../npm-update";
+import { MIN_SHARED_CREDENTIALS_OMP, ompSharesCredentials } from "./cluster";
 import type { SpawnRequest } from "./host";
 import { HostOpError } from "./link-protocol";
-
-export const MIN_SHARED_CREDENTIALS_OMP = "15.13.1";
 
 const MAX_BODY_BYTES = 1_048_576;
 // Same lists as the server's route (app/api/hosts/broker): nothing else crosses in either direction. Never content-encoding
@@ -146,10 +144,8 @@ export function startBrokerForwarder(deps: Deps): BrokerForwarder {
 export async function credentialsEnv(launch: SpawnRequest, deps: { forwarder: BrokerForwarder; ompVersion(): Promise<string | null> }): Promise<Record<string, string> | undefined> {
   if (!launch.credentialsServer) return undefined;
   const version = await deps.ompVersion();
-  // `omp --version` prints "omp/<version>": the prefix is not part of the version. A version that does not parse refuses too
-  // (isNewerVersion is false for it): omp would fall back to the host's own logins.
-  const bare = version?.replace(/^omp\//, "") ?? null;
-  if (bare === null || !isNewerVersion(bare, "0.0.0") || isNewerVersion(MIN_SHARED_CREDENTIALS_OMP, bare)) {
+  // A version that does not parse refuses too: omp would fall back to the host's own logins.
+  if (!ompSharesCredentials(version)) {
     throw new HostOpError(409, "host_omp_too_old", `Shared credentials need omp ${MIN_SHARED_CREDENTIALS_OMP} or newer on this host (found ${version ?? "unknown"})`);
   }
   return deps.forwarder.env(launch.credentialsServer);

@@ -7,7 +7,7 @@ import { isValidPoolOrigin, loadPools, pathApi, poolManagedProject, savePools } 
 import { listProjectsAllHosts } from "@/lib/hosts/session-index";
 import type { ProjectUpdate } from "@/lib/hosts/session-ops";
 import { applyProjectPresentation, isReservedLaunchArg, ProjectPathError, type ProjectPresentationUpdate } from "@/lib/project-registry";
-import { cloneDirectoryName } from "@/lib/git-clone";
+import { cloneDirectoryName, repositoryKey } from "@/lib/git-clone";
 import { isRecord } from "@/lib/type-guards";
 import type { ProjectLaunchConfig } from "@/lib/types";
 const MAX_EXTRA_ARGS = 32;
@@ -110,7 +110,9 @@ export async function POST(req: Request) {
       if (!isValidPoolOrigin(body.origin)) throw new ProjectPathError("invalid_origin", "Invalid repository origin");
       if (body.name !== undefined && (typeof body.name !== "string" || !body.name.trim())) throw new ProjectPathError("invalid_name", "Name must be a non-empty string");
       if (body.defaultRef !== undefined && typeof body.defaultRef !== "string") throw new ProjectPathError("invalid_ref", "Default ref must be a string");
-      const matches = pool.projects.filter((project) => project.origin === body.origin);
+      // One repository is one project whatever URL form names it (spec M4); an unsupported form matches only its own text.
+      const key = repositoryKey(body.origin);
+      const matches = pool.projects.filter((project) => project.origin === body.origin || (key !== null && repositoryKey(project.origin) === key));
       if (matches.length > 1) throw new Error("Ambiguous pool project origin");
       let project = matches[0];
       if (!project) {

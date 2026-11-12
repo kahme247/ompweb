@@ -35,6 +35,9 @@ export function validWorkspaceResult(op: keyof WorkspaceOps, result: unknown): b
     case "browseDirectories": return text(value.path) && (value.parentPath === null || text(value.parentPath))
       && Array.isArray(value.directories) && value.directories.every((entry) => isRecord(entry) && text(entry.name) && text(entry.path))
       && (value.drives === undefined || Array.isArray(value.drives) && value.drives.every((entry) => isRecord(entry) && text(entry.name) && text(entry.path)));
+    case "gitOrigins": return Array.isArray(value.origins) && value.origins.length <= 500 && value.origins.every((entry) =>
+      isRecord(entry) && typeof entry.path === "string" && entry.path.length <= 4096
+      && (entry.origin === null || typeof entry.origin === "string" && entry.origin.length <= 2048) && typeof entry.mainCheckout === "boolean");
     case "githubRepo": return value.repo === null || text(value.repo);
     case "addWorktree": return text(value.path) && text(value.branch);
     case "listWorktrees": return text(value.projectRoot) && text(value.projectKey) && typeof value.isGit === "boolean" && typeof value.isTopLevel === "boolean"

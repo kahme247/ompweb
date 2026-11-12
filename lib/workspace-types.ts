@@ -28,6 +28,8 @@ export interface WorkspaceWorktrees {
   projectRoot: string; projectKey: string; isGit: boolean; isTopLevel: boolean;
   currentWorktreePath: string | null; worktrees: WorktreeInfo[];
 }
+/** `mainCheckout`: the folder is the top level of an independent checkout (`.git` a real directory). */
+export interface GitOrigin { path: string; origin: string | null; mainCheckout: boolean }
 export type WorkspaceDirectoryBrowse =
   | { path: string; parentPath: string | null; directories: BrowsableDirectory[] }
   | { path: ""; parentPath: null; directories: []; drives: BrowsableDirectory[] };
@@ -62,6 +64,8 @@ export interface WorkspaceOps {
   /** The absolute path of a file in a session's `local://` directory on this host (stat'ed, never read). `sessionFile`
    * is main's hint of the live session file; the host verifies it. */
   resolveLocalFile(id: string, uri: string, sessionFile: string | null): Promise<OpResult<{ path: string }>>;
+  /** One answer per requested path, in order; at most 500 paths. */
+  gitOrigins(paths: string[]): Promise<OpResult<{ origins: GitOrigin[] }>>;
 }
 
 export const WORKSPACE_OP_PARAMS: { readonly [K in keyof WorkspaceOps]: readonly string[] } = {
@@ -77,6 +81,7 @@ export const WORKSPACE_OP_PARAMS: { readonly [K in keyof WorkspaceOps]: readonly
   // Older peers cap the advertised prefix before filtering unknown capabilities.
   listFilesInRoot: ["input", "root"],
   resolveLocalFile: ["id", "uri", "sessionFile"],
+  gitOrigins: ["paths"],
 };
 
 export function isWorkspaceOp(value: string): value is keyof WorkspaceOps {

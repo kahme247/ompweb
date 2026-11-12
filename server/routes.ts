@@ -25,6 +25,7 @@ import * as home from "@/app/api/home/route";
 import * as hostsBrokerPath from "@/app/api/hosts/broker/[...path]/route";
 import * as hostsLink from "@/app/api/hosts/link/route";
 import * as hosts from "@/app/api/hosts/route";
+import * as hostsIdCluster from "@/app/api/hosts/[id]/cluster/route";
 import * as hostsIdUpdates from "@/app/api/hosts/[id]/updates/route";
 import * as manifest from "@/app/api/manifest/route";
 import * as mcp from "@/app/api/mcp/route";
@@ -122,6 +123,7 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "hosts/broker/[...path]": hostsBrokerPath,
   "hosts/link": hostsLink,
   "hosts": hosts,
+  "hosts/[id]/cluster": hostsIdCluster,
   "hosts/[id]/updates": hostsIdUpdates,
   "manifest": manifest,
   "mcp": mcp,

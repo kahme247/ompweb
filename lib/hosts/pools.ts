@@ -67,7 +67,7 @@ function validLaunchConfig(value: unknown): boolean {
       && value.extraArgs.every((arg) => typeof arg === "string" && arg.length > 0 && arg.length <= 256 && !isReservedLaunchArg(arg))));
 }
 
-function validatePools(value: unknown): asserts value is HostPool[] {
+export function validatePools(value: unknown): asserts value is HostPool[] {
   if (!Array.isArray(value)) throw new Error("Invalid pools list");
   const poolIds = new Set<string>();
   for (const pool of value) {
