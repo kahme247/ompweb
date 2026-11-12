@@ -89,6 +89,11 @@ function browserHistory({ prior = true, standalone = false } = {}) {
       }
     }
   };
+  // A traversal to an entry of a discarded (pre-reload) document loads it afresh: no popstate.
+  result.loadDocument = (delta) => {
+    index += delta;
+    syncLocation();
+  };
   return result;
 }
 
@@ -191,6 +196,18 @@ test("attachment-only drafts protect unload and repeated root Back after reload 
   }
 });
 
+// Forward from the previous site onto the guard loads a fresh document, which must recover into the app.
+async function assertForwardReentry(browser, hook) {
+  hook.unmount();
+  browser.departed = false;
+  browser.loadDocument(1);
+  const reentered = mount();
+  await browser.flush();
+  assert.equal(browser.departed, false);
+  assert.equal(window.history.state.__ompViewHistory.guard, false);
+  assert.equal(reentered.result.current.session, "first");
+}
+
 test("clean native root Back leaves rather than consuming a sidebar-only step", async () => {
   const browser = browserHistory();
   const hook = mount();
@@ -198,6 +215,23 @@ test("clean native root Back leaves rather than consuming a sidebar-only step", 
   await browser.flush();
   assert.equal(browser.departed, true);
   assert.equal(hook.result.current.exitConfirmationOpen, false);
+  await assertForwardReentry(browser, hook);
+});
+
+test("after a reload, native root Back exits across documents and Forward re-entry restores the app", async () => {
+  const browser = browserHistory();
+  let hook = mount();
+  act(() => hook.result.current.router.push("/?session=second"));
+  hook.unmount();
+  hook = mount();
+  for (let reloads = 0; reloads < 2; reloads++) {
+    hook.unmount();
+    browser.loadDocument(-1);
+    hook = mount();
+  }
+  await browser.flush();
+  assert.equal(browser.departed, true);
+  await assertForwardReentry(browser, hook);
 });
 
 for (const standalone of [false, true]) {
