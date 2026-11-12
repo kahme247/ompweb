@@ -245,21 +245,29 @@ its own daemon needs the same, and the switch asks to restart the host service o
 (or to update its omp).
 
 - **Joining:** the host's Git projects are matched by repository: the same repository on
-  several members is one cluster project, and its sessions are listed together. `git@github.com:a/b.git`
-  and `https://github.com/a/b` are the same repository. Projects without a single Git `origin`,
-  subfolders and linked worktrees stay on their node; the cluster shows them with the node's
-  name, and a new session there starts on that node. No project files on the host change. A
+  several members is one cluster project, and its sessions are listed together, sorted,
+  searched, filtered and counted as one list; with two or more members each session names
+  its host beside its time. `git@github.com:a/b.git`
+  and `https://github.com/a/b` are the same repository; the same folder path on two hosts is
+  not. Projects without a single Git `origin` and linked worktrees stay on their node; the
+  cluster shows them with the node's name, and a new session there starts on that node. No
+  project files on the host change. A
   cluster project created from a host project keeps the name and alias it showed (the folder
   name when it had no name of its own). A visible checkout that matches a hidden cluster project
-  makes that project visible again. This machine joins with the first host added while it is
+  makes that project visible again. A checkout bound to an existing cluster project lends it
+  its alias, sort and pin order only where the cluster project has none. This machine joins with the first host added while it is
   not a member (when the cluster is created, or on the next join of an older first pool without
   it): its Git projects then become cluster projects too, and new sessions in them start on any
   member with capacity, not in its own checkout.
-  A second checkout of a repository already bound on that host also stays on its node.
-  Projects inside, or containing, the chosen checkout folder stay on their node too; pick an
-  empty folder that is not a parent of existing projects.
+  A member with no checkout of a cluster project gets a folder for it under its checkout folder;
+  nothing is cloned until a session starts there. An existing checkout replaces that folder
+  (each time a member links, also for members that joined before) unless a session is already
+  in it; then the checkout stays on its node and the server log says why. A second checkout of
+  a repository already bound on that host also stays on its node. Projects at, or containing,
+  the chosen checkout folder stay on their node too; pick a folder that is not a parent of
+  existing projects.
 - **Leaving:** the host takes no new cluster sessions. Its matched projects are listed under
-  the host again. Checkouts the cluster created inside the host's folder stay bound, so
+  the host again. Folders the cluster created for it stay bound, so
   sessions the cluster started there stay under the cluster's projects. The cluster keeps the
   projects it gained from the host, so they may now be listed twice; hide any you do not want.
   This machine cannot leave, and the cluster stays when the last linked host does. Revoking a

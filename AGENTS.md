@@ -108,7 +108,7 @@ app/api/
   hosts/broker/[...path]/route.ts allow-listed forwarding of an omp auth broker's endpoints for a host that shares credentials (`sharesCredentials`: its `shareCredentials` flag or cluster membership); authenticated by the host token, outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Shared credentials"
   hosts/cluster-config/manifest/route.ts GET the master's mirrored-configuration manifest (`{ version, files, agentEnv, plugins }`) for a cluster member; host token, members only (`admitClusterMember`: 401 unknown token, 403 `local`/not a member, 503 unreadable `hosts.json`/`pools.json`), 409 `{ error, code }` when the configuration cannot be built (`ClusterConfigError`); outside the password gate (`proxy.ts` `UNGATED`); see "Remote hosts → Cluster configuration"
   hosts/cluster-config/file/[hash]/route.ts GET one file of the current manifest by its sha256 (404 for any other hash, an older version's included); same admission and gate as the manifest
-  hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`; this machine is added too by any join while it is not a member; the host needs link protocol 10; 409 `host_in_other_cluster` when it holds another server's configuration), then sends the host its configuration (`clusterConfigOp` `apply`) | DELETE leave, then `restore` (none to a daemon below protocol 10, which never applied one); the body carries `restoreError` when the host could not put its own configuration back; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
+  hosts/[id]/cluster/route.ts     PUT { projectsRoot } join the cluster (the host's Git projects bind to cluster projects by repository, `gitOrigins`, by `reconcileMember`'s rules; this machine is added too by any join while it is not a member; the host needs link protocol 10; 409 `host_in_other_cluster` when it holds another server's configuration), then sends the host its configuration (`clusterConfigOp` `apply`) | DELETE leave, then `restore` (none to a daemon below protocol 10, which never applied one); the body carries `restoreError` when the host could not put its own configuration back; 409 `{ error, code }` for offline/old daemon/`cluster_changed`, 503 if `pools.json` is unreadable
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -159,7 +159,8 @@ lib/
     daemon-broker.ts   daemon side: the loopback forwarder that gives a sharing host's omp processes `OMP_AUTH_BROKER_URL`/`OMP_AUTH_BROKER_TOKEN` (`credentialsEnv`); forwards to the link's server with the link's host token
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
-    cluster.ts         pure cluster rules: `clusterOf` (= `pools[0]`), `isClusterMember`, `sharesCredentials`, `joinCluster`/`leaveCluster`, `clusterJoinBlock`, `ompSharesCredentials` (also the daemon's spawn check); browser-importable (Settings uses it)
+    cluster-reconcile.ts main side of one-project-per-repository: `memberFacts` (a host's projects with `gitOrigins`, and its sessions' project roots, from the host itself), `reconcileClusterMember`, `startClusterReconcile` (instrumentation.node.ts: linked members at start, then every hello); used by the join route
+    cluster.ts         pure cluster rules: `clusterOf` (= `pools[0]`), `isClusterMember`, `sharesCredentials`, `joinCluster`/`reconcileMember`/`leaveCluster`, `clusterJoinBlock`, `ompSharesCredentials` (also the daemon's spawn check); browser-importable (Settings uses it)
     cluster-config.ts  pure, daemon-safe: what a cluster member mirrors from the master (`MIRRORED`, `LOCAL_SETTINGS`, `CONFIG_LIMITS`), `buildManifest`, `stripLocalSettings`/`mergeLocalSettings`, `isManagedPath`, `ClusterConfigError`
     cluster-config-server.ts main side: `currentClusterConfig` (the manifest cached per fingerprint, one build at a time, `omp plugin list` cached 120 s), `clusterConfigVersion`, `admitClusterMember`, `configErrorResponse`; used by the two `app/api/hosts/cluster-config/` routes and `hub.ts`
     daemon-cluster-config.ts daemon side: `createClusterConfig` (`ensure`/`apply`/`restore`/`state`/`holds`/`stop`): download, verify, apply whole or not at all, the member's backup (`own-config/`), plugins, leaving; Node only, relative imports
@@ -607,6 +608,16 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     shared (`hostOwnsLifecycle`) at `SHARED_CREDENTIALS_SINCE_VERSION`, before
     preparation; `spawnRpc`'s 426 stays the last guard. Other pools' members
     keep their own eligibility.
+  - **One project per repository.** `reconcileMember` binds a member's main checkouts
+    to the cluster project of the same `repositoryKey` (never by path), on join and on
+    each hello (`startClusterReconcile`). It replaces the host's binding only when no
+    session's project root is there and it is not another checkout of that repository
+    (else two checkouts would swap); otherwise it logs the conflict. Members without a
+    checkout keep the seeded `<projectsRoot>/<project id>`, cloned at the first session
+    there. Pinned: checkouts at or above `projectsRoot`, other pools' bindings. Leaving
+    keeps only the seeded folder. Binding adopts the checkout's alias/sortOrder/pinOrder
+    only where the cluster project has none. Session rows of a cluster project show
+    their host (`sessionHosts`) when the cluster has 2+ members.
   - **Join keeps what the host showed.** A created cluster project takes the
     host project's name, else its folder name (split on `/` and `\`), and its
     alias; binding a visible checkout un-hides a hidden cluster project.
