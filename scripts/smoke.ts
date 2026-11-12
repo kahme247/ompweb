@@ -281,7 +281,9 @@ try {
       }
     });
   }
-  // Windows keeps the exiting omp runner's files locked for a moment after `ompweb host` stops.
+  // omp's shared brokers (daemon broker, LSP mux, embedding server) detach and outlive the session by design;
+  // on Windows they keep the throwaway HOME locked, so stop every runner process this smoke started.
+  if (process.platform === "win32") Bun.spawnSync(["taskkill", "/f", "/t", "/im", "ompweb-omp.exe"]);
   await step("temp dirs removed", () => rmSync(temp, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 }));
 }
 
