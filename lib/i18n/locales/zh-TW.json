@@ -1274,6 +1274,7 @@
   "sessionSidebar.copyTranscriptCopied": "逐字稿已複製到剪貼簿",
   "sessionSidebar.copyTranscriptFailed": "無法複製逐字稿",
   "sessionSidebar.unsentDraft": "未傳送的草稿",
+  "sessionSidebar.awaitingInput": "等待您的輸入",
   "sessionSidebar.selectProjectFirst": "請先選取專案",
   "sessionSidebar.switchWorktree": "切換工作樹",
   "sessionSidebar.launchConfigDirectory": "目錄",
