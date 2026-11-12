@@ -1970,7 +1970,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
-    response: { value: string } | { confirmed: boolean } | { cancelled: true } | { answers: RpcAskDialogAnswer[] },
+    response: { value: string } | { confirmed: boolean } | { cancelled: true; timedOut?: boolean } | { answers: RpcAskDialogAnswer[] } | { data: Record<string, string | number | string[]> },
   ): Promise<boolean> => {
     const sid = sessionIdRef.current;
     if (!sid) {
@@ -2043,6 +2043,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "input":
       case "editor":
       case "ask":
+      case "form":
         if (extensionDialogClearTimerRef.current) {
           clearTimeout(extensionDialogClearTimerRef.current);
           extensionDialogClearTimerRef.current = null;

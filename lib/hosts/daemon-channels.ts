@@ -328,6 +328,7 @@ export class ChannelTable {
     catch { if (delta) await this.command(channel, { type: "set_event_filter", events: null, messageUpdates: "full" }).catch(() => {}); }
     await this.command(channel, { type: "set_subagent_subscription", level: "events" }).catch(() => {});
     await this.command(channel, { type: "set_ask_dialog", enabled: true }).catch(() => {});
+    await this.command(channel, { type: "set_form_dialog", enabled: true }).catch(() => {});
     await this.command(channel, { type: "get_state" }).catch(() => {});
   }
 
@@ -496,7 +497,7 @@ export class ChannelTable {
       return;
     }
     if (["branch", "new_session", "switch_session"].includes(frame.type)) channel.sessionMovePending = false;
-    if (["set_event_filter", "negotiate_protocol", "set_subagent_subscription", "set_ask_dialog", "set_host_tools", "set_host_uri_schemes"].includes(frame.type)) throw invalid("This command is owned by the host daemon");
+    if (["set_event_filter", "negotiate_protocol", "set_subagent_subscription", "set_ask_dialog", "set_form_dialog", "set_host_tools", "set_host_uri_schemes"].includes(frame.type)) throw invalid("This command is owned by the host daemon");
     if (["extension_ui_response", "host_tool_result", "host_uri_result"].includes(frame.type)) {
       if (!channel.shared?.answer(link.id, frame)) return;
     } else if (typeof frame.id === "string") {

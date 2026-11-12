@@ -844,6 +844,7 @@ export class AgentSessionWrapper {
         await this.proc.negotiateProtocol(ready);
         await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
         await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+        await this.proc.sendCommand({ type: "set_form_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
         await this.enableDeltaUpdates(this.proc);
       }
       const state = await this.getStateWithTimeout();
@@ -938,6 +939,7 @@ export class AgentSessionWrapper {
         await this.proc.negotiateProtocol(await this.proc.waitReady(), GET_STATE_TIMEOUT_MS);
         await optional({ type: "set_subagent_subscription", level: "events" });
         await optional({ type: "set_ask_dialog", enabled: true });
+        await optional({ type: "set_form_dialog", enabled: true });
         await this.enableDeltaUpdates(this.proc);
       }
       // omp's state has no shell-command flag: a `!!` command the lost server started
@@ -2392,6 +2394,7 @@ export class AgentSessionWrapper {
           await proc.negotiateProtocol(ready);
           await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
           await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+          await proc.sendCommand({ type: "set_form_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
           await this.enableDeltaUpdates(proc);
         }
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
