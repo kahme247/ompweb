@@ -2783,6 +2783,10 @@ export class AgentSessionWrapper {
         const { id, value } = command;
         if (typeof id !== "number" && typeof id !== "string") throw new WebRpcError("Invalid dialog id", "invalid_ui_response");
         const key = String(id);
+        const serverRequest = this.serverUiRequests.get(key);
+        // The runner numbers its dialogs and ignores any other id; only ompweb's own confirms keep string ids.
+        const runnerId = serverRequest ? undefined : /^\d+$/.test(key) ? Number(key) : NaN;
+        if (runnerId !== undefined && !Number.isSafeInteger(runnerId)) throw new WebRpcError("Invalid dialog id", "invalid_ui_response");
         const method = this.pendingUiRequests.get(key)?.method;
         // A malformed answer would drop the dialog from reconnect replay while omp rejects it.
         if (value !== undefined && (method === "askDialog" || method === "formDialog") && !isRecord(value)) {
@@ -2793,12 +2797,11 @@ export class AgentSessionWrapper {
         }
         const wasPending = this.pendingUiRequests.has(key);
         this.forgetPendingUiRequest(key);
-        const serverRequest = this.serverUiRequests.get(key);
         if (serverRequest) {
           this.serverUiRequests.delete(key);
           serverRequest(value === true);
         } else {
-          this.proc.sendFrame({ type: "ui_response", id, value });
+          this.proc.sendFrame({ type: "ui_response", id: runnerId, value });
         }
         // omp sends no ui_end for a dialog the host answered; other tabs on this
         // session would keep showing it, so settle it for them here.

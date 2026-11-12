@@ -268,8 +268,11 @@ const choiceType = (element: Element) => {
   return type === "radio" || type === "checkbox" ? type : undefined;
 };
 
+// A control named "elements", "querySelectorAll", ... shadows that property on its form, so read the DOM through the prototypes.
+const queryAll = <T extends Element>(form: HTMLFormElement, selector: string) => Array.from(Element.prototype.querySelectorAll.call(form, selector)) as T[];
+
 const namedInputs = (form: HTMLFormElement, name: string, type: string) =>
-  Array.from(form.elements).filter((element) => element.tagName === "INPUT" && (element as HTMLInputElement).name === name && (element as HTMLInputElement).type === type) as HTMLInputElement[];
+  queryAll<HTMLInputElement>(form, "input").filter((input) => input.name === name && input.type === type);
 
 // Mirrors omp's parser: a named radio/checkbox group of two or more options gets an Other answer
 // unless one of its options is already labelled "Other".
@@ -308,7 +311,7 @@ function planForm(root: ParentNode, prefix: string, otherLabel: string): FormCtx
 
 /** Whether a required Other-bearing group has an answer: an option, or Other text. */
 function syncOtherValidity(form: HTMLFormElement) {
-  for (const other of Array.from(form.querySelectorAll<HTMLInputElement>("input[data-other]"))) {
+  for (const other of queryAll<HTMLInputElement>(form, "input[data-other]")) {
     const { other: name, otherType: type = "" } = other.dataset;
     const answered = other.value.trim() !== "" || namedInputs(form, name!, type).some((input) => input.checked && !input.disabled);
     other.setCustomValidity(other.dataset.required && !answered ? (type === "checkbox" ? "Select at least one" : "Required") : "");
@@ -395,9 +398,7 @@ function formElement(element: Element, ctx: FormCtx, key: string): ReactNode {
 /** What the form submits, as omp's html-form reports it (see HtmlFormData). */
 export function readFormData(form: HTMLFormElement): HtmlFormData {
   const data: HtmlFormData = {};
-  const controls = Array.from(form.elements).filter((element) =>
-    ["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName) && (element as HTMLInputElement).name && !(element as HTMLInputElement).disabled,
-  ) as Array<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>;
+  const controls = queryAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(form, "input, select, textarea").filter((control) => control.name && !control.disabled);
   for (const control of controls) {
     const { name } = control;
     if (control.tagName === "SELECT") {
@@ -411,7 +412,7 @@ export function readFormData(form: HTMLFormElement): HtmlFormData {
     if (type === "radio" || type === "checkbox") {
       const options = namedInputs(form, name, type);
       const checked = options.filter((input) => input.checked && !input.disabled).map((input) => input.value);
-      const other = Array.from(form.querySelectorAll<HTMLInputElement>("input[data-other]")).find((box) => box.dataset.other === name && box.dataset.otherType === type);
+      const other = queryAll<HTMLInputElement>(form, "input[data-other]").find((box) => box.dataset.other === name && box.dataset.otherType === type);
       const typed = other?.value.trim();
       // Other's text joins a checkbox group's array; it stands in for a radio group's value only while no option is picked.
       if (type === "checkbox" && options.length > 1) data[name] = typed ? [...checked, typed] : checked;
@@ -580,7 +581,7 @@ export function ExtensionDialog({
     } else if (request.method === "formDialog") {
       const form = formRef.current;
       if (form) syncOtherValidity(form);
-      if (form?.reportValidity()) respond({ data: readFormData(form) });
+      if (form && Object.getPrototypeOf(form).reportValidity.call(form)) respond({ data: readFormData(form) });
     } else if (request.method !== "approve") {
       respond(value);
     }

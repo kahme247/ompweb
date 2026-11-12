@@ -29,11 +29,9 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 - Nothing else for omp: ompweb ships its own [omp](https://github.com/can1357/oh-my-pi) build, `ompweb-omp` (beside the single binary, or as the `@kahme247/ompweb-omp-<os>-<arch>` optional dependency of the npm package). It reads your `~/.omp` settings, auth and sessions. `OMP_WEB_OMP_BIN` points ompweb at another one
 - Node.js `>= 24`. The server runs on [Bun](https://bun.sh), which installs automatically as a dependency of the npm package (a Bun on your `PATH` is used if the bundled one is missing)
 
-The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
+The **Steer**, **Delete** and **Edit** actions on a queued message are commands of the `ompweb-omp` channel (`promote_queued_message`, `remove_queued_message`). Deletion is confirmed by omp before the chip disappears; editing recalls text only after cancellation succeeds. A message that is no longer pending leaves the queue unchanged and displays a notice; ompweb does not send a duplicate steering message.
 
-Queue **Delete** and **Edit** additionally require `remove_queued_message`. Deletion is confirmed by OMP before the chip disappears; editing recalls text only after cancellation succeeds. Unsupported runtimes or messages that are no longer pending leave the queue unchanged and display a notice.
-
-The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events, omp 18.4.4 or later), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs. Older omp runtimes show no queue panel, and Stop cannot take queued messages back.
+The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs.
 
 ## App installation behind authentication
 
@@ -78,8 +76,8 @@ session you are viewing. Clicking a notification opens its session.
 - Desktop browsers show notifications through the operating system's
   notification center. Push delivery needs the browser process running.
 
-Completion notifications use omp's `prompt_result` and `session_settled` RPC
-frames (omp 18.3.1 or later).
+Completion notifications use the `ompweb-omp` channel's `prompt_result` and
+`session_settled` frames.
 
 ## Quick Start
 

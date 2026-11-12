@@ -1,6 +1,6 @@
 // The host socket an omp started from a TUI dials (runner/src/channel.ts): each connection becomes a daemon channel,
 // its lines the child's stdout, the server's lines written back, its close the child's exit. Unix only, never TCP.
-import { chmodSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import { lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,7 +12,10 @@ import type { SpawnRequest, SpawnResult } from "./host";
 const HELLO_TIMEOUT_MS = 10_000;
 const errno = (error: unknown) => (error as NodeJS.ErrnoException)?.code;
 
-/** Must match `hostSocketPath()` in runner/src/channel.ts. */
+/** Must match `CHANNEL_PROTO` in runner/src/channel.ts (omp-socket.test.mjs checks). */
+export const CHANNEL_PROTO = 1;
+
+/** Must match `hostSocketPath()` in runner/src/channel.ts (omp-socket.test.mjs checks). */
 export function hostSocketPath(): string {
   return process.env.OMPWEB_HOST_SOCKET || join(process.env.XDG_RUNTIME_DIR || tmpdir(), "ompweb", "host.sock");
 }
@@ -73,19 +76,25 @@ function socketTransport(socket: Socket, lines: Interface, first: string, pid: n
 }
 
 /** `hello`'s identity as the launch a spawned child would have had; null for a malformed hello. */
-function helloLaunch(line: string): { pid: number; launch: SpawnRequest } | null {
+function helloLaunch(line: string): { pid: number; launch: SpawnRequest; sessionId?: string } | null {
   let hello: unknown;
   try { hello = JSON.parse(line); } catch { return null; }
   if (!isRecord(hello) || hello.t !== "hello" || typeof hello.cwd !== "string" || !hello.cwd || !Number.isSafeInteger(hello.pid)
     || !(hello.sessionFile === undefined || hello.sessionFile === null || typeof hello.sessionFile === "string")) return null;
-  return { pid: hello.pid as number, launch: { cwd: hello.cwd, recordedCwd: hello.cwd, sessionFile: hello.sessionFile ?? "", advisor: false } };
+  return { pid: hello.pid as number, launch: { cwd: hello.cwd, recordedCwd: hello.cwd, sessionFile: hello.sessionFile ?? "", advisor: false },
+    ...(typeof hello.sessionId === "string" ? { sessionId: hello.sessionId } : {}) };
+}
+
+/** Tells the runner not to redial (runner/src/channel.ts), then closes. */
+function refuse(socket: Socket, reason: string): void {
+  socket.end(JSON.stringify({ t: "refused", reason }) + "\n");
 }
 
 export type HostSocket = { path: string; close(): Promise<void> };
 
 /** Listens on `path` (0600 in a private directory); `adopt` turns each runner that says `hello` into a channel. */
 export async function listenHostSocket(path: string, options: {
-  adopt(spawned: SpawnResult, launch: SpawnRequest): Promise<unknown>;
+  adopt(spawned: SpawnResult, launch: SpawnRequest, sessionId?: string): Promise<unknown>;
   log(message: string): void;
 }): Promise<HostSocket> {
   privateDir(dirname(path));
@@ -99,21 +108,25 @@ export async function listenHostSocket(path: string, options: {
     const lines = createInterface({ input: socket, crlfDelay: Infinity });
     lines.once("line", first => {
       const hello = helloLaunch(first);
-      if (!hello) { options.log("refused a TUI omp: its first line is not a valid hello"); socket.destroy(); return; }
+      if (!hello) { options.log("refused a TUI omp: its first line is not a valid hello"); refuse(socket, "invalid hello"); return; }
       socket.setTimeout(0);
       const transport = socketTransport(socket, lines, first, hello.pid);
-      options.adopt({ transport, cwd: hello.launch.cwd, fellBack: false, launchAdvisor: false }, hello.launch).catch((error: unknown) => {
-        options.log(`refused TUI omp ${hello.pid}: ${error instanceof Error ? error.message : String(error)}`);
-        socket.destroy();
+      options.adopt({ transport, cwd: hello.launch.cwd, fellBack: false, launchAdvisor: false }, hello.launch, hello.sessionId).catch((error: unknown) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        options.log(`refused TUI omp ${hello.pid}: ${reason}`);
+        refuse(socket, reason);
       });
     });
   });
   const listening = Promise.withResolvers<void>();
   server.once("error", listening.reject);
-  server.listen(path, listening.resolve);
-  await listening.promise;
+  // Never even briefly reachable by others: the socket file is created 0600 (umask), not chmod-ed after listen.
+  const umask = process.umask(0o177);
+  try {
+    server.listen(path, listening.resolve);
+    await listening.promise;
+  } finally { process.umask(umask); }
   server.on("error", error => options.log("host socket: " + String(error)));
-  chmodSync(path, 0o600);
   let closing: Promise<void> | undefined;
   return {
     path,

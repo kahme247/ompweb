@@ -12,6 +12,8 @@
  *                                                     dialog options without `signal`. With a TUI it shows there too.
  *   host → omp   {t:"ui_response", id, value}         the method's return value; first answer wins
  *   omp  → host  {t:"ui_end", id}                     omp closed the dialog itself (TUI answer, abort, timeout)
+ *   host → omp   {t:"refused", reason?}               the host will not take this omp (protocol, session live
+ *                                                     elsewhere); the socket closes and omp stops redialling
  *   omp  → host  {t:"ui", method, ...fields}          a presentation call, fire-and-forget:
  *                                                     notify{message, notifyType}, setStatus{statusKey, statusText},
  *                                                     setWidget{widgetKey, widgetLines, widgetPlacement},
@@ -46,6 +48,8 @@ import { subscribeHostEvents } from "./events";
 export const CHANNEL_PROTO = 1;
 
 const RECONNECT_MS = 2_000;
+/** How long TUI startup waits for the first connect; a slower host is still adopted when it answers. */
+const CONNECT_WAIT_MS = 1_000;
 
 /** One parsed host line; `#receive` narrows it by `t`. */
 export type HostMessage = { t: string } & Record<string, unknown>;
@@ -77,6 +81,8 @@ export type CustomFactory<T> = (
 ) => ExtensionUiComponent | Promise<ExtensionUiComponent>;
 
 interface PendingDialog {
+	method: DialogMethod;
+	args: unknown[];
 	answer(value: unknown): void;
 	/** The host link closed with the dialog open. */
 	lost(): void;
@@ -121,6 +127,10 @@ function wireArgs(method: DialogMethod, args: unknown[]): unknown[] {
 export class HostChannel {
 	readonly #session: AgentSession;
 	readonly #subagentEventBus: EventBus | undefined;
+	/** Read once, so a channel never follows a later change of `OMPWEB_HOST_SOCKET`. */
+	readonly #socketPath = hostSocketPath();
+	/** The host refused this omp: no more dials. */
+	#refused = false;
 	#write: ((line: string) => void) | undefined;
 	#unwatch: (() => void)[] = [];
 	/** Frames other than dialog answers wait here until `release()` (headless startup). */
@@ -154,7 +164,11 @@ export class HostChannel {
 	 */
 	static async connect(session: AgentSession, subagentEventBus?: EventBus): Promise<HostChannel> {
 		const channel = new HostChannel(session, subagentEventBus);
-		await channel.#dial();
+		// shortcut: the Windows host has no named pipe yet; dial there once it does.
+		if (process.platform === "win32") return channel;
+		const { promise: waited, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, CONNECT_WAIT_MS).unref();
+		await Promise.race([channel.#dial(), waited]);
 		return channel;
 	}
 
@@ -187,7 +201,7 @@ export class HostChannel {
 	}
 
 	async #dial(): Promise<void> {
-		const socketPath = hostSocketPath();
+		const socketPath = this.#socketPath;
 		if (!isPrivateDir(path.dirname(socketPath))) {
 			if (!this.#warnedUnsafeDir) {
 				this.#warnedUnsafeDir = true;
@@ -240,7 +254,7 @@ export class HostChannel {
 	}
 
 	#redial(): void {
-		setTimeout(() => void this.#dial(), RECONNECT_MS).unref();
+		if (!this.#refused) setTimeout(() => void this.#dial(), RECONNECT_MS).unref();
 	}
 
 	#open(write: (line: string) => void): void {
@@ -258,6 +272,8 @@ export class HostChannel {
 		// Per connection: a redialled host starts from a fresh subscription, not mid-delta.
 		this.#unwatch = [watchSessionIdentity(session, send), subscribeHostEvents(session, send)];
 		if (this.#subagentEventBus) this.#unwatch.push(watchSubagents({ session, send }, this.#subagentEventBus));
+		// Dialogs the TUI still shows open on the new host too.
+		for (const [id, { method, args }] of this.#pendingUi) this.#send({ t: "ui_request", id, method, args });
 	}
 
 	#close(): void {
@@ -304,6 +320,11 @@ export class HostChannel {
 	}
 
 	#receive(message: HostMessage): void {
+		if (message.t === "refused") {
+			if (!this.#refused) logger.warn("ompweb channel: the host refused this omp; not redialling", { reason: message.reason });
+			this.#refused = true;
+			return;
+		}
 		if (message.t === "ui_response") {
 			if (typeof message.id === "number") this.#pendingUi.get(message.id)?.answer(message.value);
 			return;
@@ -376,6 +397,8 @@ export class HostChannel {
 			}, options.timeout);
 		}
 		this.#pendingUi.set(id, {
+			method,
+			args: wireArgs(method, args),
 			answer: value => settle(value as T, false),
 			lost: () => settle(fallback(false), false),
 		});
@@ -385,11 +408,9 @@ export class HostChannel {
 
 	/**
 	 * Race a dialog between the local UI and the host: the first answer wins and the other side's
-	 * dialog closes. Without a host the local UI answers alone.
+	 * dialog closes. Without a host the local UI answers alone, and a host that connects meanwhile gets it.
 	 */
 	#race<T>(method: DialogMethod, args: unknown[], local: (args: unknown[]) => Promise<T>): Promise<T> {
-		if (!this.#write) return local(args);
-
 		const index = DIALOG_OPTIONS_INDEX[method];
 		const callerOptions = dialogOptionsOf(method, args);
 		const localAbort = new AbortController();
@@ -399,17 +420,26 @@ export class HostChannel {
 
 		const id = this.#nextUiId++;
 		const { promise: remote, resolve: answer } = Promise.withResolvers<T>();
+		const wire = wireArgs(method, args);
 		// A lost host leaves the local dialog to answer alone.
-		this.#pendingUi.set(id, { answer: value => answer(value as T), lost: () => {} });
-		this.#send({ t: "ui_request", id, method, args: wireArgs(method, args) });
+		this.#pendingUi.set(id, { method, args: wire, answer: value => answer(value as T), lost: () => {} });
+		this.#send({ t: "ui_request", id, method, args: wire });
 
 		const localAnswer = local(localArgs).then(value => ({ from: "local" as const, value }));
 		const remoteAnswer = remote.then(value => ({ from: "host" as const, value }));
-		return Promise.race([localAnswer, remoteAnswer]).finally(() => this.#pendingUi.delete(id)).then(winner => {
-			if (winner.from === "host") localAbort.abort();
-			else this.#send({ t: "ui_end", id });
-			return winner.value;
-		});
+		return Promise.race([localAnswer, remoteAnswer])
+			.finally(() => this.#pendingUi.delete(id))
+			.then(
+				winner => {
+					if (winner.from === "host") localAbort.abort();
+					else this.#send({ t: "ui_end", id });
+					return winner.value;
+				},
+				(err: unknown) => {
+					this.#send({ t: "ui_end", id });
+					throw err;
+				},
+			);
 	}
 
 	/**

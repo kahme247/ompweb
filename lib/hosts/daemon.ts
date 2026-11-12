@@ -16,8 +16,7 @@ import { credentialsEnv, serverFetch, startBrokerForwarder } from "./daemon-brok
 import { createClusterConfig } from "./daemon-cluster-config";
 import { runOmpCli } from "../omp/plugins-cli";
 import { HostResumeTracker, type HostResumeEntry } from "./host-resume";
-import type { SpawnRequest } from "./host";
-import { CLUSTER_CONFIG_SINCE_VERSION, CONFIG_VERSION_RE, CREATION_ID_RE, encodeLine, HostOpError, isHostOp, LINK_LIMITS, LINK_PROTOCOL_VERSION, SESSION_OP_PARAMS, type DownMessage, type OpenChannelRequest, type UnknownMessage } from "./link-protocol";
+import { CONFIG_VERSION_RE, CREATION_ID_RE, encodeLine, HostOpError, isHostOp, LINK_LIMITS, LINK_PROTOCOL_VERSION, SESSION_OP_PARAMS, type DownMessage, type OpenChannelRequest, type UnknownMessage } from "./link-protocol";
 import { localHost, resolveSpawnCwdResult } from "./local-host";
 import { listenHostSocket, type HostSocket } from "./omp-socket";
 import { sessionOps } from "./session-ops";
@@ -166,10 +165,10 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     channelsChanged,
   });
   const hostSocket: Promise<HostSocket | undefined> = options.hostSocket === undefined ? Promise.resolve(undefined) : listenHostSocket(options.hostSocket, {
-    adopt: async (spawned, launch) => {
+    adopt: async (spawned, launch, sessionId) => {
       if (stopped) throw new HostOpError(503, "host_stopping", "This host is stopping");
       if (drained) throw new HostOpError(409, "host_drained", "This host is locally drained for maintenance");
-      return channels.adopt(spawned, launch);
+      return channels.adopt(spawned, launch, sessionId);
     },
     log,
   }).catch(error => { log("omps started from a TUI cannot attach: " + reason(error)); return undefined; });
@@ -224,32 +223,32 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
   function reportCapacity(): void {
     if (stopped) return;
     let linked = false;
-    for (const link of links.values()) if (link.version >= 8 && link.isUp()) { linked = true; break; }
+    for (const link of links.values()) if (link.isUp()) { linked = true; break; }
     if (!linked) return;
     const sample = sampleHostCapacity(channels.activeTurns);
-    if (sample) for (const link of links.values()) if (link.version >= 8) link.report({ type: "capacity", sample });
+    if (sample) for (const link of links.values()) link.report({ type: "capacity", sample });
   }
   const capacityTimer = setInterval(reportCapacity, 5_000); capacityTimer.unref?.();
 
   function sessionsChanged(): void {
     localHost.invalidateSessionLists(); invalidateWorkspaceRoots();
-    if (!stopped) for (const link of links.values()) if (link.version >= 7) link.queue({ type: "sessions_changed" }, "sessions");
+    if (!stopped) for (const link of links.values()) link.queue({ type: "sessions_changed" }, "sessions");
   }
   function channelsChanged(ch: string): void {
     if (stopped) return;
-    for (const link of links.values()) if (link.version >= 7 && link.isUp()) {
+    for (const link of links.values()) if (link.isUp()) {
       link.queue({ type: "channels_changed", channels: channels.listing(link) }, ch);
     }
   }
   function electNotifier(): void {
-    const next = [...links.values()].find(link => link.version >= 7 && link.isUp())?.id ?? null;
+    const next = [...links.values()].find(link => link.isUp())?.id ?? null;
     if (next === notifierId) return;
     const old = notifierId; notifierId = next;
-    for (const link of links.values()) if (link.version >= 7 && (link.id === old || link.id === next)) link.queue({ type: "notifier", on: link.id === next }, "notifier");
+    for (const link of links.values()) if (link.id === old || link.id === next) link.queue({ type: "notifier", on: link.id === next }, "notifier");
   }
-  /** Tells each v10 link the configuration state and whether it holds that configuration. */
+  /** Tells each link the configuration state and whether it holds that configuration. */
   function reportConfig(state = config.state()): void {
-    if (!stopped) for (const link of links.values()) if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state, owned: config.holds(link.login.url) });
+    if (!stopped) for (const link of links.values()) link.report({ type: "config_state", state, owned: config.holds(link.login.url) });
   }
   /** Stops a removed link's workspace service (tracked so shutdown awaits it) and frees its upload ownership so other servers can take those uploads. */
   function dropLink(link: DaemonLink): void {
@@ -263,14 +262,14 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
       hello: (link, replay) => encodeLine({ type: "hello", v: link.version, ompVersion, ompwebVersion: packageJson.version,
         workspaceOps: Object.keys(WORKSPACE_OP_PARAMS), platform: process.platform, home: homedir(), autoApproveExtension: localHost.autoApproveExtension(),
         ack: link.ackedDown, channels: channels.listing(link, replay),
-        ...(link.version >= 7 ? { link: { id: link.id, notifier: notifierId === link.id } } : {}) }),
+        link: { id: link.id, notifier: notifierId === link.id } }),
       handleDown,
       onState: (link, up) => {
         if (up) {
           channels.linkUp(link);
           reportCapacity();
-          if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state: config.state(), owned: config.holds(link.login.url) });
-          if (link.version >= 7) link.queue({ type: "channels_changed", channels: channels.listing(link, false) }, "channels");
+          link.report({ type: "config_state", state: config.state(), owned: config.holds(link.login.url) });
+          link.queue({ type: "channels_changed", channels: channels.listing(link, false) }, "channels");
         } else {
           services.get(link.id)?.onDisconnect();
           channels.linkDown(link);
@@ -386,7 +385,6 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
       return run(...WORKSPACE_OP_PARAMS[op].map(name => args[name]));
     }
     switch (op) {
-      case "spawn": return channels.spawnLegacy(link, args as unknown as SpawnRequest & { ch: string });
       case "open": return channels.open(link, args as unknown as OpenChannelRequest);
       case "close": if (typeof args.ch !== "string") throw new HostOpError(400, "invalid_request", "Invalid channel id"); channels.close(link, args.ch); return {};
       case "editLease": if (typeof args.ch !== "string" || typeof args.on !== "boolean") throw new HostOpError(400, "invalid_request", "Invalid edit lease"); channels.editLease(link, args.ch, args.on); return {};

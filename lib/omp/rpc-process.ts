@@ -158,7 +158,7 @@ export class RpcProcess {
     if (options.adopted) {
       // Its hello went to the daemon or the server that spawned it.
       this.heldFrames = [];
-      ready.resolve({ type: "ready", supportsBashExcludeFromContext: true });
+      ready.resolve({ type: "ready" });
     }
 
     this.transport.onLine((line) => {
@@ -262,7 +262,7 @@ export class RpcProcess {
     const { t, ...rest } = parsed;
     switch (t) {
       case "hello":
-        this.resolveReady({ type: "ready", ...rest, supportsBashExcludeFromContext: true });
+        this.resolveReady({ type: "ready", ...rest });
         return;
       case "res":
         this.handleResponse(rest);

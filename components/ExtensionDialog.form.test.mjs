@@ -106,3 +106,10 @@ test("a required group is satisfied by its Other text", async () => {
   await user.click(screen.getByRole("button", { name: "Submit" }));
   assert.deepEqual(responses, [{ data: { c: "Green" } }]);
 });
+
+test("controls named like HTMLFormElement members still submit", async () => {
+  const user = userEvent.setup();
+  const responses = renderForm(`<form><input name="elements" value="a"><input name="reportValidity" value="b"><input name="querySelectorAll" value="c"><input name="submit" value="d"><input name="checkValidity" value="e"></form>`);
+  await user.click(screen.getByRole("button", { name: "Submit" }));
+  assert.deepEqual(responses, [{ data: { elements: "a", reportValidity: "b", querySelectorAll: "c", submit: "d", checkValidity: "e" } }]);
+});

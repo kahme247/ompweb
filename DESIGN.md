@@ -130,9 +130,9 @@ the daemon requires `https://` except for loopback or an explicit
 - `~/.omp/agent` is the source of
   truth for sessions, configuration, models, skills, plugins, and blobs.
 - `agent.db` contains authentication data. ompweb never reads or writes it;
-  authentication actions go through the OMP RPC process.
+  authentication actions go through the `ompweb-omp` process.
 - A live OMP process owns writes to its session file. ompweb routes supported
-  live actions through RPC and never races a live file rewrite.
+  live actions through the runner's channel and never races a live file rewrite.
 
 ### Direct file access
 
@@ -214,7 +214,7 @@ version change invalidates offsets rather than trusting an unchecked prefix.
 Failed reads never advance the confirmed cursor.
 
 File-only catch-up also refreshes model and thinking metadata without replacing
-newer or pending RPC choices. Replacement observer connections restore browser
+newer or pending channel choices. Replacement observer connections restore browser
 registrations and the subagent roster only after successfully connecting.
 
 Deploy the frontend and API support together; no native OMP upgrade is required.
@@ -247,7 +247,9 @@ Deploy the frontend and API support together; no native OMP upgrade is required.
   rather than secrets (`OMP_WEB_PACKAGE_DIR`, `OMP_WEB_OMP_BIN`, ...) are kept.
 - API requests are origin-checked. Do not add browser-to-host execution paths
   that bypass this boundary.
-- OMP RPC host tools are intentionally not registered. A browser request must
+- Host tools (`host_tool_call`) come from a fixed set: the browser's own tools
+  (open a URL or file, notify) and the server's session tools in `lib/agent-tools.ts`;
+  none runs a host command. A browser request must
   not become arbitrary host command execution through an extension callback.
 - File APIs are not a general filesystem browser. They are restricted to
   selected workspaces, valid Git worktrees, session-referenced directories, and
@@ -260,8 +262,8 @@ Deploy the frontend and API support together; no native OMP upgrade is required.
 
 - The session sidebar is the durable navigation model: projects, sessions,
   branches, worktrees, and files must agree about the selected workspace.
-- Streaming state is explicit. The UI reconciles Server-Sent Events with RPC
-  state so a background tab cannot remain falsely “running”.
+- Streaming state is explicit. The UI reconciles Server-Sent Events with the
+  session's state so a background tab cannot remain falsely “running”.
 - Desktop and mobile share the same core workflow. Mobile controls keep usable
   touch targets and a visible loading state rather than a blank shell.
 - Accessibility and motion preferences are first-class. Components use the
