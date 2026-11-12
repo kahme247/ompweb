@@ -129,6 +129,36 @@ async function stopOriginalProcesses() {
   return { launchd, tray };
 }
 
+// The candidate's `ompweb preflight` (lib/hosts/preflight.ts), installed into a scratch prefix and run in this
+// environment before anything stops: a session omp that cannot start fails the update, not the running server.
+function preflightCandidate() {
+  const prefix = fs.mkdtempSync(path.join(os.tmpdir(), "ompweb-candidate-"));
+  try {
+    fs.writeFileSync(path.join(prefix, "package.json"), '{"private":true}');
+    const pkg = `@kahme247/ompweb@${target}`;
+    // shell: true (Windows) joins arguments unquoted.
+    const where = process.platform === "win32" ? `"${prefix}"` : prefix;
+    const args = manager === "bun" ? ["add", "--cwd", where, "--production", "--exact", pkg] : ["install", "--prefix", where, "--omit=dev", "--no-audit", "--no-fund", pkg];
+    const install = cp.spawnSync(manager === "bun" ? (managerPath || "bun") : (managerPath || "npm"), args, { timeout: 5 * 60 * 1000, windowsHide: true, env: process.env, shell: process.platform === "win32" });
+    if (install.status !== 0) {
+      const detail = install.stderr ? install.stderr.toString().trim().slice(-300) : String(install.error || "");
+      throw new Error(`candidate install failed (exit ${install.status})${detail ? `: ${detail}` : ""}`);
+    }
+    const release = path.join(prefix, "node_modules", "@kahme247", "ompweb");
+    // Detected statically: an older ompweb takes `preflight` for a positional and starts a web server.
+    if (!fs.existsSync(path.join(release, "lib", "hosts", "preflight.ts"))) {
+      const optional = Object.keys((readJson(path.join(release, "package.json")) || {}).optionalDependencies || {});
+      if (optional.some((name) => name.startsWith("@kahme247/ompweb-omp-"))) throw new Error("the new release has no preflight command to check its omp with");
+      console.warn(`ompweb ${target} has no preflight command; its omp was not checked`);
+      return;
+    }
+    const result = cp.spawnSync(process.execPath, [path.join(release, "bin", "omp-web.js"), "preflight"], { cwd: prefix, timeout: 60 * 1000, windowsHide: true, env: process.env, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`the new release cannot start a session: ${((result.stderr || "").trim() || String(result.error || `exit ${result.status}`)).slice(-200)}`);
+  } finally {
+    fs.rmSync(prefix, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
 async function runManagerGate() {
   updateStatus({ stage: "installing" });
   if (kind === "omp") {
@@ -234,7 +264,10 @@ async function main() {
 
   let svcInfo = { launchd: false, tray: false };
   try {
-    if (kind !== "omp") svcInfo = await stopOriginalProcesses();
+    if (kind !== "omp") {
+      preflightCandidate();
+      svcInfo = await stopOriginalProcesses();
+    }
     await runManagerGate();
     try {
       const pkgPath = path.join(packageDir, "package.json");

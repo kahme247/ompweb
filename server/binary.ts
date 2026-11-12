@@ -22,6 +22,8 @@ if (command === "host-update-worker") {
   process.exit(await runHostUpdateWorker(process.argv[3] || ""));
 }
 if (command === "host") process.exit(await runHostCli(process.argv.slice(3)));
+// Deploy scripts grep a release for this literal before they run it: an older ompweb starts the web server instead.
+if (command === "preflight") process.exit(await (await import("../lib/hosts/preflight")).runPreflight());
 if (command === "hash-password" || command === "hash_password") {
   process.exit(await runHashPasswordCommand().catch((error: unknown) => {
     console.error(`Could not hash the password: ${error instanceof Error ? error.message : String(error)}`);
