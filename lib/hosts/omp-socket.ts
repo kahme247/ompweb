@@ -20,12 +20,14 @@ export function hostSocketPath(): string {
   return process.env.OMPWEB_HOST_SOCKET || join(process.env.XDG_RUNTIME_DIR || tmpdir(), "ompweb", "host.sock");
 }
 
-/** Creates `dir` 0700; refuses one another user owns or others can write. */
+/** Creates `dir` 0700 or narrows an existing one to 0700; refuses one another user owns or others could already write. */
 function privateDir(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const stat = lstatSync(dir);
   if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== process.getuid!()) throw new Error(`Unsafe host socket directory ${dir}: not a directory this user owns`);
   if (stat.mode & 0o022) throw new Error(`Unsafe host socket directory ${dir}: group or world writable`);
+  // mkdirSync's mode does not apply to a directory that already exists: others must not even reach the socket.
+  if (stat.mode & 0o077) chmodSync(dir, 0o700);
 }
 
 /** Removes a socket file nothing answers on; refuses a live one or anything that is not a socket. */
@@ -121,10 +123,10 @@ export async function listenHostSocket(path: string, options: {
   const listening = Promise.withResolvers<void>();
   server.once("error", listening.reject);
   // No process.umask(): it is process-wide, and omp children spawned while listen() is pending would inherit it.
-  // privateDir() already keeps others out of the directory; the chmod is for the socket file itself.
+  // privateDir() left the directory 0700, so nobody else reaches the socket before this chmod narrows the file itself.
   server.listen(path, listening.resolve);
   await listening.promise;
-  chmodSync(path, 0o600);
+  try { chmodSync(path, 0o600); } catch (error) { server.close(); throw error; }
   server.on("error", error => options.log("host socket: " + String(error)));
   let closing: Promise<void> | undefined;
   return {
