@@ -125,6 +125,8 @@ interface ProjectRowProps {
   /** The active search query; each session row can then list its hits. */
   searchQuery?: string;
   onOpenSearchMatch?: (session: SessionInfo, target: SearchMatchTarget) => void;
+  /** A pinned project of a cluster member: its node's name, status text and, while its link is down, why it cannot be used. */
+  node?: { label: string; statusText?: string | null; unavailableReason?: string | null };
 }
 
 /** One project in the sidebar: a card row matching the session items' visual
@@ -160,8 +162,11 @@ function ProjectRow({
   onSessionDeleted,
   searchQuery,
   onOpenSearchMatch,
+  node,
 }: ProjectRowProps) {
   const { t } = useI18n();
+  // The title is invisible to keyboards and screen readers: say the reason in text too.
+  const reasonId = useId();
   const [hovered, setHovered] = useState(false);
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
@@ -199,7 +204,8 @@ function ProjectRow({
     : tree;
 
   return (
-    <section className="sidebar-project" data-active={isActive ? "true" : "false"} style={{ marginBottom: 12 }}>
+    <section className="sidebar-project" data-active={isActive ? "true" : "false"} style={{ marginBottom: 12, opacity: node?.unavailableReason ? 0.55 : 1 }}>
+      {node?.unavailableReason && <span id={reasonId} className="sr-only">{node.unavailableReason}</span>}
       <ConfirmDialog
         open={confirmRemove}
         onOpenChange={setConfirmRemove}
@@ -304,7 +310,8 @@ function ProjectRow({
               className="sidebar-project-identity"
               onClick={() => onActivate(project)}
               aria-current={isActive ? "true" : undefined}
-              title={project.poolId ? project.origin : project.path}
+              title={node?.unavailableReason ? `${project.poolId ? project.origin : project.path}\n${node.unavailableReason}` : project.poolId ? project.origin : project.path}
+              aria-describedby={node?.unavailableReason ? reasonId : undefined}
               style={{
                 flex: "0 1 auto",
                 minWidth: 0,
@@ -340,6 +347,18 @@ function ProjectRow({
               >
                 {label}
               </span>
+              {node && (
+                <>
+                  <span className="sr-only">{t("hosts.onNode", { node: node.label })}</span>
+                  <span
+                    aria-hidden="true"
+                    title={t("hosts.onNode", { node: node.label })}
+                    style={{ flexShrink: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10.5, color: "var(--text-dim)" }}
+                  >
+                    {node.statusText ? `${node.label} · ${node.statusText}` : node.label}
+                  </span>
+                </>
+              )}
             </button>
             </Tooltip>
           )}

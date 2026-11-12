@@ -44,9 +44,11 @@ import {
   type UpMessage,
   withSeq,
 } from "./link-protocol";
+import { sharesCredentials } from "./cluster";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, readHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
 import { confirmPooledChild, pooledStartForChild } from "./pool-starts";
+import { loadPools, type HostPool } from "./pools";
 import { validateHostTools } from "./shared-requests";
 import type { HostSoftwareUpdate, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
 import { isUpdateDisabled } from "../update-policy";
@@ -1489,8 +1491,8 @@ export class RemoteHost implements Host {
         throw new HostOpError(426, "host_upgrade_required", `${this.label} needs a newer ompweb to use creation identity`);
       }
     }
-    // A pure join (expectedChannel) starts nothing, so it is neither refused nor flagged. An unreadable registry
-    // refuses the start: a host that may be sharing must never run a session with its own stored logins.
+    // A pure join (expectedChannel) starts nothing, so it is neither refused nor flagged. An unreadable registry or pool
+    // file refuses the start: a host that may be sharing must never run a session with its own stored logins.
     let sharing = false;
     if (options?.expectedChannel === undefined && this.id !== LOCAL_HOST_ID) {
       let record: HostRecord | undefined;
@@ -1502,7 +1504,13 @@ export class RemoteHost implements Host {
       }
       // A link that outlived its record (hosts.json deleted or hand-edited) cannot say whether it shares.
       if (!record) throw new HostOpError(409, "host_unregistered", "This host is no longer in the linked-hosts registry; no session was started");
-      sharing = record.shareCredentials;
+      let pools: HostPool[];
+      try {
+        pools = loadPools();
+      } catch {
+        throw new HostOpError(503, "pool_storage_unavailable", "The host pool configuration cannot be read; no session was started");
+      }
+      sharing = sharesCredentials(record, pools);
     }
     if (sharing && (!link.shared || (link.hostVersion ?? 0) < SHARED_CREDENTIALS_SINCE_VERSION)) {
       throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to share credentials with it`);
@@ -1689,8 +1697,9 @@ export interface LocalHostRow {
 
 export type HostRow = LocalHostRow | LinkedHostRow;
 
-/** Settings → Hosts payload (`GET /api/hosts` and the `hosts` channel): this machine first, then linked hosts. This machine's status is its daemon link's. */
-export function hostsSnapshot(): { hosts: HostRow[] } {
+/** Settings → Hosts payload (`GET /api/hosts` and the `hosts` channel): this machine first, then linked hosts. This machine's status is its daemon link's.
+ * `pools` is left out while pools.json cannot be read: a client keeps the last it had. */
+export function hostsSnapshot(): { hosts: HostRow[]; pools?: HostPool[] } {
   const link = hub().links.get(LOCAL_HOST_ID);
   const local: LocalHostRow = {
     id: "local",
@@ -1706,7 +1715,13 @@ export function hostsSnapshot(): { hosts: HostRow[] } {
     serverPlatform: process.platform,
     daemonManaged: process.env.NODE_ENV !== "development",
   };
-  return { hosts: [local, ...listHosts()] };
+  let pools: HostPool[] | undefined;
+  try {
+    pools = loadPools();
+  } catch {
+    // Left out; see above.
+  }
+  return { hosts: [local, ...listHosts()], ...(pools && { pools }) };
 }
 
 /** Tell `hosts` subscribers the registry changed (rename, toggle, revoke); link changes notify on their own. */
@@ -1727,6 +1742,10 @@ export function getHostCapacity(hostId: string): CapacitySnapshot | null {
 
 export function getHostLinkProtocol(hostId: string): number | null {
   return hub().links.get(hostId)?.hostVersion ?? null;
+}
+
+export function getHostOmpVersion(hostId: string): string | null {
+  return hub().links.get(hostId)?.ompVersion ?? null;
 }
 
 export function onHostsChange(listener: () => void): () => void {

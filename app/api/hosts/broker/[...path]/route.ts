@@ -1,4 +1,6 @@
 import { readBodyWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+import { sharesCredentials } from "@/lib/hosts/cluster";
+import { loadPools } from "@/lib/hosts/pools";
 import { hostForToken, HostRegistryUnreadableError, LOCAL_HOST_ID, type HostRecord } from "@/lib/hosts/registry";
 import { AuthBrokerUnavailableError, brokerFetch } from "@/lib/omp/auth-broker";
 
@@ -35,7 +37,7 @@ function only(source: Headers, names: readonly string[]): Headers {
   return picked;
 }
 
-/** The sharing host the bearer token names, or the refusal to answer with (a 403 is logged; a 401 has no host to name). */
+/** The sharing host (own flag or cluster member) the bearer token names, or the refusal to answer with (a 403 and a pool 503 are logged; a 401 has no host to name). */
 function admit(request: Request, path: string): HostRecord | Response {
   const header = request.headers.get("authorization");
   const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
@@ -49,7 +51,14 @@ function admit(request: Request, path: string): HostRecord | Response {
   }
   if (!host) return fail("Unknown host token", 401);
   // `local` is refused by id: a hand-edited hosts.json can give its record the flag.
-  if (host.id === LOCAL_HOST_ID || !host.shareCredentials) {
+  let shares: boolean;
+  try {
+    shares = host.id !== LOCAL_HOST_ID && sharesCredentials(host, loadPools());
+  } catch {
+    log(host.id, request.method, PLAIN_PATH.test(path) ? path : "-", 503, "pools_unreadable");
+    return fail("The host pool configuration cannot be read", 503);
+  }
+  if (!shares) {
     log(host.id, request.method, PLAIN_PATH.test(path) ? path : "-", 403);
     return fail("Credential sharing is off for this host", 403);
   }

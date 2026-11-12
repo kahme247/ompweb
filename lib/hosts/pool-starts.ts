@@ -7,9 +7,10 @@ import { sessionWorktreeName, type PreparedPoolProject } from "../pooled-project
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import type { ProjectLaunchConfig } from "../types";
+import { sharesCredentials } from "./cluster";
 import type { Host } from "./host";
-import { adoptedChild, getHost, getHostCapacity, getHostLinkProtocol, reconcilePooledChild } from "./hub";
-import { CREATION_ID_RE, HostOpError, type HelloChannel } from "./link-protocol";
+import { adoptedChild, getHost, getHostCapacity, getHostLinkProtocol, hostOwnsLifecycle, reconcilePooledChild } from "./hub";
+import { CREATION_ID_RE, HostOpError, SHARED_CREDENTIALS_SINCE_VERSION, type HelloChannel } from "./link-protocol";
 import { loadPools, pathApi, selectPoolHost, type PoolHostSnapshot } from "./pools";
 
 export interface PoolCreateInput {
@@ -313,13 +314,18 @@ export function startPooledSession(input: PoolCreateInput, start: Start, authori
         throw new PoolStartError(failed.status, failed.code, failed.message, entry);
       }
     } else {
-      const pool = loadPools().find((candidate) => candidate.id === input.poolId);
+      const pools = loadPools();
+      const pool = pools.find((candidate) => candidate.id === input.poolId);
       const project = pool?.projects.find((candidate) => candidate.id === input.projectId);
       if (!pool || !project) throw new PoolStartError(404, "pool_project_not_found", "Pool project not found");
       const snapshots = new Map<string, PoolHostSnapshot>();
       for (const member of pool.members) {
         const host = getHost(member.hostId);
-        if (host) snapshots.set(member.hostId, { status: host.status(), linkProtocol: getHostLinkProtocol(member.hostId) ?? 0, capacity: getHostCapacity(member.hostId) });
+        const linkProtocol = getHostLinkProtocol(member.hostId) ?? 0;
+        // A cluster member always runs on the server's logins; without a link that honours that, spawnRpc would refuse it after preparation.
+        if (sharesCredentials({ id: member.hostId, shareCredentials: false }, pools)
+          && (!hostOwnsLifecycle(member.hostId) || linkProtocol < SHARED_CREDENTIALS_SINCE_VERSION)) continue;
+        if (host) snapshots.set(member.hostId, { status: host.status(), linkProtocol, capacity: getHostCapacity(member.hostId) });
       }
       const pending = new Map<string, number>();
       for (const current of journal.starts) {
