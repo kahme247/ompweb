@@ -1138,6 +1138,12 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
  * (opaque thinking signatures, request controls, context snapshots) and no
  * reader in components/, hooks/, lib/ or app/ touches them, so the display
  * context drops them. The on-disk session file keeps the full message.
+ *
+ * Real payloads also nest the signatures inside content blocks — a thinking
+ * block carries thinkingSignature and a text block textSignature (see
+ * tests/fixtures/omp-delta-stream.ndjson) — so the strip walks the blocks
+ * too. transcriptToMarkdown reads only block.thinking / block.text, never
+ * the signatures, so dropping them changes no rendered output.
  */
 const UNUSED_ASSISTANT_MESSAGE_FIELDS = [
   "inputTransformations",
@@ -1146,12 +1152,35 @@ const UNUSED_ASSISTANT_MESSAGE_FIELDS = [
   "contextSnapshot",
 ] as const;
 
+// Signature fields nested inside assistant content blocks (thinking/text).
+const UNUSED_ASSISTANT_BLOCK_FIELDS = ["thinkingSignature", "textSignature"] as const;
+
 function stripUnusedAssistantFields(message: AgentMessage): AgentMessage {
   if (message.role !== "assistant") return message;
   const record = message as unknown as Record<string, unknown>;
-  if (UNUSED_ASSISTANT_MESSAGE_FIELDS.every((field) => record[field] === undefined)) return message;
+  const hasMessageFields = UNUSED_ASSISTANT_MESSAGE_FIELDS.some((field) => record[field] !== undefined);
+  const content = Array.isArray(message.content) ? message.content : null;
+  const hasBlockFields = content?.some((block) => {
+    const b = block as unknown as Record<string, unknown>;
+    return (
+      b !== null &&
+      typeof b === "object" &&
+      UNUSED_ASSISTANT_BLOCK_FIELDS.some((field) => b[field] !== undefined)
+    );
+  });
+  if (!hasMessageFields && !hasBlockFields) return message;
   const stripped = { ...record };
   for (const field of UNUSED_ASSISTANT_MESSAGE_FIELDS) delete stripped[field];
+  if (content && hasBlockFields) {
+    stripped.content = content.map((block) => {
+      const b = block as unknown as Record<string, unknown>;
+      if (b === null || typeof b !== "object") return block;
+      if (UNUSED_ASSISTANT_BLOCK_FIELDS.every((field) => b[field] === undefined)) return block;
+      const copy = { ...b };
+      for (const field of UNUSED_ASSISTANT_BLOCK_FIELDS) delete copy[field];
+      return copy;
+    });
+  }
   return stripped as unknown as AgentMessage;
 }
 
