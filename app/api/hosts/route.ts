@@ -1,6 +1,7 @@
 import { closeHostLink, hostsSnapshot, listHosts, notifyHostsChange } from "@/lib/hosts/hub";
 import { loadPools, savePools, type HostPool } from "@/lib/hosts/pools";
 import { createHost, HostRegistryUnreadableError, readHosts, revokeHost, UnknownHostError, updateHost } from "@/lib/hosts/registry";
+import { abortBrokerRequests } from "@/lib/omp/auth-broker";
 import { isRecord } from "@/lib/type-guards";
 
 const MAX_LABEL_LENGTH = 100;
@@ -125,14 +126,17 @@ export async function PATCH(req: Request) {
   if (!body || typeof body.id !== "string" || !body.id) return fail("id is required", 400);
   const isLocal = body.id === "local";
   if (isLocal && body.allowAgentStart !== undefined) return fail("This machine's agent-start setting cannot be changed", 400);
+  if (isLocal && body.shareCredentials !== undefined) return fail("This machine's credential sharing cannot be changed", 400);
   // An empty name resets this machine to its default name.
   const label = isLocal && typeof body.label === "string" && !body.label.trim() ? "" : parseLabel(body.label);
   if (label === null) return fail(`label must be a non-empty string of at most ${MAX_LABEL_LENGTH} characters`, 400);
-  const { allowAgentStart } = body;
+  const { allowAgentStart, shareCredentials } = body;
   if (allowAgentStart !== undefined && typeof allowAgentStart !== "boolean") return fail("allowAgentStart must be a boolean", 400);
-  if (label === undefined && allowAgentStart === undefined) return fail("Nothing to update", 400);
+  if (shareCredentials !== undefined && typeof shareCredentials !== "boolean") return fail("shareCredentials must be a boolean", 400);
+  if (label === undefined && allowAgentStart === undefined && shareCredentials === undefined) return fail("Nothing to update", 400);
   try {
-    updateHost(body.id, { label, allowAgentStart });
+    updateHost(body.id, { label, allowAgentStart, shareCredentials });
+    if (shareCredentials === false) abortBrokerRequests(body.id);
     notifyHostsChange();
     return Response.json({ host: hostsSnapshot().hosts.find((h) => h.id === body.id) }, { headers: noStore });
   } catch (error) {
@@ -148,6 +152,7 @@ export async function DELETE(req: Request) {
     // Registry first: with the record gone a daemon that redials gets 401 instead of reconnecting.
     if (!revokeHost(id)) return fail("Unknown host", 404);
     closeHostLink(id);
+    abortBrokerRequests(id);
     notifyHostsChange();
     return Response.json({ ok: true }, { headers: noStore });
   } catch (error) {

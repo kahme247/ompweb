@@ -11,6 +11,7 @@ import type { HostControlCommand, HostControlStatus } from "./host-control";
 import { readHostLinks, readHostLogin, type HostLink } from "./host-login";
 import { DaemonLink, dialable, nextRedialDelay } from "./daemon-link";
 import { ChannelTable } from "./daemon-channels";
+import { credentialsEnv, startBrokerForwarder } from "./daemon-broker";
 import { HostResumeTracker, type HostResumeEntry } from "./host-resume";
 import type { SpawnRequest } from "./host";
 import { CREATION_ID_RE, encodeLine, HostOpError, isHostOp, LINK_LIMITS, LINK_PROTOCOL_VERSION, SESSION_OP_PARAMS, type DownMessage, type OpenChannelRequest, type UnknownMessage } from "./link-protocol";
@@ -91,6 +92,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
   const executable = realpathSync(process.execPath);
   const entrypoint = canonicalPath(process.argv[1] || process.execPath) || resolve(process.argv[1] || process.execPath);
   const resume = new HostResumeTracker();
+  const forwarder = startBrokerForwarder({ login: url => links.get(url)?.login ?? null, log });
   const channels = new ChannelTable({
     spawn: async launch => {
       if (drained) throw new HostOpError(409, "host_drained", "This host is locally drained for maintenance");
@@ -99,7 +101,10 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
       catch (error) { if (!updateStateWarningLogged) log("could not read host update status: " + reason(error)); updateStateWarningLogged = true; }
       if (operation?.target === "ompweb" && operation.state === "running") throw new HostOpError(409, "host_updating", "This host is updating its daemon; new sessions must wait");
       const resolved = launch.creationId === undefined ? resolveSpawnCwdResult(launch.recordedCwd ?? launch.cwd) : { cwd: launch.cwd, fellBack: false };
-      const spawned = await localHost.spawnRpc({ ...launch, cwd: resolved.cwd });
+      // A sharing session never starts on this host's own logins: no link, or no usable broker, refuses.
+      if (launch.credentialsServer !== undefined && !links.has(launch.credentialsServer)) throw new HostOpError(409, "credentials_link_gone", "The web server that shares its credentials with this session is no longer linked to this host");
+      const env = await credentialsEnv(launch, { forwarder, ompVersion: getOmpVersion });
+      const spawned = await localHost.spawnRpc({ ...launch, cwd: resolved.cwd }, null, { env });
       return { ...spawned, fellBack: resolved.fellBack || spawned.fellBack };
     },
     prepareLaunch: launch => {
@@ -108,6 +113,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         || typeof launch.sessionFile !== "string" || typeof launch.advisor !== "boolean"
         || !(launch.toolNames === undefined || Array.isArray(launch.toolNames) && launch.toolNames.every(name => typeof name === "string"))
         || !(launch.spawnModel === undefined || typeof launch.spawnModel === "string")
+        || !(launch.credentialsServer === undefined || typeof launch.credentialsServer === "string")
         || !(launch.creationId === undefined || typeof launch.creationId === "string" && CREATION_ID_RE.test(launch.creationId))) throw new HostOpError(400, "invalid_request", "Invalid spawn request");
       return { ...launch, recordedCwd: launch.recordedCwd ?? null, sessionFile: launch.sessionFile ? sessionsPath(launch.sessionFile) : "" };
     },
@@ -371,9 +377,11 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     stopped = true; watcher.close(); clearTimeout(reloadTimer); clearInterval(sweepTimer); clearInterval(capacityTimer); uploadRetention.stop();
     // Freeze before exit handlers observe children stopping.
     resume.freeze();
-    stopping = (async () => { await Promise.all([...links.values()].map(link => link.stop())); await Promise.all([...stops, ...[...services.values()].map(service => service.stop())]); await channels.stop(); resume.dispose(); finish(code); })();
+    stopping = (async () => { await Promise.all([...links.values()].map(link => link.stop())); await Promise.all([...stops, ...[...services.values()].map(service => service.stop())]); await channels.stop(); await forwarder.stop(); resume.dispose(); finish(code); })();
     return stopping;
   }
+  // Links first: a recovered sharing session needs its link to start.
+  for (const saved of initial) makeLink({ ...saved, url: saved.url.replace(/\/+$/, "") }, saved.url.replace(/\/+$/, "") === primaryUrl);
   let interrupted: HostResumeEntry[] = [];
   try { interrupted = resume.takeRunning(); } catch (error) { log("could not recover interrupted sessions: " + reason(error)); }
   let recovering = false;
@@ -386,7 +394,6 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
       .finally(() => operationsInFlight--);
   }
   const startupRecovery = recover();
-  for (const saved of initial) makeLink({ ...saved, url: saved.url.replace(/\/+$/, "") }, saved.url.replace(/\/+$/, "") === primaryUrl);
   operationsInFlight++;
   const versionRead = getOmpVersion().then(version => { ompVersion = version; }).catch(error => log("could not read omp version: " + reason(error)))
     .finally(() => {

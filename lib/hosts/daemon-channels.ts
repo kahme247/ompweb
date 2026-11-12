@@ -50,6 +50,13 @@ type ChannelDeps = {
 };
 const collision = () => new HostOpError(409, "session_running_elsewhere", "This session is already running on another link");
 const invalid = (message = "Invalid channel request") => new HostOpError(400, "invalid_request", message);
+/** A process start's launch: the wire never names the credentials server; it is the opening link's own, and only when the hub asks. */
+function withCredentials(launch: SpawnRequest, link: DaemonLink, share: unknown): SpawnRequest {
+  const result = { ...launch };
+  delete result.shareCredentials; delete result.credentialsServer;
+  if (share === true) result.credentialsServer = link.login.url;
+  return result;
+}
 
 export class ChannelTable {
   private readonly channels = new Map<string, Channel>();
@@ -109,7 +116,7 @@ export class ChannelTable {
       }
       channel = advertised;
     } else {
-      channel = await this.ensure(args.sessionId, args.launch as unknown as SpawnRequest, null, undefined, args.preparing ? link.id : undefined);
+      channel = await this.ensure(args.sessionId, withCredentials(args.launch, link, args.launch.shareCredentials), null, undefined, args.preparing ? link.id : undefined);
     }
     if (this.goneLinks.has(link.id)) {
       channel.lifecycle?.linkGone(link.id);
@@ -152,8 +159,9 @@ export class ChannelTable {
       channel.transport.onExit(() => exit.resolve());
       this.stopChannel(channel);
       await exit.promise;
-      const launch = this.deps.prepareLaunch({ ...channel.launch, advisor: args.launch.advisor,
-        ...(args.launch.spawnModel ? { spawnModel: args.launch.spawnModel } : {}) });
+      // A new process: the opener's flag decides its credentials, as for any start (spec C6).
+      const launch = this.deps.prepareLaunch(withCredentials({ ...channel.launch, advisor: args.launch.advisor,
+        ...(args.launch.spawnModel ? { spawnModel: args.launch.spawnModel } : {}) }, link, args.launch.shareCredentials));
       const spawning = this.create(launch, channel.pending.sessionId, null, undefined, args.preparing ? link.id : undefined);
       this.pendingSpawns.add(spawning);
       try {
@@ -186,7 +194,9 @@ export class ChannelTable {
         && (typeof args.creationId !== "string" || !this.creations.has(args.creationId)))) throw invalid("Invalid channel id");
     this.reservedChannels.add(args.ch);
     let channel: Channel;
-    try { channel = await this.ensure(null, args, link.id, args.ch); }
+    const launch = { ...args };
+    delete launch.shareCredentials; delete launch.credentialsServer;
+    try { channel = await this.ensure(null, launch, link.id, args.ch); }
     finally { this.reservedChannels.delete(args.ch); }
     if (this.goneLinks.has(link.id)) {
       this.stopChannel(channel);
@@ -275,8 +285,14 @@ export class ChannelTable {
           write: (frame, onReply) => { void this.command(channel, frame, onReply).catch(error => this.deps.log(`channel ${ch}: ${String(error)}`)); } });
       }
       spawned.transport.onLine(line => this.stdout(channel, line));
-      spawned.transport.onStderr(chunk => this.broadcast(channel, { type: "stderr", ch, chunk }));
+      // The last 500 bytes omp writes before startup settles, for the daemon's own log if it exits meanwhile; never sent on.
+      let startupStderr: Buffer | null = Buffer.alloc(0);
+      spawned.transport.onStderr(chunk => {
+        if (startupStderr) startupStderr = Buffer.concat([startupStderr, Buffer.from(chunk.slice(-500))]).subarray(-500);
+        this.broadcast(channel, { type: "stderr", ch, chunk });
+      });
       spawned.transport.onExit((code, signal) => {
+        if (startupStderr) this.deps.log(`channel ${ch}: omp exited during startup (code ${code ?? "null"}, signal ${signal ?? "none"}): ${JSON.stringify(startupStderr.toString("utf8"))}`);
         channel.exited = true; clearTimeout(channel.readyTimer); channel.noteReady(null); clearTimeout(channel.forceTimer);
         channel.lifecycle?.dispose(); channel.snapshot.clear();
         for (const pending of channel.internal.values()) { clearTimeout(pending.timer); pending.reject(new Error("omp exited")); }
@@ -290,6 +306,7 @@ export class ChannelTable {
       if (legacy === null) channel.startup = this.configure(channel).finally(() => channel.lifecycle?.setStartup(false));
       else { clearTimeout(readyTimer); noteReady(null); }
       await channel.startup;
+      startupStderr = null;
       if (channel.exited) throw new HostOpError(502, "host_process_exited", "omp exited during startup");
       this.deps.sessionsChanged?.();
       return channel;
