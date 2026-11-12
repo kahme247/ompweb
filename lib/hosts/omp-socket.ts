@@ -1,6 +1,6 @@
 // The host socket an omp started from a TUI dials (runner/src/channel.ts): each connection becomes a daemon channel,
 // its lines the child's stdout, the server's lines written back, its close the child's exit. Unix only, never TCP.
-import { lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -120,12 +120,11 @@ export async function listenHostSocket(path: string, options: {
   });
   const listening = Promise.withResolvers<void>();
   server.once("error", listening.reject);
-  // Never even briefly reachable by others: the socket file is created 0600 (umask), not chmod-ed after listen.
-  const umask = process.umask(0o177);
-  try {
-    server.listen(path, listening.resolve);
-    await listening.promise;
-  } finally { process.umask(umask); }
+  // No process.umask(): it is process-wide, and omp children spawned while listen() is pending would inherit it.
+  // privateDir() already keeps others out of the directory; the chmod is for the socket file itself.
+  server.listen(path, listening.resolve);
+  await listening.promise;
+  chmodSync(path, 0o600);
   server.on("error", error => options.log("host socket: " + String(error)));
   let closing: Promise<void> | undefined;
   return {
