@@ -23,7 +23,7 @@ import { WorkspaceWatches } from "./workspace-watch";
 import { getGitFileDiff, getGitStatus } from "../git-changes";
 import { resolveGithubRepo } from "../github-repo";
 import { repositoryKey } from "../git-clone";
-import { createChildProcessEnvironment } from "../project-command-env";
+import { createGitEnvironment } from "../project-command-env";
 import { addWorktree, findCurrentWorktreePath, listWorktrees, removeWorktree, resolveProject, type WorktreeInfo } from "../worktree";
 import { projectIdentityKey } from "../paths";
 import { invalidateSessionListCache } from "../session-reader";
@@ -51,16 +51,18 @@ const NO_GIT_ORIGIN = { origin: null, mainCheckout: false } as const;
 export const gitOriginLimits = { concurrency: 8, budgetMs: 20_000 };
 const execFileAsync = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await execFileAsync("git", ["-C", cwd, ...args], {
-  encoding: "utf8", timeout: 5_000, windowsHide: true, env: createChildProcessEnvironment({ LC_ALL: "C" }),
+  encoding: "utf8", timeout: 5_000, windowsHide: true, env: createGitEnvironment({ LC_ALL: "C" }),
 })).stdout;
 
 /** Unauthorized, missing and non-repository paths answer the same as a plain folder. */
 async function gitOrigin(requested: string): Promise<Omit<GitOrigin, "path">> {
   try {
     const directory = await authorizeWorkspaceDirectory(requested);
-    const topLevel = path.resolve((await git(directory, "rev-parse", "--show-toplevel")).trim());
+    // --show-cdup is empty only at a worktree's top (and in a bare repository, which is not inside one): no comparison
+    // between Git's and the caller's path spelling (8.3 names, drive-letter case, separators), as pool preparation does.
+    const atTop = (await git(directory, "rev-parse", "--is-inside-work-tree", "--show-cdup")).trim() === "true";
     const dotGit = fs.lstatSync(path.join(directory, ".git"), { throwIfNoEntry: false });
-    const mainCheckout = !!dotGit?.isDirectory() && topLevel === path.resolve(directory);
+    const mainCheckout = !!dotGit?.isDirectory() && atTop;
     const urls = await git(directory, "config", "--null", "--get-all", "remote.origin.url").catch(() => "");
     const values = urls.split("\0").slice(0, -1);
     const [value] = values;
