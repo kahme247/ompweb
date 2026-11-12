@@ -1787,8 +1787,11 @@ export function AppShell({ appName }: { appName: string }) {
   const creationTargets = [...(hosts ?? []).filter((host) => !memberIds.has(host.id) && (poolsLoaded || host.id === LOCAL_HOST_ID)).map((host) => ({ id: host.id, label: hostName(t, host) })), ...pools.map((pool) => ({ id: `pool:${pool.id}`, label: pool.label }))];
   const chatHost = remoteHost ? hosts?.find((host) => host.id === currentHostId) : undefined;
   const settingsHostId = activeCwd ? activeHostId : currentHostId;
+  // Only a URL that still names an unresolved session is a pending restore; any
+  // other view (New Session, a project, a pooled composer) ends it.
+  const restorePending = Boolean(initialSessionId) && !initialSessionRestored;
   // While a URL session restore is pending, the sidebar's project must not offer a new chat in its place.
-  const showChat = selectedSession !== null || (initialSessionRestored && (effectiveNewSessionCwd !== null || effectivePoolProject !== null));
+  const showChat = selectedSession !== null || (!restorePending && (effectiveNewSessionCwd !== null || effectivePoolProject !== null));
   const currentRate = generationSpeed?.current;
   const rate = currentRate ?? generationSpeed?.average;
   const speed = showChat ? formatGenerationSpeed(rate) : null;
@@ -1856,7 +1859,7 @@ export function AppShell({ appName }: { appName: string }) {
     };
   }, [isMobile, locale, settingsTab, showChat]);
   // While restoring initial session from URL, don't show the placeholder
-  const showPlaceholder = initialSessionRestored && !showChat;
+  const showPlaceholder = !restorePending && !showChat;
 
   const sidebarHistory = useSidebarHistory();
   useEffect(() => {
