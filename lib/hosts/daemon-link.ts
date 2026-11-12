@@ -75,7 +75,8 @@ export class DaemonLink {
   rekey(token: string): void { this.runtime.rekey(token); }
   isUp(): boolean { return this.runtime.isUp(); }
   busy(): boolean { return this.runtime.busy(); }
-  /** An unsequenced report (`capacity`, `config_state`): sent now on an up link with room, else dropped; never replayed. */
+  /** An unsequenced report (`capacity`, `config_state`): sent now on an up link with room, never replayed. A
+   * `capacity` without room is dropped; the latest `config_state` without room goes at the next flush. */
   report(message: Extract<UpMessage, { type: "capacity" | "config_state" }>): void { this.runtime.report(message); }
   queue(body: Unsequenced<UpMessage>, key: string, options?: { counted?: boolean; session?: string | null; blob?: number; ahead?: number }): number | null { return this.runtime.queue(body, key, options); }
   output(body: Unsequenced<Extract<UpMessage, { type: "stdout" | "stderr" }>>, session: string | null): void { this.runtime.output(body.ch, body, session); }
@@ -131,15 +132,28 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
   const samples: LinkStatSample[] = [];
   let statsTimer: NodeJS.Timeout | undefined;
   let reliablePending = 0;
+  /** The latest `config_state` that found no room: the next flush sends it, so ownership is never left stale. */
+  let pendingConfig: Extract<UpMessage, { type: "config_state" }> | null = null;
 
   function report(message: Extract<UpMessage, { type: "capacity" | "config_state" }>): void {
+    if (message.type === "config_state") pendingConfig = message;
+    if (!sendReport(message)) {
+      // Room comes back on main's next ack (a full window) or the flush timer's poll (a full socket buffer).
+      if (message.type === "config_state" && linked && !stopped) flushTimer ??= setTimeout(flush, LINK_LIMITS.flushMs);
+      return;
+    }
+    if (message.type === "config_state") pendingConfig = null;
+  }
+  /** Sends `message` on an up link with room; false when it did not go. */
+  function sendReport(message: Extract<UpMessage, { type: "capacity" | "config_state" }>): boolean {
     const ws = linked;
-    if (stopped || !ws || ws.readyState !== 1 || ws.bufferedAmount >= SEND_BUFFER_BYTES || inFlightBytes >= LINK_LIMITS.unackedBytes) return;
+    if (stopped || !ws || ws.readyState !== 1 || ws.bufferedAmount >= SEND_BUFFER_BYTES || inFlightBytes >= LINK_LIMITS.unackedBytes) return false;
     const data = encodeLine({ type: "ack", ack: down.acked }) + encodeLine(message);
     const bytes = Buffer.byteLength(data);
-    if (inFlightBytes + bytes > LINK_LIMITS.unackedBytes) return;
+    if (inFlightBytes + bytes > LINK_LIMITS.unackedBytes) return false;
     ws.send(data); inFlight.push(bytes); inFlightBytes += bytes;
     ackOwed = false; appliedSince = 0;
+    return true;
   }
 
   /** Queue an uplink message under `key` (its channel, the request id of a `res`, or "stats"); its byte size, or null
@@ -278,6 +292,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
     unsentBytes = 0;
     const ws = linked;
     if (!ws || stopped) return;
+    if (pendingConfig && sendReport(pendingConfig)) pendingConfig = null;
     let text = "";
     let textBytes = 0;
     const send = (data: string | Uint8Array, bytes: number) => {

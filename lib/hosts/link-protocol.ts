@@ -188,8 +188,9 @@ export type UpMessage =
   | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
   /** v8: a fresh resource sample; unsequenced and never retained for replay. */
   | { type: "capacity"; sample: HostCapacity }
-  /** v10: the daemon's cluster configuration state, at link up and on each change, and whether the configuration it holds
-   * is this link's server's (`owned`); unsequenced and never retained for replay. */
+  /** v10: the daemon's cluster configuration state, at link up, on each change and after each host.json reload, and
+   * whether the configuration it holds is this link's server's (`owned`); unsequenced and never retained for replay,
+   * but the latest one that found the send window full goes once there is room. */
   | { type: "config_state"; state: ConfigState; owned: boolean }
   /** v6: the daemon has written `received` bytes of upload `id` for this start `attempt`, `done` once all of them are
    * written and synced; with `error` the upload failed and its staged file is gone. */

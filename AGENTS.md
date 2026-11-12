@@ -645,8 +645,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     `credentialsServer` and `configVersion` from every wire launch and sets them only for the opening link
     (`forStart`); a launch with a version needs `credentialsServer` and applies it first
     (`createClusterConfig.ensure`) or the start is refused 409 `cluster_config_failed`. `config_state
-    { state, owned }` is an unsequenced daemon report (like `capacity`: sent on an up link, dropped
-    otherwise, never replayed), at link up and on each change; the hub ignores it below v10. The
+    { state, owned }` is an unsequenced daemon report (like `capacity`, never replayed), at link up, on each
+    change and after each `host.json` reload; one that finds the send window full is not dropped: the latest goes at
+    the link's next flush (main's ack, or the poll of a full socket buffer). The hub ignores it below v10. The
     `clusterConfig` op is `{ action: "apply", version }` or `{ action: "restore" }` and answers `{ state, owned }`.
     **The version is never persisted in the resume manifest:** `ChannelTable.running()` drops it and
     `host-running.json` has no field for it, so a recovered session starts on the version already applied.
