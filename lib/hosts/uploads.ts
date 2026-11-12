@@ -11,7 +11,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { getAgentDir, sessionLocalRoot } from "../omp/paths";
 import { inspectUploadTargets, parseUploadConflictStrategy, validateUploadFileNames, type UploadConflictStrategy } from "../file-upload";
-import type { WorkspaceUploadResult } from "../workspace-types";
+import type { WorkspaceOwner, WorkspaceUploadResult } from "../workspace-types";
 import { authorizeWorkspaceDirectory } from "./workspace-roots";
 import { sessionPathKey } from "../paths";
 import { isValidSessionId } from "../session-file-references-core";
@@ -149,6 +149,11 @@ export class StagedUploads {
     private readonly send: (ack: UploadAck) => void,
     readonly dir: string = join(getAgentDir(), "omp-web", "uploads"),
   ) {}
+  /** Includes accepted controls before their first await, queued writes and still-open transfers. */
+  busy(): boolean {
+    return this.open.size > 0 || this.controls.size > 0;
+  }
+
 
   private path(id: string, kind: "part" | "json"): string {
     return join(this.dir, `${id}.${kind}`);
@@ -351,7 +356,7 @@ export class StagedUploads {
     });
   }
 
-  async publish(id: string, directory: string, name: string, conflict: UploadConflictStrategy): Promise<WorkspaceUploadResult> {
+  async publish(id: string, directory: string, name: string, conflict: UploadConflictStrategy, owner?: WorkspaceOwner): Promise<WorkspaceUploadResult> {
     if (!isUploadId(id) || typeof name !== "string" || validateUploadFileNames([name]) || parseUploadConflictStrategy(conflict) !== conflict) {
       throw new HostOpError(400, "invalid_request", "Invalid workspace upload");
     }
@@ -365,7 +370,7 @@ export class StagedUploads {
           throw new HostOpError(409, "upload_destination_conflict", "The upload already has another destination");
         }
         if (receipt.result) return receipt.result;
-        const canonical = await authorizeWorkspaceDirectory(directory);
+        const canonical = await authorizeWorkspaceDirectory(directory, owner);
         if (canonical !== receipt.canonical || !sameIdentity(await identity(canonical), receipt.parent)) throw uncertainPublication();
         const target = join(canonical, name);
         try {
@@ -377,7 +382,7 @@ export class StagedUploads {
         return receipt.result;
       }
       if (meta.name !== name) throw new HostOpError(409, "upload_destination_conflict", "The file name differs from the staged upload");
-      const canonical = await authorizeWorkspaceDirectory(directory);
+      const canonical = await authorizeWorkspaceDirectory(directory, owner);
       const part = this.path(id, "part");
       if (this.open.has(id) || await sizeOf(part) !== meta.size) throw new HostOpError(409, "upload_incomplete", "The upload has not finished");
       const parent = await identity(canonical);
@@ -429,7 +434,7 @@ export class StagedUploads {
         receipt = { directory, canonical, name, conflict, candidate, identity: owned, parent };
         meta.workspace = receipt;
         await this.saveMeta(id, meta);
-        if (await authorizeWorkspaceDirectory(directory) !== canonical || !sameIdentity(await identity(canonical), parent)
+        if (await authorizeWorkspaceDirectory(directory, owner) !== canonical || !sameIdentity(await identity(canonical), parent)
           || !sameIdentity(await identity(candidate), owned)) throw uncertainPublication();
         const inspection = inspectUploadTargets(canonical, [name]);
         if (inspection.nonReplaceable.length) throw new HostOpError(409, "upload_conflict_non_replaceable", "A directory or symbolic link cannot be replaced");

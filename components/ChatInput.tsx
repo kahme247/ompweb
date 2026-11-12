@@ -17,6 +17,7 @@ import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
 import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, getDraft, getDraftRevision, isSameDraft, markDraftEdited, mergeRecoveredText, moveDraftSubmissions, recoverDraft, requiresPromptMode, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
+import { WorkspaceFileContext } from "@/lib/workspace-file-context";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
   draftFilesToAttachedFiles,
@@ -254,6 +255,8 @@ interface Props {
   draftKey?: string;
   /** Owning host for file uploads and the @ file index (this machine when absent). */
   uploadHostId?: string;
+  /** Lazily bind a pool's real owner before staging any file bytes. Failure never falls back locally. */
+  resolveUploadHost?: () => Promise<string>;
   /** Backend-confirmed ownership relocation, distinct from navigating to a draft. */
   draftIdentityMove?: { from: string; to: string; sourceDraft?: ChatDraft };
   /** Session working directory — enables the @ file autocomplete menu */
@@ -381,6 +384,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onPromoteQueuedToSteer,
   draftKey = "new:unassigned",
   uploadHostId = LOCAL_HOST_ID,
+  resolveUploadHost,
   draftIdentityMove,
   cwd,
   activeGoal,
@@ -522,7 +526,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const historyItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const fileIndexMetaRef = useRef<{ workspaceKey: string; fetchedAt: number } | null>(null);
   const fileIndexFetchingRef = useRef<{ workspaceKey: string; controller: AbortController } | null>(null);
-  const fileIndexOwner = hostProjectKey(uploadHostId, cwd ?? "");
+  const fileSource = React.useContext(WorkspaceFileContext);
+  const sourceSessionId = fileSource?.sessionId;
+  const fileIndexOwner = `${sourceSessionId ?? ""}:${hostProjectKey(uploadHostId, cwd ?? "")}`;
   const fileIndexOwnerRef = useRef(fileIndexOwner);
   fileIndexOwnerRef.current = fileIndexOwner;
   const draftKeyRef = useRef(draftKey);
@@ -568,12 +574,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   /** Uploads in flight, by id: a chip's removal aborts its handle. */
   const uploadHandlesRef = useRef(new Map<string, UploadHandle>());
   const uploadHostIdRef = useRef(uploadHostId);
+  const resolveUploadHostRef = useRef(resolveUploadHost);
   submissionBlockedRef.current = submissionBlocked;
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
   attachedUploadsRef.current = attachedUploads;
   uploadHostIdRef.current = uploadHostId;
+  resolveUploadHostRef.current = resolveUploadHost;
 
   const captureDraft = useCallback((): ChatDraft => {
     const uploads = attachedUploadsRef.current;
@@ -684,13 +692,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!upload.file) return;
     const { id, size } = upload;
     let shownPercent = -1;
-    const handle = uploadFile(upload.file, upload.hostId, (received) => {
-      // One render per whole percent: the host acks up to every 16 ms.
-      const percent = Math.floor((received * 100) / Math.max(1, size));
-      if (percent === shownPercent) return;
-      shownPercent = percent;
-      patchUpload(id, { received });
-    }, id, (error) => patchUpload(id, { error: error === null ? null : uploadErrorMessage(error) }));
+    let active: UploadHandle | undefined;
+    let aborted = false;
+    const resolveOwner = resolveUploadHostRef.current;
+    const promise = (async () => {
+      const hostId = upload.hostId || (resolveOwner ? await resolveOwner() : uploadHostIdRef.current);
+      if (aborted) throw new DOMException("Upload cancelled", "AbortError");
+      if (!hostId) throw new Error(t("agentSession.uploadOwnerUnavailable"));
+      patchUpload(id, { hostId });
+      active = uploadFile(upload.file!, hostId, (received) => {
+        // One render per whole percent: the host acks up to every 16 ms.
+        const percent = Math.floor((received * 100) / Math.max(1, size));
+        if (percent === shownPercent) return;
+        shownPercent = percent;
+        patchUpload(id, { received });
+      }, id, (error) => patchUpload(id, { error: error === null ? null : uploadErrorMessage(error) }));
+      return await active.promise;
+    })();
+    const handle: UploadHandle = { id, promise, abort() { aborted = true; active?.abort(); } };
     uploadHandlesRef.current.set(id, handle);
     const settle = (patch: Partial<AttachedUpload>) => {
       // Removed or switched meanwhile: its abort ended it.
@@ -704,7 +723,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // new id starts over, so the cancel still pending for this one can never reach it.
       (error: unknown) => settle({ status: "error", error: uploadErrorMessage(error), ...(error instanceof UploadFailedError && error.status === 410 ? { id: newUploadId(), proof: undefined } : {}) }),
     );
-  }, [patchUpload]);
+  }, [patchUpload, t]);
 
   /** Attaches files As file and starts their uploads: up to MAX_UPLOAD_BYTES each, MAX_UPLOADS_PER_MESSAGE in all
    *  (the only refusals left, spec U2). `previewUrls[i]`: an image's thumbnail, made here when missing. Returns how
@@ -716,7 +735,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       id: newUploadId(),
       name: file.name,
       size: file.size,
-      hostId: uploadHostIdRef.current,
+      hostId: resolveUploadHostRef.current ? "" : uploadHostIdRef.current,
       file,
       received: 0,
       status: "uploading",
@@ -928,7 +947,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     uploadHandlesRef.current.delete(id);
     const hostId = attachedUploadsRef.current.find((upload) => upload.id === id)?.hostId;
     if (handle) handle.abort();
-    else if (hostId !== undefined) discardUpload(id, hostId);
+    else if (hostId) discardUpload(id, hostId);
     setAttachedUploads((prev) => {
       const removed = prev.find((upload) => upload.id === id);
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
@@ -971,7 +990,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const handle = uploadHandlesRef.current.get(id);
       uploadHandlesRef.current.delete(id);
       if (handle) handle.abort();
-      else discardUpload(id, upload.hostId);
+      else if (upload.hostId) discardUpload(id, upload.hostId);
       setAttachedUploads((prev) => prev.filter((each) => each.id !== id));
       setAttachedImages((prev) => [...prev, { data, mimeType: file.type, previewUrl, file }]);
     } catch {
@@ -1548,7 +1567,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const controller = new AbortController();
     const query = atQueryText;
     const timer = setTimeout(() => {
-      fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&hostId=${encodeURIComponent(uploadHostId)}&q=${encodeURIComponent(query)}`, { signal: controller.signal })
+      const params = new URLSearchParams({ cwd, hostId: uploadHostId, q: query });
+      if (sourceSessionId) params.set("sessionId", sourceSessionId);
+      fetch(`/api/file-index?${params}`, { signal: controller.signal })
         .then((res) => {
           if (!res.ok) throw new Error(`file search failed: ${res.status}`);
           return res.json() as Promise<{ matches?: FileIndexEntry[] }>;
@@ -1561,7 +1582,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         .catch(() => {});
     }, 150);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [needsServerSearch, atQueryText, cwd, uploadHostId, fileIndexOwner]);
+  }, [needsServerSearch, atQueryText, cwd, uploadHostId, sourceSessionId, fileIndexOwner]);
 
   const serverResultInUse = needsServerSearch
     && atServerResult !== null
@@ -1612,7 +1633,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const request = { workspaceKey, controller };
     fileIndexFetchingRef.current = request;
     setFileIndexLoading(true);
-    fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&hostId=${encodeURIComponent(uploadHostId)}`, { signal: controller.signal })
+    const params = new URLSearchParams({ cwd, hostId: uploadHostId });
+    if (sourceSessionId) params.set("sessionId", sourceSessionId);
+    fetch(`/api/file-index?${params}`, { signal: controller.signal })
       .then((res) => {
         if (!res.ok) throw new Error(`file index failed: ${res.status}`);
         return res.json() as Promise<{ files?: string[]; truncated?: boolean }>;
@@ -1635,7 +1658,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       controller.abort();
       if (fileIndexFetchingRef.current === request) fileIndexFetchingRef.current = null;
     };
-  }, [atTokenActive, cwd, uploadHostId, fileIndexOwner]);
+  }, [atTokenActive, cwd, uploadHostId, sourceSessionId, fileIndexOwner]);
 
   const applyAtCompletion = useCallback((entry: FileIndexEntry) => {
     if (!atQuery) return;

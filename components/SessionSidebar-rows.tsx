@@ -46,7 +46,7 @@ function HostGroup({ name, color, statusText, unavailableReason, collapsed, onTo
   unavailableReason: string | null;
   collapsed: boolean;
   onToggle: () => void;
-  onAdd: () => void;
+  onAdd?: () => void;
   /** Shown instead of the list when the host has no workspaces. */
   empty: string | null;
   children: ReactNode;
@@ -72,9 +72,9 @@ function HostGroup({ name, color, statusText, unavailableReason, collapsed, onTo
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" }}>{name}</span>
           {statusText && <span style={{ flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)", textTransform: "none", letterSpacing: 0 }}>{statusText}</span>}
         </button>
-        <SidebarIconButton label={t("hosts.addWorkspaceOn", { host: name })} onClick={onAdd} disabled={unavailableReason !== null}>
+        {onAdd && <SidebarIconButton label={t("hosts.addWorkspaceOn", { host: name })} onClick={onAdd} disabled={unavailableReason !== null}>
           <Plus size={14} strokeWidth={1.9} aria-hidden="true" />
-        </SidebarIconButton>
+        </SidebarIconButton>}
       </div>
       {!collapsed && (
         <div
@@ -124,6 +124,8 @@ interface ProjectRowProps {
   /** The active search query; each session row can then list its hits. */
   searchQuery?: string;
   onOpenSearchMatch?: (session: SessionInfo, target: SearchMatchTarget) => void;
+  /** A pinned project of a cluster member: its node's name, status text and, while its link is down, why it cannot be used. */
+  node?: { label: string; statusText?: string | null; unavailableReason?: string | null };
 }
 
 /** One project in the sidebar: a card row matching the session items' visual
@@ -159,8 +161,11 @@ function ProjectRow({
   onSessionDeleted,
   searchQuery,
   onOpenSearchMatch,
+  node,
 }: ProjectRowProps) {
   const { t } = useI18n();
+  // The title is invisible to keyboards and screen readers: say the reason in text too.
+  const reasonId = useId();
   const [hovered, setHovered] = useState(false);
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
@@ -189,7 +194,7 @@ function ProjectRow({
     // The sidebar already reports failed presentation writes in a toast.
     void onUpdatePresentation(project, { alias }).catch(() => {});
   }, [aliasValue, project, onUpdatePresentation]);
-  const label = project.alias ?? projectLabel(project.path);
+  const label = project.alias ?? project.name ?? projectLabel(project.path);
   const pinned = pinnable && project.pinOrder !== undefined;
   const canReorder = !pinnable || pinned;
   const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0 || activity.exited > 0));
@@ -198,7 +203,8 @@ function ProjectRow({
     : tree;
 
   return (
-    <section className="sidebar-project" data-active={isActive ? "true" : "false"} style={{ marginBottom: 12 }}>
+    <section className="sidebar-project" data-active={isActive ? "true" : "false"} style={{ marginBottom: 12, opacity: node?.unavailableReason ? 0.55 : 1 }}>
+      {node?.unavailableReason && <span id={reasonId} className="sr-only">{node.unavailableReason}</span>}
       <ConfirmDialog
         open={confirmRemove}
         onOpenChange={setConfirmRemove}
@@ -291,7 +297,7 @@ function ProjectRow({
               content={(
                 <span style={{ display: "grid", gap: 3, maxWidth: 360, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 11 }}>
                   <strong style={{ fontFamily: "inherit", fontSize: 11 }}>{t("sessionSidebar.launchConfigDirectory")}</strong>
-                  <span>{project.path}</span>
+                  <span>{project.poolId ? project.origin : project.path}</span>
                   {project.launchConfig?.profile && <span>profile: {project.launchConfig.profile}</span>}
                   {project.launchConfig?.advisor && <span>--advisor</span>}
                   {project.launchConfig?.extraArgs?.map((arg, index) => <span key={`${arg}-${index}`}>{arg}</span>)}
@@ -303,7 +309,8 @@ function ProjectRow({
               className="sidebar-project-identity"
               onClick={() => onActivate(project)}
               aria-current={isActive ? "true" : undefined}
-              title={project.path}
+              title={node?.unavailableReason ? `${project.poolId ? project.origin : project.path}\n${node.unavailableReason}` : project.poolId ? project.origin : project.path}
+              aria-describedby={node?.unavailableReason ? reasonId : undefined}
               style={{
                 flex: "0 1 auto",
                 minWidth: 0,
@@ -339,6 +346,18 @@ function ProjectRow({
               >
                 {label}
               </span>
+              {node && (
+                <>
+                  <span className="sr-only">{t("hosts.onNode", { node: node.label })}</span>
+                  <span
+                    aria-hidden="true"
+                    title={t("hosts.onNode", { node: node.label })}
+                    style={{ flexShrink: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10.5, color: "var(--text-dim)" }}
+                  >
+                    {node.statusText ? `${node.label} · ${node.statusText}` : node.label}
+                  </span>
+                </>
+              )}
             </button>
             </Tooltip>
           )}
@@ -430,7 +449,7 @@ function ProjectRow({
           onClick={() => onToggleExpand(project)}
           aria-label={isExpanded ? t("projects.collapseProject", { name: label }) : t("projects.expandProject", { name: label })}
           aria-expanded={isExpanded}
-          title={isExpanded ? t("projects.collapseProjectTitle", { path: project.path }) : t("projects.expandProjectTitle", { path: project.path })}
+          title={isExpanded ? t("projects.collapseProjectTitle", { path: project.poolId ? label : project.path }) : t("projects.expandProjectTitle", { path: project.poolId ? label : project.path })}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center",
             width: 22, height: 26, padding: 0, flexShrink: 0,

@@ -25,6 +25,28 @@ export function cloneDirectoryName(url: string): string | null {
   return DIRECTORY_NAME.test(name) && name !== "." && name !== ".." ? name : null;
 }
 
+const USER = String.raw`[A-Za-z0-9._-]+`;
+const HOST = String.raw`[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?`;
+const PORT = String.raw`(?::\d{1,5})?`;
+const SEGMENT = String.raw`(?!\.{1,2}(?:/|$))[A-Za-z0-9._~+-]+`;
+const PATH = String.raw`${SEGMENT}(?:/${SEGMENT})*/?`;
+const HTTPS_KEY = new RegExp(String.raw`^https://(${HOST})${PORT}/(${PATH})$`);
+const SSH_KEY = new RegExp(String.raw`^ssh://(?:${USER}@)?(${HOST})${PORT}/(${PATH})$`);
+const SCP_KEY = new RegExp(String.raw`^(?:${USER}@)?(${HOST}):/?(${PATH})$`);
+
+/** Same-repository identity `<host>/<path>`, or null. Strict allow-list: the whole trimmed URL must be
+ *  `https://HOST[:PORT]/PATH`, `ssh://[USER@]HOST[:PORT]/PATH` or `[USER@]HOST:PATH`, with no other characters.
+ *  Host lower-cased; user and port ignored; the path keeps its case, loses one leading `/` (scp),
+ *  one trailing `/` and one `.git`. Null wherever cloneDirectoryName is null. */
+export function repositoryKey(url: string): string | null {
+  if (cloneDirectoryName(url) === null) return null;
+  const trimmed = url.trim();
+  const match = HTTPS_KEY.exec(trimmed) ?? SSH_KEY.exec(trimmed) ?? SCP_KEY.exec(trimmed);
+  if (!match) return null;
+  const path = match[2].replace(/\/$/, "").replace(/\.git$/, "");
+  return path ? `${match[1].toLowerCase()}/${path}` : null;
+}
+
 const MAX_PROGRESS_LINES = 200;
 const MAX_PROGRESS_CHARS = 256 * 1024;
 

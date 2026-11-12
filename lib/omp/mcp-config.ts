@@ -5,6 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "path";
 import { stripAnsi } from "../ansi";
 import { getAgentDir } from "./paths";
 import { isRecord } from "../type-guards";
+import { createGitEnvironment } from "../project-command-env";
 
 const MAX_MCP_CONFIG_BYTES = 512 * 1024;
 const MAX_DISCOVERED_MCP_CONFIG_BYTES = 5 * 1024 * 1024;
@@ -183,7 +184,7 @@ function projectRoot(cwd: string): string {
   if (cached && cached.expiresAt > Date.now()) return cached.root;
   let root: string;
   try {
-    root = resolve(execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).trim());
+    root = resolve(execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"], timeout: 10_000, env: createGitEnvironment() }).trim());
   } catch {
     // Transient git failure (hang, timeout, sick mount): fall back to the cwd
     // but do NOT cache it — a cached fallback would aim MCP reads/writes at

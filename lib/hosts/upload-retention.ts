@@ -126,6 +126,8 @@ export class UploadRetention {
   /** undefined: main has not said yet. null: keep for ever. */
   private days: number | null | undefined;
   private timer: NodeJS.Timeout | undefined;
+  private active = 0;
+  busy(): boolean { return this.active > 0; }
 
   constructor(
     private readonly file: string = join(getAgentDir(), "omp-web", "upload-retention.json"),
@@ -148,8 +150,11 @@ export class UploadRetention {
 
   /** A sweep is idempotent and skips entries that vanish under it, so two at once are harmless. It reads the setting
    * before each delete, so one still running after a change follows the new value. */
-  sweep(now = Date.now()): Promise<void> {
-    return typeof this.days === "number" ? sweepSentUploads(() => (typeof this.days === "number" ? this.days : null), now, this.roots) : Promise.resolve();
+  async sweep(now = Date.now()): Promise<void> {
+    if (typeof this.days !== "number") return;
+    this.active++;
+    try { await sweepSentUploads(() => (typeof this.days === "number" ? this.days : null), now, this.roots); }
+    finally { this.active--; }
   }
 
   /** Op setUploadRetention: keep `days` (null: for ever), then sweep without holding up the answer. The same value as

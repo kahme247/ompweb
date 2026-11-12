@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { lstat, mkdir, mkdtemp, rename, rm, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { cloneDirectoryName, type CloneFrame, type CloneProgress } from "../git-clone";
-import { createChildProcessEnvironment } from "../project-command-env";
+import { createGitEnvironment } from "../project-command-env";
 import { HostOpError } from "./link-protocol";
 import { authorizeWorkspaceDirectory, grantWorkspaceRoot } from "./workspace-roots";
 
@@ -24,7 +24,7 @@ function runGitClone(url: string, target: string, signal: AbortSignal, output: (
   return new Promise((resolve) => {
     const child = spawn("git", ["clone", "--progress", "--", url, target], {
       stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32", windowsHide: true,
-      env: createChildProcessEnvironment({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
+      env: createGitEnvironment({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
     });
     let escalation: NodeJS.Timeout | undefined;
     const kill = (force: boolean) => {
@@ -50,6 +50,7 @@ function runGitClone(url: string, target: string, signal: AbortSignal, output: (
 /** Jobs survive a web/link restart; only an unobserved job or daemon stop cancels them. */
 export class WorkspaceClones {
   private readonly jobs = new Map<string, Job>();
+  busy(): boolean { return [...this.jobs.values()].some(job => !job.terminal); }
 
   async start(id: string, parent: string, url: string): Promise<{id: string}> {
     if (typeof id !== "string" || !ID.test(id) || typeof parent !== "string" || typeof url !== "string") throw new HostOpError(400, "invalid_request", "Invalid clone request");

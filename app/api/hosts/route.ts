@@ -1,11 +1,19 @@
+import { isClusterMember, leaveCluster, sharesCredentials } from "@/lib/hosts/cluster";
 import { closeHostLink, hostsSnapshot, listHosts, notifyHostsChange } from "@/lib/hosts/hub";
-import { createHost, HostRegistryUnreadableError, revokeHost, UnknownHostError, updateHost } from "@/lib/hosts/registry";
+import { loadPools, savePools, type HostPool } from "@/lib/hosts/pools";
+import { createHost, HostRegistryUnreadableError, readHosts, revokeHost, UnknownHostError, updateHost, type HostRecord } from "@/lib/hosts/registry";
+import { abortBrokerRequests } from "@/lib/omp/auth-broker";
 import { isRecord } from "@/lib/type-guards";
 
 const MAX_LABEL_LENGTH = 100;
 const noStore = { "cache-control": "no-store" };
 
 const fail = (error: string, status: number) => Response.json({ error }, { status, headers: noStore });
+const poolStorageFailure = () => fail("The pool registry (omp-web/pools.json) cannot be read or written; fix it before changing pools", 503);
+
+function hasOnlyKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).every((key) => keys.includes(key));
+}
 
 function failFor(error: unknown) {
   if (error instanceof HostRegistryUnreadableError) {
@@ -13,6 +21,15 @@ function failFor(error: unknown) {
   }
   if (error instanceof UnknownHostError) return fail("Unknown host", 404);
   throw error;
+}
+
+/** A member keeps sharing when its own flag goes off; pools that cannot be read leave that unknown, so its requests are cut. */
+function stillShares(record: HostRecord): boolean {
+  try {
+    return sharesCredentials(record, loadPools());
+  } catch {
+    return false;
+  }
 }
 
 async function readBody(req: Request): Promise<Record<string, unknown> | null> {
@@ -47,7 +64,59 @@ function requestOrigin(req: Request): string {
 }
 
 export function GET() {
-  return Response.json(hostsSnapshot(), { headers: noStore });
+  let pools: HostPool[];
+  try {
+    pools = loadPools();
+  } catch {
+    return poolStorageFailure();
+  }
+  return Response.json({ ...hostsSnapshot(), pools }, { headers: noStore });
+}
+
+export async function PUT(req: Request) {
+  const body = await readBody(req);
+  if (!hasOnlyKeys(body, ["pools"]) || !Array.isArray(body.pools)) return fail("pools must be an array", 400);
+  let hosts: HostRecord[];
+  try {
+    hosts = readHosts();
+  } catch (error) {
+    return failFor(error);
+  }
+  const knownHosts = new Set(["local", ...hosts.map((host) => host.id)]);
+  for (const pool of body.pools) {
+    if (!hasOnlyKeys(pool, ["id", "label", "enabled", "members", "projects"])
+      || !Array.isArray(pool.members) || !Array.isArray(pool.projects)) return fail("Invalid pool configuration", 400);
+    for (const member of pool.members) {
+      if (!hasOnlyKeys(member, ["hostId", "projectsRoot", "provisioned", "draining"])
+        || typeof member.hostId !== "string" || !knownHosts.has(member.hostId)) return fail("Invalid or unknown pool member", 400);
+    }
+    for (const project of pool.projects) {
+      if (!hasOnlyKeys(project, ["id", "name", "origin", "defaultRef", "clonePaths", "addedAt", "hidden", "alias", "sortOrder", "pinOrder", "launchConfig"])
+        || (project.launchConfig !== undefined && !hasOnlyKeys(project.launchConfig, ["profile", "advisor", "extraArgs"]))) {
+        return fail("Invalid pool project configuration", 400);
+      }
+    }
+  }
+  let before: HostPool[];
+  try {
+    before = loadPools();
+  } catch {
+    return poolStorageFailure();
+  }
+  const after = body.pools as HostPool[];
+  try {
+    savePools(after);
+  } catch (error) {
+    // Core validation precedes persistence; filesystem errors carry an errno code.
+    if (isRecord(error) && typeof error.code === "string") return poolStorageFailure();
+    return fail("Invalid pool configuration", 400);
+  }
+  notifyHostsChange();
+  // Leaving the first pool, or no longer being in it, can end a host's sharing: cut off what it already has open.
+  for (const host of hosts) {
+    if (sharesCredentials(host, before) && !sharesCredentials(host, after)) abortBrokerRequests(host.id);
+  }
+  return Response.json({ pools: after }, { headers: noStore });
 }
 
 export async function POST(req: Request) {
@@ -75,14 +144,17 @@ export async function PATCH(req: Request) {
   if (!body || typeof body.id !== "string" || !body.id) return fail("id is required", 400);
   const isLocal = body.id === "local";
   if (isLocal && body.allowAgentStart !== undefined) return fail("This machine's agent-start setting cannot be changed", 400);
+  if (isLocal && body.shareCredentials !== undefined) return fail("This machine's credential sharing cannot be changed", 400);
   // An empty name resets this machine to its default name.
   const label = isLocal && typeof body.label === "string" && !body.label.trim() ? "" : parseLabel(body.label);
   if (label === null) return fail(`label must be a non-empty string of at most ${MAX_LABEL_LENGTH} characters`, 400);
-  const { allowAgentStart } = body;
+  const { allowAgentStart, shareCredentials } = body;
   if (allowAgentStart !== undefined && typeof allowAgentStart !== "boolean") return fail("allowAgentStart must be a boolean", 400);
-  if (label === undefined && allowAgentStart === undefined) return fail("Nothing to update", 400);
+  if (shareCredentials !== undefined && typeof shareCredentials !== "boolean") return fail("shareCredentials must be a boolean", 400);
+  if (label === undefined && allowAgentStart === undefined && shareCredentials === undefined) return fail("Nothing to update", 400);
   try {
-    updateHost(body.id, { label, allowAgentStart });
+    const updated = updateHost(body.id, { label, allowAgentStart, shareCredentials });
+    if (shareCredentials === false && !stillShares(updated)) abortBrokerRequests(body.id);
     notifyHostsChange();
     return Response.json({ host: hostsSnapshot().hosts.find((h) => h.id === body.id) }, { headers: noStore });
   } catch (error) {
@@ -94,10 +166,24 @@ export async function DELETE(req: Request) {
   const id = new URL(req.url).searchParams.get("id");
   if (!id) return fail("id is required", 400);
   if (id === "local") return fail("This machine cannot be revoked", 400);
+  // An unreadable registry fails before the pools change: no member is removed while its record and link remain.
+  try {
+    readHosts();
+  } catch (error) {
+    return failFor(error);
+  }
+  // A member leaves the cluster first: once its record is gone, no row is left to remove it there.
+  try {
+    const pools = loadPools();
+    if (isClusterMember(pools, id)) savePools(leaveCluster(pools, id));
+  } catch {
+    return poolStorageFailure();
+  }
   try {
     // Registry first: with the record gone a daemon that redials gets 401 instead of reconnecting.
     if (!revokeHost(id)) return fail("Unknown host", 404);
     closeHostLink(id);
+    abortBrokerRequests(id);
     notifyHostsChange();
     return Response.json({ ok: true }, { headers: noStore });
   } catch (error) {

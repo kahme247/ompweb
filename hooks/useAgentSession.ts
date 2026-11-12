@@ -230,6 +230,12 @@ export interface UseAgentSessionOptions {
   newSessionCwd: string | null;
   /** Host a fresh chat is created on; a started session carries its own `hostId`. This machine when absent. */
   newSessionHostId?: string;
+  newSessionCreationId?: string;
+  newSessionPoolId?: string;
+  newSessionProjectId?: string;
+  /** Frozen ensure_session configuration retained by the existing navigation view. */
+  newSessionInitialization?: string;
+  onNewSessionInitialization?: (body: string) => void;
   advisorEnabled?: boolean;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
@@ -313,12 +319,13 @@ function unrecordedHeldBash<T extends { command: string; after: number }>(messag
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, newSessionHostId, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved,
+    session, newSessionCwd, newSessionHostId, newSessionCreationId, newSessionPoolId, newSessionProjectId, newSessionInitialization, onNewSessionInitialization, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenUrl,
   } = opts;
   const reducedMotion = usePrefersReducedMotion();
-  const isNew = session === null && newSessionCwd !== null;
+  const pooled = Boolean(newSessionPoolId && newSessionProjectId && newSessionCreationId);
+  const isNew = session === null && (newSessionCwd !== null || Boolean(newSessionCreationId || newSessionPoolId || newSessionProjectId));
 
   const [data, setData] = useState<SessionData | null>(null);
   const [loading, setLoading] = useState(!isNew);
@@ -492,6 +499,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const knownSlashCommandNamesRef = useRef<string[]>([]);
   const warnedSlashCommandsRef = useRef(new Set<string>());
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
+  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
+    const message = notice.message.trim();
+    if (!message) return;
+    dispatchNotice({
+      type: "add",
+      notice: {
+        id: notice.id ?? createNoticeId(),
+        message,
+        type: notice.type ?? "info",
+      },
+    });
+  }, []);
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const extensionDialogClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -588,8 +607,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // must therefore be settled by the same owner that replaces/unmounts it.
   const cancelEventConnectionRef = useRef<(() => void) | null>(null);
   const reconnectTimerRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const reportedCreationErrorsRef = useRef(new WeakSet<Error>());
   const eventStreamRetryMsRef = useRef<number>(EVENT_STREAM_RETRY_MIN_MS);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
+  const creationBodyRef = useRef<{ json: string; advisor: boolean } | null>(null);
+  const createdOwnerRef = useRef<{ cwd: string; hostId?: string } | null>(null);
   const btw = useBtw(sessionIdRef);
   const { applyEvent: applyBtwFrame, refreshHistory: refreshBtwHistory, reconcile: reconcileBtw, openHistory: openBtwHistory, ask: sendBtw } = btw;
   // A btw ask can wait seconds on spawn + SSE attach: a second Enter must not send it twice.
@@ -1314,20 +1336,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const promoteNewSession = useCallback((messageCount = 0, firstMessage?: string) => {
     firstMessage ??= translate("agentSession.noMessages");
     const sid = sessionIdRef.current;
-    if (!isNew || !newSessionCwd || !sid || newSessionPromotedRef.current) return;
+    if (!isNew || !sid || newSessionPromotedRef.current) return;
+    if (pooled && (!createdOwnerRef.current?.hostId || !createdOwnerRef.current.cwd)) return;
     newSessionPromotedRef.current = true;
     onSessionCreated?.({
       id: sid,
       path: "",
-      cwd: newSessionCwd,
+      cwd: createdOwnerRef.current?.cwd ?? newSessionCwd ?? "",
       name: undefined,
       created: new Date().toISOString(),
       modified: new Date().toISOString(),
       messageCount,
       firstMessage,
-      ...(newSessionHostId ? { hostId: newSessionHostId } : {}),
+      ...(createdOwnerRef.current?.hostId ? { hostId: createdOwnerRef.current.hostId } : newSessionHostId ? { hostId: newSessionHostId } : {}),
+      ...(pooled ? { poolId: newSessionPoolId, projectId: newSessionProjectId, projectKey: `pool:${newSessionPoolId}:${newSessionProjectId}` } : {}),
     });
-  }, [isNew, newSessionCwd, newSessionHostId, onSessionCreated]);
+  }, [isNew, newSessionCwd, newSessionHostId, newSessionPoolId, newSessionProjectId, pooled, onSessionCreated]);
 
   // Assigned after connectEvents is defined. A runtime created for an empty
   // chat emits its startup frames before any stream exists, so it must be
@@ -1336,29 +1360,41 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const ensureNewSession = useCallback(async () => {
     if (sessionIdRef.current) return sessionIdRef.current;
-    if (!isNew || !newSessionCwd) return sessionIdRef.current;
+    if (!isNew) return sessionIdRef.current;
+    if ((newSessionCreationId || newSessionPoolId || newSessionProjectId) && !pooled) throw new Error(translate("agentSession.invalidPoolTarget"));
     if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
 
     const promise = (async () => {
       const selectedModel = newSessionModel ?? newSessionDefaultModel;
       if (selectedModel) setPendingModel(selectedModel);
       const toolNames = getToolNamesForPreset(toolPreset);
+      const request = {
+        ...(pooled
+          ? { creationId: newSessionCreationId, poolId: newSessionPoolId, projectId: newSessionProjectId }
+          : { cwd: newSessionCwd, ...(newSessionHostId ? { hostId: newSessionHostId } : {}) }),
+        type: "ensure_session",
+        toolNames,
+        ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
+        ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+        ...(advisorEnabled ? { advisor: true } : {}),
+      };
+      // A journal ID describes one immutable initialization, even after a lost answer.
+      if (pooled && creationBodyRef.current === null) {
+        const initialization: unknown = newSessionInitialization ? JSON.parse(newSessionInitialization) : request;
+        if (!isRecord(initialization) || initialization.type !== "ensure_session" || initialization.creationId !== newSessionCreationId || initialization.poolId !== newSessionPoolId || initialization.projectId !== newSessionProjectId || "cwd" in initialization || "hostId" in initialization || "message" in initialization) {
+          throw new Error(translate("agentSession.invalidPoolTarget"));
+        }
+        creationBodyRef.current = { json: newSessionInitialization ?? JSON.stringify(request), advisor: initialization.advisor === true };
+        onNewSessionInitialization?.(creationBodyRef.current.json);
+      }
       const res = await fetch("/api/agent/new", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cwd: newSessionCwd,
-          ...(newSessionHostId ? { hostId: newSessionHostId } : {}),
-          type: "ensure_session",
-          toolNames,
-          ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-          ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
-          ...(advisorEnabled ? { advisor: true } : {}),
-        }),
+        body: pooled ? creationBodyRef.current!.json : JSON.stringify(request),
       });
-      const body = await res.json().catch(() => ({})) as { sessionId?: unknown; error?: string; code?: string; hostOffline?: boolean; delivery?: string };
-      const offline = res.status === 503 && body.hostOffline === true;
-      if (!res.ok && !offline) throw new Error(body.error || body.code ? formatApiError(body) : `HTTP ${res.status}`);
+      const body = await res.json().catch(() => ({})) as { sessionId?: unknown; hostId?: string; cwd?: string; error?: string; code?: string; hostOffline?: boolean; delivery?: string };
+      const offline = res.status === 503 && (body.hostOffline === true || typeof body.sessionId === "string");
+      if (!res.ok && !offline) throw new Error(formatApiError({ ...body, error: body.error ?? `HTTP ${res.status}` }));
       // A host that dropped after the spawn keeps the session (503 with its id):
       // adopt it, so a retry sends there instead of starting a second session.
       const realId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null;
@@ -1367,9 +1403,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return null;
       }
       sessionIdRef.current = realId;
+      createdOwnerRef.current = { cwd: body.cwd ?? (pooled ? "" : newSessionCwd ?? ""), hostId: body.hostId ?? (pooled ? undefined : newSessionHostId) };
+      if (pooled && (!createdOwnerRef.current.hostId || !createdOwnerRef.current.cwd)) throw new Error(translate("agentSession.uploadOwnerUnavailable"));
       // The toggle handler could not persist while the chat had no id; carry
       // the pre-prompt choice over so it survives a reload after this point.
-      if (advisorEnabled) {
+      if (pooled ? creationBodyRef.current!.advisor : advisorEnabled) {
         setSessionAdvisorSpawn(realId, true);
         try {
           localStorage.setItem(`omp-advisor-enabled:${realId}`, "true");
@@ -1382,9 +1420,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (hookAliveRef.current && !promptDispatchPendingRef.current && !btwAskPendingRef.current) {
         observeCreatedSessionRef.current?.(realId);
       }
-      if (offline) throw new HostOfflineError(formatApiError(body), body.delivery === "unknown");
+      if (offline) {
+        if (hookAliveRef.current && !pooled) promoteNewSession();
+        if (pooled && body.delivery === "unknown" && body.hostOffline !== true) throw new Error(formatApiError(body));
+        throw new HostOfflineError(formatApiError(body), body.delivery === "unknown");
+      }
       return realId;
-    })();
+    })().catch((error: unknown) => {
+      if (!pooled) throw error;
+      const failure = error instanceof Error ? error : new Error(String(error));
+      reportedCreationErrorsRef.current.add(failure);
+      if (hookAliveRef.current) addNotice({ type: "error", message: failure.message });
+      throw failure;
+    });
 
     ensuringNewSessionRef.current = promise;
     try {
@@ -1392,7 +1440,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [advisorEnabled, isNew, newSessionCwd, newSessionHostId, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+  }, [advisorEnabled, isNew, pooled, newSessionCwd, newSessionHostId, newSessionCreationId, newSessionPoolId, newSessionProjectId, newSessionInitialization, onNewSessionInitialization, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, promoteNewSession, addNotice]);
+
+  const resolveUploadHost = useCallback(async () => {
+    const sid = sessionIdRef.current ?? await ensureNewSession();
+    if (!sid) throw new Error(translate("agentSession.uploadOwnerUnavailable"));
+    const hostId = createdOwnerRef.current?.hostId ?? session?.hostId;
+    if (pooled && !hostId) throw new Error(translate("agentSession.uploadOwnerUnavailable"));
+    return hostId ?? "local";
+  }, [ensureNewSession, pooled, session?.hostId]);
 
   // The system panel may initialize a dormant session, but must not create a
   // prompt or model run just to inspect the resolved system prompt.
@@ -1828,7 +1884,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         openFile: onOpenFile ? (path, name, owner) => {
           if (!hookAliveRef.current) throw new Error("File not opened: the requesting chat is no longer active");
           onOpenFile(path, name, {
-            sessionId: owner ?? sid, hostId: session?.hostId ?? newSessionHostId ?? "local", cwd: session?.cwd ?? newSessionCwd,
+            sessionId: owner ?? sid, hostId: createdOwnerRef.current?.hostId ?? session?.hostId ?? newSessionHostId ?? "local", cwd: createdOwnerRef.current?.cwd ?? session?.cwd ?? newSessionCwd,
           });
         } : undefined,
       }, sid, controller.signal);
@@ -1896,18 +1952,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
-    const message = notice.message.trim();
-    if (!message) return;
-    dispatchNotice({
-      type: "add",
-      notice: {
-        id: notice.id ?? createNoticeId(),
-        message,
-        type: notice.type ?? "info",
-      },
-    });
-  }, []);
 
   const addUnconfirmedRunErrorNotice = useCallback((
     error: string, source: ErrorAssistantSource | null, sid: string | null,
@@ -1927,11 +1971,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
     response: { value: string } | { confirmed: boolean } | { cancelled: true } | { answers: RpcAskDialogAnswer[] },
-  ) => {
+  ): Promise<boolean> => {
     const sid = sessionIdRef.current;
     if (!sid) {
       setExtensionDialog((current) => current?.id === request.id ? null : current);
-      return;
+      return true;
     }
     // Claim the dialog before awaiting: another tab answering broadcasts a
     // synchronized "cancel" for the same request id, which must not tear down
@@ -1944,7 +1988,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         id: request.id,
         ...response,
       });
-      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return true;
       // Keep the answered panel mounted briefly while the next question arrives.
       clearTimeout(extensionDialogClearTimerRef.current ?? undefined);
       extensionDialogClearTimerRef.current = setTimeout(() => {
@@ -1952,11 +1996,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (locallyAnsweredDialogRef.current === request.id) locallyAnsweredDialogRef.current = null;
         extensionDialogClearTimerRef.current = null;
       }, 250);
+      return true;
     } catch (e) {
       console.error("Failed to send extension UI response:", e);
       if (hookAliveRef.current && sessionIdRef.current === sid) {
         addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       }
+      // Let the panel take another answer: omp never got this one.
+      if (locallyAnsweredDialogRef.current === request.id) locallyAnsweredDialogRef.current = null;
+      return false;
     }
   }, [addNotice]);
 
@@ -3413,7 +3461,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // not a request to stop following the response that this prompt starts.
     userScrollIntentUntilRef.current = 0;
 
-    let recoveryKey = sessionIdRef.current ?? (newSessionCwd ? newChatDraftKey(newSessionCwd, newSessionHostId) : undefined);
+    let recoveryKey = sessionIdRef.current ?? (pooled ? `new:pool:${newSessionPoolId}:${newSessionProjectId}` : newSessionCwd ? newChatDraftKey(newSessionCwd, newSessionHostId) : undefined);
     // Set just before the prompt goes out: a lost reply from any earlier command (get_state, set_model) ran no prompt.
     let promptIssued = false;
     try {
@@ -3423,7 +3471,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // so this composer never saw a run). No turn starts then, and the
       // optimistic one must not sit there spinning.
       let queuedBehindShell = false;
-      if (isNew && newSessionCwd) {
+      if (isNew) {
         const selectedModel = newSessionModel;
         const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
         const sid = existingSid ?? await ensureNewSession();
@@ -3501,8 +3549,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Every failure here (stream connect, startup, set_model, or the prompt
       // POST itself) leaves no run to show, so roll back the optimistic bubble.
       setOptimisticUserMessage(null);
-      const mayHaveRun = toastStoppedSend(e, promptIssued);
-      if (mayHaveRun === null) {
+      const alreadyReported = e instanceof Error && reportedCreationErrorsRef.current.has(e);
+      const mayHaveRun = alreadyReported ? false : toastStoppedSend(e, promptIssued);
+      if (!alreadyReported && mayHaveRun === null) {
         addNotice({
           type: "error",
           message: e instanceof EventStreamConnectionError
@@ -3524,9 +3573,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       independentRunErrorRef.current = null;
       slashCommandRunRef.current = false;
       dispatch({ type: "end" });
-      return mayHaveRun ? { status: "accepted" } : { status: "rejected", recoveryKey };
+      return mayHaveRun ? { status: "accepted" } : { status: "rejected", recoveryKey: sessionIdRef.current ?? recoveryKey };
     }
-  }, [catchUp, eventCoalescer, isNew, newSessionCwd, newSessionHostId, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, onSessionCreated, waitForPromptSettlement, addNotice, refreshSubagentRoster, clearLiveToolResults, clearTerminalReconcileTimer, snapshotRunEntries, holdMessage]);
+  }, [catchUp, eventCoalescer, isNew, pooled, newSessionPoolId, newSessionProjectId, newSessionCwd, newSessionHostId, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, onSessionCreated, waitForPromptSettlement, addNotice, refreshSubagentRoster, clearLiveToolResults, clearTerminalReconcileTimer, snapshotRunEntries, holdMessage]);
 
   /** Abort the running agent and send the message as a fresh prompt
    * (abort_and_prompt). Only valid mid-run; the old turn's agent_end is
@@ -3640,8 +3689,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to execute shell command:", e);
       // A stopped connection may have delivered the command: it toasts and the composer does not offer it again.
-      const mayHaveRun = toastStoppedSend(e);
-      if (mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      const alreadyReported = e instanceof Error && reportedCreationErrorsRef.current.has(e);
+      const mayHaveRun = alreadyReported ? false : toastStoppedSend(e);
+      if (!alreadyReported && mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       if (!mayHaveRun) opts.chatInputRef?.current?.insertIfEmpty(inputText);
     } finally {
       bashRunningRef.current = false;
@@ -4242,7 +4292,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (accepted && ownerCurrent) promoteNewSession();
       return ownerCurrent;
     } catch (error) {
-      toastBtwError(error);
+      if (!(error instanceof Error && reportedCreationErrorsRef.current.has(error))) toastBtwError(error);
       return false;
     } finally {
       btwAskPendingRef.current = false;
@@ -4386,6 +4436,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }
     } catch (e) {
+      if (e instanceof Error && reportedCreationErrorsRef.current.has(e)) return { handled: true, error: e.message };
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
     } finally {
       if (ownsCompaction) {
@@ -4914,6 +4965,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, removeQueuedMessage, promoteQueuedToSteer, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
+    resolveUploadHost,
     btw, askBtw,
     bashRunning, pendingBash, deferredBash,
     // True while a run this UI does not own looks active from the transcript

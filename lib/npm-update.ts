@@ -1,5 +1,6 @@
 import packageJson from "../package.json";
 import { isUpdateDisabled } from "./update-policy";
+import { isNewerVersion } from "./version-compare";
 import { homedir } from "os";
 import { join, normalize, sep } from "path";
 
@@ -19,25 +20,6 @@ export interface NpmUpdateStatus {
 }
 
 let cached: { checkedAt: number; status: NpmUpdateStatus } | null = null;
-
-function parseVersion(version: string): { parts: number[]; prerelease: boolean } | null {
-  const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)(-.+)?$/);
-  if (!match) return null;
-  return { parts: match.slice(1, 4).map(Number), prerelease: Boolean(match[4]) };
-}
-
-export function isNewerVersion(availableVersion: string, currentVersion: string): boolean {
-  const available = parseVersion(availableVersion);
-  const current = parseVersion(currentVersion);
-  if (!available || !current) return false;
-
-  for (let index = 0; index < available.parts.length; index += 1) {
-    if (available.parts[index] !== current.parts[index]) {
-      return available.parts[index] > current.parts[index];
-    }
-  }
-  return !available.prerelease && current.prerelease;
-}
 
 export async function checkNpmUpdate(force = false): Promise<NpmUpdateStatus> {
   const currentVersion = packageJson.version;

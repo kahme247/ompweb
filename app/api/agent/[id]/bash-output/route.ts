@@ -17,7 +17,7 @@ export async function GET(
       const opened = await host.workspaceOps.openBashOutput(id, path);
       if (!opened.ok) return opErrorResponse(opened);
       disableIdleTimeout();
-      return new Response(workspaceReadStream(host, opened.value), { headers: {
+      return new Response(workspaceReadStream(host, opened.value, 0, opened.value.info.size - 1, request.signal), { headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Content-Disposition": "attachment; filename=\"bash-output.log\"",
         "Cache-Control": "no-store",

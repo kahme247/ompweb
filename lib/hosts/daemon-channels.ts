@@ -6,7 +6,7 @@ import { readSessionHeaderSync } from "../omp/session-files";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import type { DaemonLink } from "./daemon-link";
-import { HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
+import { CREATION_ID_RE, HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
 import { PendingRequests } from "./pending-requests";
 import { StreamSnapshot } from "./stream-snapshot";
 import { ChannelLifecycle } from "./channel-lifecycle";
@@ -50,11 +50,20 @@ type ChannelDeps = {
 };
 const collision = () => new HostOpError(409, "session_running_elsewhere", "This session is already running on another link");
 const invalid = (message = "Invalid channel request") => new HostOpError(400, "invalid_request", message);
+/** A process start's launch: the wire never names the credentials server; it is the opening link's own, and only when the hub asks. */
+function withCredentials(launch: SpawnRequest, link: DaemonLink, share: unknown): SpawnRequest {
+  const result = { ...launch };
+  delete result.shareCredentials; delete result.credentialsServer;
+  if (share === true) result.credentialsServer = link.login.url;
+  return result;
+}
 
 export class ChannelTable {
   private readonly channels = new Map<string, Channel>();
   private readonly spawning = new Map<string, Promise<Channel>>();
   private readonly pendingSpawns = new Set<Promise<Channel>>();
+  /** Kept after exit: a late retry must never create a replacement child. */
+  private readonly creations = new Map<string, { fingerprint: string; spawn: Promise<Channel> }>();
   private readonly reservedChannels = new Set<string>();
   private readonly mutating = new Map<string, Promise<void>>();
   private readonly goneLinks = new Set<string>();
@@ -66,6 +75,15 @@ export class ChannelTable {
   constructor(private readonly deps: ChannelDeps) {}
   get size(): number { return this.channels.size; }
   get spawnsInFlight(): number { return this.spawningCount; }
+  get activeTurns(): number {
+    let active = 0;
+    for (const channel of this.channels.values()) if (channel.lifecycle?.activeTurn ?? channel.pending.activeTurn) active++;
+    return active;
+  }
+  cwdForSession(id: string): string | undefined {
+    for (const channel of this.channels.values()) if (channel.pending.sessionId === id) return channel.cwd;
+    return undefined;
+  }
 
   private identity(launch: SpawnRequest): string | null {
     return launch.sessionFile ? (this.deps.sessionId?.(launch.sessionFile) ?? readSessionHeaderSync(launch.sessionFile)?.id ?? null) : null;
@@ -86,16 +104,19 @@ export class ChannelTable {
     let channel: Channel;
     if (args.expectedChannel !== undefined) {
       const advertised = this.channels.get(args.expectedChannel);
-      if (!advertised || advertised.exited || advertised.replacing || advertised.legacy !== null || args.sessionId === null || !advertised.aliases.has(args.sessionId)) {
+      const ownsCreation = typeof args.launch.creationId === "string" && advertised?.launch.creationId === args.launch.creationId;
+      if (!advertised || advertised.exited || advertised.replacing || advertised.legacy !== null
+        || (!ownsCreation && (args.sessionId === null || !advertised.aliases.has(args.sessionId)))) {
         throw new HostOpError(404, "session_not_running", "The advertised session channel is no longer running");
       }
       await advertised.startup;
-      if (advertised.exited || this.channels.get(args.expectedChannel) !== advertised || !advertised.aliases.has(args.sessionId)) {
+      if (advertised.exited || this.channels.get(args.expectedChannel) !== advertised
+        || (!ownsCreation && (args.sessionId === null || !advertised.aliases.has(args.sessionId)))) {
         throw new HostOpError(404, "session_not_running", "The advertised session channel is no longer running");
       }
       channel = advertised;
     } else {
-      channel = await this.ensure(args.sessionId, args.launch as unknown as SpawnRequest, null, undefined, args.preparing ? link.id : undefined);
+      channel = await this.ensure(args.sessionId, withCredentials(args.launch, link, args.launch.shareCredentials), null, undefined, args.preparing ? link.id : undefined);
     }
     if (this.goneLinks.has(link.id)) {
       channel.lifecycle?.linkGone(link.id);
@@ -138,8 +159,9 @@ export class ChannelTable {
       channel.transport.onExit(() => exit.resolve());
       this.stopChannel(channel);
       await exit.promise;
-      const launch = this.deps.prepareLaunch({ ...channel.launch, advisor: args.launch.advisor,
-        ...(args.launch.spawnModel ? { spawnModel: args.launch.spawnModel } : {}) });
+      // A new process: the opener's flag decides its credentials, as for any start (spec C6).
+      const launch = this.deps.prepareLaunch(withCredentials({ ...channel.launch, advisor: args.launch.advisor,
+        ...(args.launch.spawnModel ? { spawnModel: args.launch.spawnModel } : {}) }, link, args.launch.shareCredentials));
       const spawning = this.create(launch, channel.pending.sessionId, null, undefined, args.preparing ? link.id : undefined);
       this.pendingSpawns.add(spawning);
       try {
@@ -167,10 +189,14 @@ export class ChannelTable {
 
   async spawnLegacy(link: DaemonLink, args: SpawnRequest & { ch: string }): Promise<Omit<OpenChannelResult, "ch" | "joined" | "pending" | "streaming" | "advisorSpawned">> {
     if (this.goneLinks.has(link.id)) throw new HostOpError(503, "host_link_closed", "The host link is closed");
-    if (typeof args.ch !== "string" || !args.ch || this.channels.has(args.ch) || this.reservedChannels.has(args.ch)) throw invalid("Invalid channel id");
+    if (typeof args.ch !== "string" || !args.ch
+      || ((this.channels.has(args.ch) || this.reservedChannels.has(args.ch))
+        && (typeof args.creationId !== "string" || !this.creations.has(args.creationId)))) throw invalid("Invalid channel id");
     this.reservedChannels.add(args.ch);
     let channel: Channel;
-    try { channel = await this.ensure(null, args, link.id, args.ch); }
+    const launch = { ...args };
+    delete launch.shareCredentials; delete launch.credentialsServer;
+    try { channel = await this.ensure(null, launch, link.id, args.ch); }
     finally { this.reservedChannels.delete(args.ch); }
     if (this.goneLinks.has(link.id)) {
       this.stopChannel(channel);
@@ -183,6 +209,16 @@ export class ChannelTable {
   }
 
   private async ensure(id: string | null, requested: SpawnRequest, legacy: string | null, ch?: string, preparingLinkId?: string): Promise<Channel> {
+    const creationId = requested.creationId;
+    if (creationId !== undefined && (typeof creationId !== "string" || !CREATION_ID_RE.test(creationId))) throw invalid("Invalid creation identity");
+    const fingerprint = creationId === undefined ? "" : JSON.stringify([requested.cwd, requested.recordedCwd ?? null, requested.sessionFile, requested.toolNames ?? null, requested.advisor, requested.spawnModel ?? null, legacy === null ? null : ch]);
+    const creation = creationId === undefined ? undefined : this.creations.get(creationId);
+    if (creation) {
+      if (creation.fingerprint !== fingerprint) throw new HostOpError(409, "creation_conflict", "Creation identity belongs to another request");
+      const channel = await creation.spawn;
+      if (channel.exited) throw new HostOpError(409, "creation_conflict", "Creation identity belongs to a completed child");
+      return channel;
+    }
     const launch = this.deps.prepareLaunch(requested);
     const file = launch.sessionFile;
     const identity = id ?? this.identity(launch);
@@ -213,6 +249,7 @@ export class ChannelTable {
     if (id !== null && headerId === null) throw new HostOpError(404, "session_not_found", "The session launch file no longer exists");
     if (id !== null && headerId !== null && headerId !== id) throw invalid("Session identity does not match its launch file");
     const spawn = this.create(launch, identity, legacy, ch, preparingLinkId);
+    if (creationId !== undefined) this.creations.set(creationId, { fingerprint, spawn });
     this.pendingSpawns.add(spawn);
     if (key !== null) this.spawning.set(key, spawn);
     try {
@@ -248,8 +285,14 @@ export class ChannelTable {
           write: (frame, onReply) => { void this.command(channel, frame, onReply).catch(error => this.deps.log(`channel ${ch}: ${String(error)}`)); } });
       }
       spawned.transport.onLine(line => this.stdout(channel, line));
-      spawned.transport.onStderr(chunk => this.broadcast(channel, { type: "stderr", ch, chunk }));
+      // The last 500 bytes omp writes before startup settles, for the daemon's own log if it exits meanwhile; never sent on.
+      let startupStderr: Buffer | null = Buffer.alloc(0);
+      spawned.transport.onStderr(chunk => {
+        if (startupStderr) startupStderr = Buffer.concat([startupStderr, Buffer.from(chunk.slice(-500))]).subarray(-500);
+        this.broadcast(channel, { type: "stderr", ch, chunk });
+      });
       spawned.transport.onExit((code, signal) => {
+        if (startupStderr) this.deps.log(`channel ${ch}: omp exited during startup (code ${code ?? "null"}, signal ${signal ?? "none"}): ${JSON.stringify(startupStderr.toString("utf8"))}`);
         channel.exited = true; clearTimeout(channel.readyTimer); channel.noteReady(null); clearTimeout(channel.forceTimer);
         channel.lifecycle?.dispose(); channel.snapshot.clear();
         for (const pending of channel.internal.values()) { clearTimeout(pending.timer); pending.reject(new Error("omp exited")); }
@@ -263,6 +306,7 @@ export class ChannelTable {
       if (legacy === null) channel.startup = this.configure(channel).finally(() => channel.lifecycle?.setStartup(false));
       else { clearTimeout(readyTimer); noteReady(null); }
       await channel.startup;
+      startupStderr = null;
       if (channel.exited) throw new HostOpError(502, "host_process_exited", "omp exited during startup");
       this.deps.sessionsChanged?.();
       return channel;
@@ -514,7 +558,8 @@ export class ChannelTable {
   members(ch: string): DaemonLink[] { return [...(this.channels.get(ch)?.members.values() ?? [])].map(member => member.link); }
   listing(link: DaemonLink, replay = true): HelloChannel[] {
     return [...this.channels.values()].filter(channel => link.version >= 7 ? channel.legacy === null || channel.legacy === link.id : channel.legacy === link.id)
-      .map(channel => ({ ch: channel.ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? this.pendingFor(channel, link) : null }));
+      .map(channel => ({ ch: channel.ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? this.pendingFor(channel, link) : null,
+        ...(channel.launch.creationId === undefined ? {} : { creationId: channel.launch.creationId }) }));
   }
   running(): HostResumeEntry[] {
     return [...this.channels.values()].filter(channel => (channel.lifecycle?.isRunning || channel.resuming) && channel.pending.sessionId && channel.launch.sessionFile && !channel.sessionMovePending)

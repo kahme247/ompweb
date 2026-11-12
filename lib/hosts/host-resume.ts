@@ -126,14 +126,15 @@ export class HostResumeTracker {
         || !(launch.recordedCwd === null || typeof launch.recordedCwd === "string")
         || typeof launch.sessionFile !== "string" || !isAbsolute(launch.sessionFile) || typeof launch.advisor !== "boolean"
         || !(launch.toolNames === undefined || Array.isArray(launch.toolNames) && launch.toolNames.every(name => typeof name === "string"))
-        || !(launch.spawnModel === undefined || typeof launch.spawnModel === "string")) throw new Error("Invalid recovery launch");
+        || !(launch.spawnModel === undefined || typeof launch.spawnModel === "string")
+        || !(launch.credentialsServer === undefined || typeof launch.credentialsServer === "string")) throw new Error("Invalid recovery launch");
       const root = realpathSync(this.root);
       let file: string;
       try { file = realpathSync(resolve(launch.sessionFile)); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; } // A deleted session must not block the rest.
       if (!file.startsWith(root + sep) || readSessionHeaderSync(file)?.id !== entry.sessionId || seen.has(entry.sessionId)) throw new Error("Recovery session is outside its owning session root or duplicated");
       seen.add(entry.sessionId);
-      entries.push({ sessionId: entry.sessionId, launch: { cwd: launch.cwd, recordedCwd: launch.recordedCwd, sessionFile: file, advisor: launch.advisor, ...(launch.toolNames === undefined ? {} : { toolNames: launch.toolNames as string[] }), ...(launch.spawnModel === undefined ? {} : { spawnModel: launch.spawnModel }) } });
+      entries.push({ sessionId: entry.sessionId, launch: { cwd: launch.cwd, recordedCwd: launch.recordedCwd, sessionFile: file, advisor: launch.advisor, ...(launch.toolNames === undefined ? {} : { toolNames: launch.toolNames as string[] }), ...(launch.spawnModel === undefined ? {} : { spawnModel: launch.spawnModel }), ...(launch.credentialsServer === undefined ? {} : { credentialsServer: launch.credentialsServer }) } });
     }
     return entries;
   }

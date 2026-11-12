@@ -193,6 +193,11 @@ export type ExtensionUiRequest =
       method: "select";
       title: string;
       options: string[];
+      /** omp's checkbox list (ask multi-select): `checkedIndices` is the authoritative checked state. */
+      selectionMarker?: "radio" | "checkbox";
+      checkedIndices?: number[];
+      /** Leading options that get a marker; the rest are actions such as Other and Done. */
+      markableCount?: number;
       timeout?: number;
       expiresAt?: number;
     }
@@ -463,6 +468,9 @@ export interface SessionInfo {
   /** Host the session's file lives on ("local" for this machine). Set by the
    *  all-hosts session list; a host's own list leaves it out. */
   hostId?: string;
+  /** Registered logical identity; physical owner/cwd/projectRoot remain unchanged. */
+  poolId?: string;
+  projectId?: string;
 }
 
 /** Metadata for a gzip-compressed session in OMP's archive tree. */
@@ -511,6 +519,13 @@ export interface ManagedProject {
   launchConfig?: ProjectLaunchConfig;
   /** Host the project lives on ("local" for this machine). Set by GET /api/projects. */
   hostId?: string;
+  /** Logical pool target; path/hostId, when present, are diagnostic only. */
+  poolId?: string;
+  projectId?: string;
+  projectKey?: string;
+  origin?: string;
+  name?: string;
+  defaultRef?: string;
 }
 
 export interface SessionContext {

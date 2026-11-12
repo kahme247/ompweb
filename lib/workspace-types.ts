@@ -7,9 +7,11 @@ import type { BrowsableDirectory } from "./directory-browser";
 import type { CloneProgress } from "./git-clone";
 
 export interface WorkspaceFileSource { hostId: string; cwd: string | null; sessionId: string | null }
+/** Main derives this hint from a live wrapper or durable creation journal, never browser cwd. */
+export interface WorkspaceOwner { sessionId: string; cwd: string }
 
 /** `sessionFile` is main's hint of a live session's file: the host trusts it only after checking it is that session's own. */
-export interface WorkspaceFileRequest { segments: string[]; sessionId: string | null; sessionFile?: string | null }
+export interface WorkspaceFileRequest { segments: string[]; sessionId: string | null; sessionFile?: string | null; owner?: WorkspaceOwner }
 export interface WorkspaceFileInfo {
   path: string; name: string; size: number; mtimeMs: number; isDirectory: boolean;
   language: string; mime: string; previewKind: "pdf" | "docx" | null;
@@ -26,6 +28,8 @@ export interface WorkspaceWorktrees {
   projectRoot: string; projectKey: string; isGit: boolean; isTopLevel: boolean;
   currentWorktreePath: string | null; worktrees: WorktreeInfo[];
 }
+/** `mainCheckout`: the folder is the top level of an independent checkout (`.git` a real directory). */
+export interface GitOrigin { path: string; origin: string | null; mainCheckout: boolean }
 export type WorkspaceDirectoryBrowse =
   | { path: string; parentPath: string | null; directories: BrowsableDirectory[] }
   | { path: ""; parentPath: null; directories: []; drives: BrowsableDirectory[] };
@@ -39,15 +43,15 @@ export interface WorkspaceOps {
   openFile(input: WorkspaceFileRequest): Promise<OpResult<WorkspaceRead>>;
   readFileChunk(id: string, offset: number, length: number): Promise<OpResult<Uint8Array>>;
   closeFile(id: string): Promise<OpResult<null>>;
-  fileIndex(cwd: string, query: string, limit: number, kind: "all" | "file", refresh: boolean): Promise<OpResult<WorkspaceIndex>>;
+  fileIndex(cwd: string, query: string, limit: number, kind: "all" | "file", refresh: boolean, owner?: WorkspaceOwner): Promise<OpResult<WorkspaceIndex>>;
   readBashOutput(sessionId: string, path: string): Promise<OpResult<WorkspaceBashOutput>>;
   openBashOutput(sessionId: string, path: string): Promise<OpResult<WorkspaceRead>>;
-  inspectUploads(directory: string, names: string[]): Promise<OpResult<UploadTargetInspection>>;
-  publishUpload(id: string, directory: string, name: string, conflict: UploadConflictStrategy): Promise<OpResult<WorkspaceUploadResult>>;
+  inspectUploads(directory: string, names: string[], owner?: WorkspaceOwner): Promise<OpResult<UploadTargetInspection>>;
+  publishUpload(id: string, directory: string, name: string, conflict: UploadConflictStrategy, owner?: WorkspaceOwner): Promise<OpResult<WorkspaceUploadResult>>;
   watchFile(id: string, epoch: string, input: WorkspaceFileRequest): Promise<OpResult<WorkspaceFileInfo>>;
   unwatchFile(id: string, epoch: string): Promise<OpResult<null>>;
-  gitStatus(cwd: string): Promise<OpResult<GitStatusResponse>>;
-  gitDiff(cwd: string, path: string): Promise<OpResult<GitFileDiffResponse>>;
+  gitStatus(cwd: string, owner?: WorkspaceOwner): Promise<OpResult<GitStatusResponse>>;
+  gitDiff(cwd: string, path: string, owner?: WorkspaceOwner): Promise<OpResult<GitFileDiffResponse>>;
   githubRepo(cwd: string): Promise<OpResult<{ repo: string | null }>>;
   listWorktrees(cwd: string): Promise<OpResult<WorkspaceWorktrees>>;
   addWorktree(cwd: string, branch: string): Promise<OpResult<{ path: string; branch: string }>>;
@@ -60,21 +64,24 @@ export interface WorkspaceOps {
   /** The absolute path of a file in a session's `local://` directory on this host (stat'ed, never read). `sessionFile`
    * is main's hint of the live session file; the host verifies it. */
   resolveLocalFile(id: string, uri: string, sessionFile: string | null): Promise<OpResult<{ path: string }>>;
+  /** One answer per requested path, in order; at most 500 paths. */
+  gitOrigins(paths: string[]): Promise<OpResult<{ origins: GitOrigin[] }>>;
 }
 
 export const WORKSPACE_OP_PARAMS: { readonly [K in keyof WorkspaceOps]: readonly string[] } = {
   home: [], listFiles: ["input", "showHidden"], fileInfo: ["input"], readTextFile: ["input"],
   openFile: ["input"], readFileChunk: ["id", "offset", "length"], closeFile: ["id"],
-  fileIndex: ["cwd", "query", "limit", "kind", "refresh"],
+  fileIndex: ["cwd", "query", "limit", "kind", "refresh", "owner"],
   readBashOutput: ["sessionId", "path"], openBashOutput: ["sessionId", "path"],
-  inspectUploads: ["directory", "names"], publishUpload: ["id", "directory", "name", "conflict"],
+  inspectUploads: ["directory", "names", "owner"], publishUpload: ["id", "directory", "name", "conflict", "owner"],
   watchFile: ["id", "epoch", "input"], unwatchFile: ["id", "epoch"],
-  gitStatus: ["cwd"], gitDiff: ["cwd", "path"], githubRepo: ["cwd"],
+  gitStatus: ["cwd", "owner"], gitDiff: ["cwd", "path", "owner"], githubRepo: ["cwd"],
   listWorktrees: ["cwd"], addWorktree: ["cwd", "branch"], removeWorktree: ["cwd", "path", "force"],
   browseDirectories: ["path"], defaultCwd: [], startClone: ["id", "parent", "url"], readClone: ["id", "cursor"], cancelClone: ["id"],
   // Older peers cap the advertised prefix before filtering unknown capabilities.
   listFilesInRoot: ["input", "root"],
   resolveLocalFile: ["id", "uri", "sessionFile"],
+  gitOrigins: ["paths"],
 };
 
 export function isWorkspaceOp(value: string): value is keyof WorkspaceOps {
