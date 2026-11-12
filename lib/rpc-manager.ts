@@ -15,6 +15,7 @@ import {
   AgentToolGuard,
   executeAgentTool,
   type AgentToolContext,
+  type AgentToolDeliverInput,
   type AgentToolDeliverResult,
   type AgentToolSessionOps,
 } from "./agent-tools";
@@ -3369,6 +3370,9 @@ function getAgentToolGuard(): AgentToolGuard {
   return globalThis.__ompAgentToolGuard;
 }
 
+/** omp's command for each agent-tool delivery; the `Record` makes a new delivery fail to compile until it is mapped. */
+const DELIVERY_COMMAND: Record<AgentToolDeliverInput["delivery"], string> = { prompt: "prompt", steer: "steer", followUp: "follow_up" };
+
 /**
  * Real session operations behind lib/agent-tools executeAgentTool.
  * Reuses the existing spawn/resume and message-send paths (startRpcSession,
@@ -3475,7 +3479,7 @@ function createAgentToolOps(source: AgentToolContext, replaying: boolean): Agent
         }
         const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
         const waiter = input.wait ? target.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
-        await target.send({ type: input.delivery === "followUp" ? "follow_up" : input.delivery, message: input.message });
+        await target.send({ type: DELIVERY_COMMAND[input.delivery], message: input.message });
         return { waiter }; // Boxed: the lease ends at delivery, not at the turn's end.
       };
       const { waiter } = cold ? await wrapper.withPendingCommand(send, true) : await send();
