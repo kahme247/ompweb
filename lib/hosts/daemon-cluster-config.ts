@@ -444,20 +444,21 @@ export function createClusterConfig(deps: {
   /** omp's plugins in line with `target`: installs, then removals, then enabled states. Answers the first failure's last line of omp output. */
   async function reconcile(target: PluginEntry[]): Promise<string | null> {
     let failed: string | null = null;
-    const run = async (args: string[], timeoutMs: number) => {
+    // Logs name the plugin, never the install spec: a declared source can carry credentials (`git+https://user:token@…`).
+    const run = async (action: string, id: string, timeoutMs: number, spec = id) => {
       if (stopped) return;
       try {
-        await deps.runOmp(["plugin", ...args], timeoutMs, halt.signal);
+        await deps.runOmp(["plugin", action, spec], timeoutMs, halt.signal);
       } catch (error) {
         failed ??= lastLine(error);
-        deps.log(`cluster-config: omp plugin ${args.join(" ")} failed`);
+        deps.log(`cluster-config: omp plugin ${action} ${id} failed`);
       }
     };
     const key = (plugin: PluginEntry) => `${plugin.kind}:${plugin.id}`;
     try {
       let have = new Map((await installedPlugins()).map((plugin) => [key(plugin), plugin]));
       const wanted = new Set(target.map(key));
-      let installed = false;
+      const installed: PluginEntry[] = [];
       for (const plugin of target) {
         const present = have.get(key(plugin));
         if (present && (plugin.kind !== "npm" || plugin.version === null || present.version === plugin.version)) continue;
@@ -467,15 +468,21 @@ export function createClusterConfig(deps: {
           deps.log(`cluster-config: ${plugin.id} cannot be installed here (a local directory on the master)`);
           continue;
         }
-        await run(["install", spec], INSTALL_MS);
-        installed = true;
+        await run("install", plugin.id, INSTALL_MS, spec);
+        installed.push(plugin);
       }
-      for (const plugin of have.values()) if (!wanted.has(key(plugin))) await run(["uninstall", plugin.id], UNINSTALL_MS);
+      for (const plugin of have.values()) if (!wanted.has(key(plugin))) await run("uninstall", plugin.id, UNINSTALL_MS);
       // Whether a fresh install starts enabled is omp's choice: read it back.
-      if (installed && !stopped) have = new Map((await installedPlugins()).map((plugin) => [key(plugin), plugin]));
+      if (installed.length > 0 && !stopped) have = new Map((await installedPlugins()).map((plugin) => [key(plugin), plugin]));
+      // An unpinned source (a git branch, a tarball) can resolve to another version than the master runs.
+      for (const plugin of installed) {
+        const present = have.get(key(plugin));
+        if (stopped || plugin.kind !== "npm" || plugin.version === null || present?.version === plugin.version) continue;
+        failed ??= `${plugin.id}: installed ${present?.version ?? "nothing"}, the master runs ${plugin.version}`;
+      }
       for (const plugin of target) {
         const present = have.get(key(plugin));
-        if (present && present.enabled !== plugin.enabled) await run([plugin.enabled ? "enable" : "disable", plugin.id], TOGGLE_MS);
+        if (present && present.enabled !== plugin.enabled) await run(plugin.enabled ? "enable" : "disable", plugin.id, TOGGLE_MS);
       }
     } catch (error) {
       failed ??= lastLine(error);
