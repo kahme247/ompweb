@@ -41,9 +41,9 @@ From the master's omp agent directory (`~/.omp/agent`) unless another place is n
 | Environment | `.env` in the agent directory, and the "agent environment variables" of Settings → System |
 | Plugins | the set of installed plugins and whether each is enabled (K5) |
 
-A mirrored directory becomes equal to the master's: files that exist only on the member are removed from it (they are in the member's backup, K6).
+A mirrored directory becomes equal to the master's: files that exist only on the member are removed from it. The member's backup (K6) holds its configuration as it was at the first apply; a file added on the member later is removed at the next apply and is not backed up.
 
-Limits per file 5 MiB and per bundle 50 MiB; `node_modules` and `.git` directories are left out. A master configuration over a limit is not mirrored at all, and Settings says which file is over.
+Limits per file 5 MiB, per bundle 50 MiB, and 5 MiB for the list of files (many small files can exceed it); `node_modules` and `.git` directories are left out. A master configuration over a limit is not mirrored at all, and Settings says which file is over, or that there are too many.
 
 Not mirrored: `lsp.json`, `ssh.json`, themes, key bindings, sessions, history, `agent.db`, caches, and `secret-placeholder.key`.
 

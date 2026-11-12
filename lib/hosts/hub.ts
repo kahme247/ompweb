@@ -1794,8 +1794,10 @@ export async function clusterConfigOp(hostId: string, args: { action: "apply"; v
 
 /**
  * One round of startClusterConfigSync. A linked host outside the cluster that still holds this server's configuration
- * (its leave's restore failed or could not be sent) gets `restore`; each online v10 member that is not current gets
- * `apply`, which for the version it already holds costs nothing but a fresh report. Never while one of its ops is unanswered.
+ * (its leave's restore failed or could not be sent), or has not said whether it does since its link came up (that report
+ * may have been dropped), gets `restore`: its answer says, and a host that does not hold it changes nothing. Each online
+ * v10 member that is not current gets `apply`, which for the version it already holds costs nothing but a fresh report.
+ * Never while one of its ops is unanswered.
  */
 export async function syncClusterConfig(): Promise<void> {
   const members = (): Set<string> | null => {
@@ -1805,11 +1807,14 @@ export async function syncClusterConfig(): Promise<void> {
       return null; // who is a member is unknown: nobody gets either op
     }
   };
-  const idle = (link: Link) => link.status === "online" && (link.hostVersion ?? 0) >= CLUSTER_CONFIG_SINCE_VERSION && link.configOps === 0;
+  const ready = (link: Link) => (link.hostVersion ?? 0) >= CLUSTER_CONFIG_SINCE_VERSION && link.configOps === 0;
   const before = members();
   if (!before) return;
-  // Read and sent with no await between: a host that joins meanwhile gets its apply after this restore.
-  for (const link of hub().links.values()) if (!before.has(link.id) && link.configOwned && idle(link)) clusterConfigOp(link.id, { action: "restore" }).catch(() => {});
+  // Read and sent with no await between: a host that joins meanwhile gets its apply after this restore. A host without omp
+  // still gets it: its files go back before its plugins are tried.
+  for (const link of hub().links.values()) {
+    if (!before.has(link.id) && (link.configOwned || link.configState === null) && isLinkUp(link.status) && ready(link)) clusterConfigOp(link.id, { action: "restore" }).catch(() => {});
+  }
   if (![...before].some((id) => id !== LOCAL_HOST_ID)) return;
   let version: string;
   try {
@@ -1820,7 +1825,7 @@ export async function syncClusterConfig(): Promise<void> {
   // The pools again, and nothing awaited before the sends: a host that left meanwhile never gets an apply after its restore.
   for (const hostId of members() ?? []) {
     const link = hub().links.get(hostId);
-    if (hostId === LOCAL_HOST_ID || !link || !idle(link) || configCurrent(link)) continue;
+    if (hostId === LOCAL_HOST_ID || !link || link.status !== "online" || !ready(link) || configCurrent(link)) continue;
     clusterConfigOp(hostId, { action: "apply", version }).catch(() => {}); // the daemon reports a failure in its state
   }
 }

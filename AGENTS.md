@@ -552,7 +552,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `/api/hosts/cluster-config/manifest` and `/api/hosts/cluster-config/file/<64 hex digits>`, nothing
   below or beside them (`/api/hosts/[id]/cluster` and `/api/hosts/[id]/updates` answer to the id
   `cluster-config` and stay gated); each route checks the host token and membership itself
-  (`admitClusterMember`), and a reverse proxy passes them without its own authentication and
+  (`admitClusterMember`, again after the configuration is built, so a host revoked or removed meanwhile
+  gets 401/403), and a reverse proxy passes them without its own authentication and
   without redirects (exact paths, unlike the broker's prefix).
 - **Shared credentials** (`docs/specs/2026-11-10-shared-credentials-design.md`).
   A linked host's `shareCredentials` (default off; `local` never has it) makes the
@@ -622,16 +623,19 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     agent directory, and `~/.agents/skills`), `config.yml` without the `LOCAL_SETTINGS` keys (one
     constant, read by the master when it builds and by the member when it merges), with
     the agent environment variables and the plugin set. `version` is a sha256 over all of it. Limits: 5 MiB per file,
-    50 MiB per bundle (`CONFIG_LIMITS`); a configuration over one is not served at all
+    50 MiB per bundle, 5 MiB for the serialized manifest, which is what a member reads (`CONFIG_LIMITS`, shared
+    with the daemon; too many files is `bundle_too_large`); a configuration over one is not served at all
     (`ClusterConfigError`, which names a file and never its content; it reaches Settings as `masterConfigError`
     in the `hosts` snapshot). `currentClusterConfig` rebuilds only when its fingerprint changes
     (an async stat of every file, agent environment, plugin list, which is read at most every 120 s, so a
     plugin change reaches members within about two minutes, and keeps the
-    last good list when `omp plugin list` fails: a member removes the plugins the manifest lacks).
+    last good list when `omp plugin list` fails: a member removes the plugins the manifest lacks); a read
+    error in the fingerprint walk makes the fingerprint unique, so the build reports it instead of a cached manifest standing.
     `startClusterConfigSync` (`instrumentation.node.ts`) runs `syncClusterConfig` at start, every 30 s, and
     whenever `masterConfigVersion` finds a new version after a known one (a member start reads it too):
-    `clusterConfig apply` to each online v10 member that is not `configCurrent`, `restore` to an online
-    host outside the cluster that still reports a configuration of this server; never while one of that
+    `clusterConfig apply` to each online v10 member that is not `configCurrent`, `restore` to a host outside
+    the cluster whose link is up (`omp-missing` too) and that still reports a configuration of this server or has
+    not reported since its link came up (a dropped `config_state`; the answer says); never while one of that
     link's ops is unanswered. Join sends `apply` after it saves `pools.json`, leave `restore`
     after it saves; neither may await between reading the pools and saving.
   - **Protocol 10.** `open.launch.configVersion` is the master's version (64 hex digits,
@@ -654,7 +658,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     environment and `state.json` are written; any failure puts everything back and the previous
     version stays. Renames move links as links and cannot cross filesystems (`EXDEV` fails with both
     directories named); a link above an entry (`~/.agents`) is refused. Every request to the master,
-    its body included, must finish within 30 s (`clusterConfigTimings.fetchMs`). Plugins run after the
+    its body included, must finish within 30 s (`clusterConfigTimings.fetchMs`); `stop()` aborts it and a
+    running `omp plugin` command (`halt`). Plugins run after the
     files in the same queue without the start waiting (`syncPlugins`, `omp plugin`; npm pinned by
     version, a marketplace plugin has no pin); a new version with the same plugin list keeps `plugins: "current"`
     while the step re-checks it; a failure keeps `plugins: "failed"` and is retried at most
@@ -663,9 +668,10 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     server at a time. Another server's `ensure`/`apply` is refused while the recorded one is still in
     `host.json` (`foreign`); a recorded server that is no longer linked is taken over by the next apply. `owned`
     in `config_state` and in the op's answer is `holds(link server)`. A join of a host that reports
-    another server's configuration is 409 `host_in_other_cluster`. A server's `restore` leaves another
-    server's configuration alone (the answer says `owned: false`), and a session start sent before that server's restore is refused
-    after it (`left`), as is any start while a restore runs. A link that ends `"revoked"` while its server
+    another server's configuration is 409 `host_in_other_cluster`. Only the server that `holds` the configuration
+    puts it back: another server's `restore` answers at once and changes nothing (`owned: false`; a backup nobody
+    holds, such as a kept plugin list, waits for the next start), and a session start sent before that server's restore is refused
+    after it (`left`), as is any start while the holder's restore runs. A link that ends `"revoked"` while its server
     `holds` the configuration awaits `restore` before the daemon shuts down: no other server could put it back.
   - **Placement.** `isHostConfigCurrent`: `local` and hosts outside the cluster always; a member only when it reports
     this server's version, `files` and `plugins` current. `selectPoolHost` skips a member that is not;
@@ -1702,7 +1708,7 @@ during the wait.
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives. omp reports it back as `hide` (it reads `hide`/`disableModelInvocation`/`disable-model-invocation`). Frontmatter is omp's only per-skill "hide from model, keep `/skill:`" knob; `disabledExtensions: ["skill:<name>"]` removes the skill entirely.
 - Only user-owned skills are togglable: `getSkillToggleRoots()` (allowed file roots — workspaces the user opened — plus replica scan roots) is the single allowlist for both PATCH and the `togglable` flag GET returns; it is `main`'s pre-CLI allowlist, unchanged. Skills omp lists from anywhere else (the plugin cache, registry installs, custom directories outside a workspace) render a disabled toggle — their files belong to an installer and an update would discard the edit. Never widen PATCH to whatever omp lists.
 - `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
-- `GET /api/plugins`, `POST /api/plugins`, `GET /api/skills`, `POST /api/skills/check` and `POST /api/skills/update` take no `cwd` for the user level (`loadUserSkillsWithInstallInfo`; omp runs in the agent directory, `ensureAgentDir`). The GET routes have no project scope; a project-scope `POST /api/plugins` or `/api/skills/check` without a `cwd` answers 400 `cwd_required`, and `/api/skills/update` answers 400 `cwd_package_scope_required`. Settings uses this for a cluster session on another member, whose project is not on this machine.
+- `GET /api/plugins`, `POST /api/plugins`, `GET /api/skills`, `POST /api/skills/check` and `POST /api/skills/update` take no `cwd` for the user level (`loadUserSkillsWithInstallInfo`; omp runs in the agent directory, `ensureAgentDir`; the replica scan reads the user roots only, before names are deduplicated, so an agent directory below a project keeps its user skills). The GET routes have no project scope; a project-scope `POST /api/plugins` or `/api/skills/check` without a `cwd` answers 400 `cwd_required`, and `/api/skills/update` answers 400 `cwd_package_scope_required`. Settings uses this for a cluster session on another member, whose project is not on this machine.
 
 ### Updates: web server versus host software
 - **Settings → System** owns the web server's settings and application update. `GET /api/app-update` and its prepare/commit flow remain web-server-only; a compiled web server still links to the release download page.

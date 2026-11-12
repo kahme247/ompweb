@@ -344,10 +344,11 @@ the cluster keeps its own configuration, managed on that machine.
   `terminal.*`, `lsp.*` and `auth.broker.*`. A member keeps its own value for each of them as
   it was when the host joined, or none; a change made on the member afterwards is reset at the
   next apply.
-- **Limits:** a file over 5 MiB, or a configuration over 50 MiB in all, is not mirrored at all:
-  this machine serves no configuration, a cluster session start on a member is refused (409
-  `cluster_config_invalid`), placement skips every member, and **Settings → Hosts** names the
-  file that is over. A `config.yml` that is not a YAML map or a file that cannot be read does
+- **Limits:** a file over 5 MiB, a configuration over 50 MiB in all, or so many files that their
+  list is over 5 MiB, is not mirrored at all: this machine serves no configuration, a cluster
+  session start on a member is refused (409 `cluster_config_invalid`), placement skips every
+  member, and **Settings → Hosts** names the file that is over, or says there are too many
+  files. A `config.yml` that is not a YAML map or a file that cannot be read does
   the same. Each download a member makes (the list of files, and each file) must finish within
   30 s, body included; a 5 MiB file needs roughly 1.4 Mbit/s, and a member on a slower link
   does not update.

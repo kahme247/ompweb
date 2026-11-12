@@ -22,8 +22,6 @@ const LIST_MS = 60_000;
 const INSTALL_MS = 300_000;
 const UNINSTALL_MS = 120_000;
 const TOGGLE_MS = 60_000;
-// The manifest lists paths and hashes; a bundle at its 50 MiB limit is still far below this.
-const MANIFEST_BYTES = 5_242_880;
 // The mirrored entries, and the `.yaml` names omp reads when a `.yml` is absent: a member's own one waits in the backup
 // under its own name, so the live tree holds only the manifest's `.yml`.
 const ENTRIES: readonly { root: ConfigRoot; path: string }[] = [...MIRRORED, { root: "agent", path: "config.yaml" }, { root: "agent", path: "models.yaml" }];
@@ -165,7 +163,8 @@ export function createClusterConfig(deps: {
   roots(): Record<ConfigRoot, string>;
   stateDir(): string; // <agent dir>/omp-web
   fetch(serverUrl: string, path: string, signal: AbortSignal): Promise<Response>; // authenticated by the caller; path starts with /api/hosts/cluster-config/
-  runOmp(args: string[], timeoutMs: number): Promise<string>;
+  /** `signal` (stop()) ends the command early. */
+  runOmp(args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string>;
   commandExists(command: string): Promise<boolean>;
   onState(state: ConfigState): void; // also when the server holding the configuration changes: see holds()
   /** Whether `serverUrl` is one of this daemon's configured links (host.json), connected or not. */
@@ -185,7 +184,7 @@ export function createClusterConfig(deps: {
   let restoring = 0;
   let queue: Promise<unknown> = Promise.resolve();
   const inflight = new Map<string, Promise<void>>();
-  /** Aborts every request to the master at stop(). */
+  /** Aborts every request to the master, and every omp command, at stop(). */
   const halt = new AbortController();
   /** Servers whose leave (`restore`) came after their last `apply`: a start one of them sent before it never applies again. */
   const left = new Set<string>();
@@ -197,6 +196,11 @@ export function createClusterConfig(deps: {
   // A holder this daemon no longer links to (re-linked at a new address, or removed) holds nothing back: the server asking takes over.
   const foreign = (serverUrl: string) =>
     owner !== null && owner !== serverUrl && deps.isLinked(owner) ? `This host runs the cluster configuration of ${owner}; it must leave that cluster first` : null;
+  /**
+   * Whether `serverUrl` decides over the configuration this host holds: it is the recorded holder, or that holder is no
+   * longer linked, so its apply takes the host over and its restore puts the member's own back.
+   */
+  const holds = (serverUrl: string) => owner !== null && foreign(serverUrl) === null;
   const dirs = () => {
     const cc = join(deps.stateDir(), "cluster-config");
     return { cc, objects: join(cc, "objects"), stage: join(cc, "stage"), trash: join(cc, "trash"), stateFile: join(cc, "state.json"), own: join(deps.stateDir(), "own-config") };
@@ -207,7 +211,7 @@ export function createClusterConfig(deps: {
     queue = run.catch(() => undefined);
     return run;
   };
-  const installedPlugins = () => listPlugins((args) => deps.runOmp(args, LIST_MS));
+  const installedPlugins = () => listPlugins((args) => deps.runOmp(args, LIST_MS, halt.signal));
 
   function failure(error: unknown, what: string): HostOpError {
     if (error instanceof HostOpError) return error; // reported where it was raised
@@ -244,7 +248,7 @@ export function createClusterConfig(deps: {
         await res.body?.cancel();
         fail(`the master answered ${res.status} for the manifest`);
       }
-      return readBody(res, MANIFEST_BYTES, `the manifest is longer than ${MANIFEST_BYTES} bytes`);
+      return readBody(res, CONFIG_LIMITS.manifestBytes, `the manifest is longer than ${CONFIG_LIMITS.manifestBytes} bytes`);
     });
     return checkManifest(parseJson(body.toString("utf8"), "the manifest"));
   }
@@ -428,7 +432,7 @@ export function createClusterConfig(deps: {
     const run = async (args: string[], timeoutMs: number) => {
       if (stopped) return;
       try {
-        await deps.runOmp(["plugin", ...args], timeoutMs);
+        await deps.runOmp(["plugin", ...args], timeoutMs, halt.signal);
       } catch (error) {
         failed ??= lastLine(error);
         deps.log(`cluster-config: omp plugin ${args.join(" ")} failed`);
@@ -585,8 +589,8 @@ export function createClusterConfig(deps: {
     const recovery = leaving === null;
     const d = dirs();
     if (!exists(d.own)) return;
-    // Another server's configuration: not this server's to put back.
-    if (leaving !== null && foreign(leaving)) return;
+    // Only the server it reports holding the configuration (holds) puts it back; for any other this changes nothing.
+    if (leaving !== null && !holds(leaving)) return;
     if (stopped) throw failure(new Error("the host daemon is stopping"), "restoring");
     let ownPlugins: PluginEntry[] | null;
     try {
@@ -697,17 +701,15 @@ export function createClusterConfig(deps: {
     /** `serverUrl` no longer counts this host as a member: its configuration gives way to the member's own; another server's stays. */
     restore(serverUrl: string): Promise<void> {
       left.add(serverUrl);
+      // Another server's configuration: nothing to put back, and that server's starts are not refused while the queue runs.
+      if (foreign(serverUrl)) return Promise.resolve();
       restoring++;
       return enqueue(() => restoreNow(serverUrl)).finally(() => {
         restoring--;
       });
     },
     state,
-    /**
-     * Whether `serverUrl` decides over the configuration this host holds: it is the recorded holder, or that holder is no
-     * longer linked, so its apply takes the host over and its restore puts the member's own back.
-     */
-    holds: (serverUrl: string) => owner !== null && foreign(serverUrl) === null,
+    holds,
     async stop(): Promise<void> {
       stopped = true;
       halt.abort();

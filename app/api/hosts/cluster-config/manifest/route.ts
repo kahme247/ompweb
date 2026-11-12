@@ -5,7 +5,11 @@ export async function GET(request: Request) {
   const host = admitClusterMember(request);
   if (host instanceof Response) return host;
   try {
-    return Response.json((await currentClusterConfig()).manifest, { headers: { "cache-control": "no-store" } });
+    const current = await currentClusterConfig();
+    // Admitted again: the host may have been revoked or left the cluster while the configuration was built.
+    const again = admitClusterMember(request);
+    if (again instanceof Response) return again;
+    return Response.json(current.manifest, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     return configErrorResponse(host.id, error);
   }

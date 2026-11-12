@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -41,15 +42,20 @@ function pluginList(): Promise<PluginEntry[]> {
   return readPluginList();
 }
 
-const statOrNull = (path: string): Promise<Stats | null> => stat(path).catch(() => null);
-
 /**
  * Path, file identity (device, inode), size, modification and change time, and executable bit of every file `buildManifest` would read, following links, without
  * reading any content. Mirrors buildManifest's walk (skipped `.git` and `node_modules`, link loops, `.yaml` standing in
- * for an absent `.yml`); a read error here only leaves the file out, and buildManifest then reports it.
+ * for an absent `.yml`). A read error makes the fingerprint unlike any other, so buildManifest runs and reports it
+ * instead of a cached manifest standing.
  */
 async function treeFingerprint(roots: Record<ConfigRoot, string>): Promise<string> {
   const parts: string[] = [];
+  // Missing as buildManifest counts it (a broken link included); any other error is unreadable.
+  const statOrNull = (path: string): Promise<Stats | null> =>
+    stat(path).catch((error: NodeJS.ErrnoException) => {
+      if (!["ENOENT", "ELOOP", "ENOTDIR"].includes(error.code ?? "")) parts.push(randomUUID());
+      return null;
+    });
   const note = (path: string, stat: Stats) => parts.push(`${path}\0${stat.dev}\0${stat.ino}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0${stat.mode & 0o100}`);
   const walk = async (dir: string, walking: Set<string>) => {
     let real: string;
@@ -58,6 +64,7 @@ async function treeFingerprint(roots: Record<ConfigRoot, string>): Promise<strin
       real = await realpath(dir);
       names = await readdir(dir);
     } catch {
+      parts.push(randomUUID());
       return;
     }
     if (walking.has(real)) return;

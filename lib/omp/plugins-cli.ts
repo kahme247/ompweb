@@ -18,8 +18,8 @@ export function parseJsonLoose<T>(stdout: string): T | null {
   }
 }
 
-/** Runs `omp <args>` and answers its stdout; rejects when omp is missing or fails (the message is omp's own output, never more than its last 600 characters). */
-export function runOmpCli(args: string[], timeoutMs: number): Promise<string> {
+/** Runs `omp <args>` and answers its stdout; rejects when omp is missing or fails, or when `signal` aborts it (the message is omp's own output, never more than its last 600 characters). */
+export function runOmpCli(args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string> {
   const bin = resolveOmpBin();
   if (!bin) return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN."));
   const target = wrapWindowsScript(bin, args);
@@ -27,7 +27,7 @@ export function runOmpCli(args: string[], timeoutMs: number): Promise<string> {
     execFile(
       target.file,
       target.args,
-      { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, env: createChildProcessEnvironment({ FORCE_COLOR: "0", NO_COLOR: "1" }), windowsHide: true },
+      { timeout: timeoutMs, signal, maxBuffer: 16 * 1024 * 1024, env: createChildProcessEnvironment({ FORCE_COLOR: "0", NO_COLOR: "1" }), windowsHide: true },
       (error, stdout, stderr) => {
         if (!error) return resolve(stdout);
         const detail = (stderr || stdout || error.message).replace(ANSI_RE, "").trim();

@@ -7,7 +7,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ hash
   const { hash } = await params;
   if (!/^[0-9a-f]{64}$/.test(hash)) return configFail("Not found", 404);
   try {
-    const bytes = (await currentClusterConfig()).content(hash);
+    const current = await currentClusterConfig();
+    // Admitted again: the host may have been revoked or left the cluster while the configuration was built.
+    const again = admitClusterMember(request);
+    if (again instanceof Response) return again;
+    const bytes = current.content(hash);
     if (!bytes) return configFail("Not found", 404);
     // buildManifest's bytes are Buffers (never SharedArrayBuffer-backed), which BodyInit accepts.
     return new Response(bytes as Uint8Array<ArrayBuffer>, { headers: { "content-type": "application/octet-stream", "cache-control": "no-store" } });

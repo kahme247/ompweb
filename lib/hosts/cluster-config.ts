@@ -3,7 +3,8 @@ import { readdirSync, readFileSync, realpathSync, statSync, type Stats } from "n
 import { join } from "node:path";
 import { isMap, parseDocument, YAMLMap, type Document } from "yaml";
 
-export const CONFIG_LIMITS = { fileBytes: 5_242_880, bundleBytes: 52_428_800 };
+/** `manifestBytes`: the longest manifest a member reads (daemon-cluster-config.ts), as the routes serialize it. */
+export const CONFIG_LIMITS = { fileBytes: 5_242_880, bundleBytes: 52_428_800, manifestBytes: 5_242_880 };
 
 export type ConfigRoot = "agent" | "home";
 
@@ -216,5 +217,10 @@ export function buildManifest(
   const plugins = [...extra.plugins].sort((a, b) => compare(a.kind, b.kind) || compare(a.id, b.id));
   const agentEnv = Object.fromEntries(Object.keys(extra.agentEnv).sort().map((key) => [key, extra.agentEnv[key]]));
   const version = sha256(canonicalJson({ files, agentEnv, plugins }));
-  return { manifest: { version, files, agentEnv, plugins }, content: (hash) => contents.get(hash) ?? null };
+  const manifest = { version, files, agentEnv, plugins };
+  // Empty files add entries but no bytes to the bundle: their count alone can make the manifest longer than a member reads.
+  if (Buffer.byteLength(JSON.stringify(manifest)) > CONFIG_LIMITS.manifestBytes) {
+    throw new ClusterConfigError("bundle_too_large", `too many files to mirror (${files.length}): their list exceeds ${CONFIG_LIMITS.manifestBytes} bytes`);
+  }
+  return { manifest, content: (hash) => contents.get(hash) ?? null };
 }
