@@ -281,7 +281,8 @@ try {
       }
     });
   }
-  await step("temp dirs removed", () => rmSync(temp, { recursive: true, force: true }));
+  // Windows keeps the exiting omp runner's files locked for a moment after `ompweb host` stops.
+  await step("temp dirs removed", () => rmSync(temp, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 }));
 }
 
 if (failed && log) console.log(`--- ompweb output ---\n${log}`);
