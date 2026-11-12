@@ -1,0 +1,8 @@
+{
+  "name": "@kahme247/ompweb-omp",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.19.0"
+  }
+}
