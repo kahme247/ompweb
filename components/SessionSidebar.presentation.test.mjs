@@ -151,14 +151,20 @@ test("the sidebar orders a cluster's pool projects and its members' projects as 
       fireEvent.click(container.querySelectorAll(`[aria-label="${translate("commandPalette.actions")}"]`)[0]);
       fireEvent.click(await screen.findByRole("menuitem", { name: translate("projects.moveDown") }));
       await waitFor(() => assert.equal(errors.length, 1));
+      assert.deepEqual(errors, [translate("projects.reorderFailed")]);
+      assert.deepEqual(writes, [
+        { poolId: "cluster", updates: [{ projectId: "x", sortOrder: 0 }] },
+        { updates: [{ cwd: "/l", sortOrder: 1 }] },
+      ]);
+      // Moving the offline member's own project would change its store: refused before anything is written.
+      fireEvent.click(container.querySelectorAll(`[aria-label="${translate("commandPalette.actions")}"]`)[2]);
+      fireEvent.click(await screen.findByRole("menuitem", { name: translate("projects.moveUp") }));
+      await waitFor(() => assert.equal(errors.length, 2));
+      assert.match(errors[1], /Build box/);
+      assert.equal(writes.length, 2, "nothing written for a move that needs an offline member");
     } finally {
       toast.error = originalError;
     }
-    assert.deepEqual(errors, [translate("projects.reorderFailed")]);
-    assert.deepEqual(writes, [
-      { poolId: "cluster", updates: [{ projectId: "x", sortOrder: 0 }] },
-      { updates: [{ cwd: "/l", sortOrder: 1 }] },
-    ]);
   } finally {
     cleanup();
     globalThis.fetch = original.fetch;

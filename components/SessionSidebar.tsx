@@ -1149,9 +1149,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       });
       batches.set(store, batch);
     });
+    // A move that must change an offline member's positions is refused before anything is written.
+    const offline = [...batches.keys()].map((store) => (store.startsWith("pool:") ? null : hostUnavailableReason(store))).find((reason) => reason !== null);
+    if (offline) {
+      toast.error(offline);
+      orderWriteBusyRef.current = false;
+      return;
+    }
     let failed = false;
     try {
-      // shortcut: one request per store, not atomic across stores; a store that fails (an offline member, say) keeps its old indices until a later move reaches it.
+      // shortcut: one request per store, not atomic across stores; a store that fails unexpectedly keeps its old indices until a later move reaches it.
       for (const { target, updates } of batches.values()) {
         // Within a store the server applies every entry in a single atomic
         // registry save, so per-project writes can't interleave and lose
@@ -1169,7 +1176,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     } finally {
       orderWriteBusyRef.current = false;
     }
-  }, [loadProjects, pinsActive, t]);
+  }, [hostUnavailableReason, loadProjects, pinsActive, t]);
 
   const handleProjectDrop = useCallback(async (target: ManagedProject) => {
     const source = draggedProject;
