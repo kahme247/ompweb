@@ -97,7 +97,7 @@ test("a pinned project row names its node; other rows carry no node label", () =
   }
 });
 
-test("the sidebar lists a cluster's pool projects before its members' pinned projects, and marks an offline node", async () => {
+test("the sidebar orders a cluster's pool projects and its members' projects as one list, and marks an offline node", async () => {
   const original = { fetch: globalThis.fetch, Worker: globalThis.Worker, SharedWorker: globalThis.SharedWorker, matchMedia: window.matchMedia };
   globalThis.Worker = FakeWorker;
   globalThis.SharedWorker = undefined;
@@ -107,14 +107,19 @@ test("the sidebar lists a cluster's pool projects before its members' pinned pro
     { id: "h1", label: "Build box", status: "offline", hostVersion: null, serverVersion: 9 },
   ];
   const pools = [{ id: "cluster", label: "Cluster", enabled: true, members: [{ hostId: "local" }, { hostId: "h1" }], projects: [] }];
-  globalThis.fetch = async (input) => {
+  const writes = [];
+  globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/api/hosts") return Response.json({ hosts: hostRows, pools });
+    if (url.pathname === "/api/projects" && init.method === "PATCH") {
+      writes.push(JSON.parse(init.body));
+      return Response.json({ projects: [] });
+    }
     if (url.pathname === "/api/projects") {
       return Response.json({ projects: [
-        { path: "/a", hostId: "h1" },
-        { path: "/l", hostId: "local" },
-        { path: "pool:cluster:x", poolId: "cluster", projectId: "x", name: "shared", origin: "git@example.com:o/shared.git" },
+        { path: "/a", hostId: "h1", sortOrder: 2 },
+        { path: "/l", hostId: "local", sortOrder: 0 },
+        { path: "pool:cluster:x", poolId: "cluster", projectId: "x", name: "shared", origin: "git@example.com:o/shared.git", sortOrder: 1 },
       ] });
     }
     if (url.pathname === "/api/sessions") return Response.json({ sessions: [] });
@@ -127,13 +132,23 @@ test("the sidebar lists a cluster's pool projects before its members' pinned pro
     }));
     await waitFor(() => assert.equal(container.querySelectorAll(".sidebar-project-identity").length, 3));
     const names = [...container.querySelectorAll(".sidebar-project-identity")].map((button) => button.textContent);
-    assert.ok(names[0].startsWith("shared"), `the cluster's own project comes first: ${names.join(" | ")}`);
-    assert.ok(names[1].startsWith("a") && names[2].startsWith("l"), names.join(" | "));
+    // Manual order across the pool's registry and each member's: no store goes first.
+    assert.deepEqual(names.map((name) => name[0]), ["l", "s", "a"], names.join(" | "));
     const pinned = screen.getByRole("button", { name: /On Build box/ });
     assert.ok(pinned.textContent.includes(translate("hostsConfig.statusOffline")), "an offline node shows its status");
     const reason = container.querySelector(`[id="${pinned.getAttribute("aria-describedby")}"]`);
     assert.ok(reason?.textContent.includes("Build box"), "the button is described by the unavailable reason");
     assert.ok(screen.queryByRole("button", { name: /On This machine/ }), "this machine's pinned project names its node");
+
+    // Moving this machine's project below the pool's one writes the cluster's whole order, one batch per store.
+    fireEvent.click(container.querySelectorAll(`[aria-label="${translate("commandPalette.actions")}"]`)[0]);
+    fireEvent.click(await screen.findByRole("menuitem", { name: translate("projects.moveDown") }));
+    await waitFor(() => assert.equal(writes.length, 3));
+    assert.deepEqual(writes, [
+      { poolId: "cluster", updates: [{ projectId: "x", sortOrder: 0 }] },
+      { updates: [{ cwd: "/l", sortOrder: 1 }] },
+      { hostId: "h1", updates: [{ cwd: "/a", sortOrder: 2 }] },
+    ]);
   } finally {
     cleanup();
     globalThis.fetch = original.fetch;
