@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, Loader2, RefreshCw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import type {
+  HostUsageSummary,
   UsageBreakdownView,
   UsageGranularity,
   UsageMetricView,
@@ -34,6 +35,9 @@ function formatCurrency(amount: number): string {
   return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+/** How long after a report with a host still syncing the next one is fetched. */
+const HOST_SYNC_POLL_MS = 2000;
+
 export function UsageConfig() {
   const { t } = useI18n();
 
@@ -53,17 +57,18 @@ export function UsageConfig() {
   const chartSvgRef = useRef<SVGSVGElement | null>(null);
 
   const fetchUsage = useCallback(
-    async (isRefresh = false, signal?: AbortSignal) => {
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
-      setError(null);
+    // `poll` refetches behind the page: no spinner, and an earlier failure stays up until an answer arrives.
+    async (mode: "load" | "refresh" | "poll" = "load", signal?: AbortSignal) => {
+      if (mode === "refresh") setRefreshing(true);
+      else if (mode === "load") setLoading(true);
+      if (mode !== "poll") setError(null);
 
       try {
         const params = new URLSearchParams({
           range: timeRange,
           granularity,
         });
-        if (isRefresh) params.set("refresh", "true");
+        if (mode === "refresh") params.set("refresh", "true");
 
         const res = await fetch(`/api/usage?${params.toString()}`, { signal });
         if (!res.ok) {
@@ -71,14 +76,17 @@ export function UsageConfig() {
         }
         const data: UsageReport = await res.json();
         setReport(data);
+        setError(null);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
           return;
         }
         setError(err instanceof Error ? err.message : String(err));
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (mode !== "poll") {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [timeRange, granularity],
@@ -86,11 +94,30 @@ export function UsageConfig() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchUsage(false, controller.signal);
+    fetchUsage("load", controller.signal);
     return () => {
       controller.abort();
     };
   }, [fetchUsage]);
+
+  // The server answers after 10 s at most and lets slower hosts finish behind the report.
+  const hostsSyncing = report?.hostBreakdown?.some((host) => host.state === "syncing") ?? false;
+  useEffect(() => {
+    if (!hostsSyncing) return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const poll = () => {
+      timer = window.setTimeout(async () => {
+        await fetchUsage("poll", controller.signal);
+        if (!controller.signal.aborted) poll();
+      }, HOST_SYNC_POLL_MS);
+    };
+    poll();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [hostsSyncing, fetchUsage]);
 
   // Date range subtitle calculation
   const dateRangeSubtitle = useMemo(() => {
@@ -264,7 +291,7 @@ export function UsageConfig() {
         <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{error}</span>
         <button
           type="button"
-          onClick={() => fetchUsage(true)}
+          onClick={() => fetchUsage("refresh")}
           style={{
             marginTop: 8,
             display: "inline-flex",
@@ -291,7 +318,21 @@ export function UsageConfig() {
   const modelBreakdown = report?.modelBreakdown || [];
   const dayBreakdown = report?.dayBreakdown || [];
   const projectBreakdown = report?.projectBreakdown || [];
+  const hostBreakdown = report?.hostBreakdown || [];
+  const showHosts = hostBreakdown.length > 1;
+  const view: UsageBreakdownView = breakdownView === "host" && !showHosts ? "model" : breakdownView;
   const scanInfo = report?.scanInfo;
+
+  const hostSyncLine = (h: HostUsageSummary): string => {
+    if (h.state === "syncing") return t("usageConfig.hostSyncing");
+    if (h.state === "unsupported") return t("usageConfig.hostUnsupported");
+    if (h.state === "offline" || h.state === "stale") {
+      if (h.syncedAt == null) return t("usageConfig.hostNeverSynced");
+      const time = new Date(h.syncedAt).toLocaleString();
+      return t(h.state === "offline" ? "usageConfig.hostOffline" : "usageConfig.hostSyncFailed", { time });
+    }
+    return "";
+  };
 
   // Active hover point data
   const activeHoverPoint = hoverIndex != null && chartData ? chartData.coords[hoverIndex]?.point : null;
@@ -416,7 +457,7 @@ export function UsageConfig() {
           {/* Refresh button */}
           <button
             type="button"
-            onClick={() => fetchUsage(true)}
+            onClick={() => fetchUsage("refresh")}
             disabled={refreshing}
             title={t("usageConfig.refresh")}
             aria-label={t("usageConfig.refresh")}
@@ -437,6 +478,13 @@ export function UsageConfig() {
           </button>
         </div>
       </div>
+
+      {/* A refresh or background update that failed: what is on screen is the last report that arrived. */}
+      {error && (
+        <div role="alert" style={{ fontSize: 12, color: "var(--status-error)" }}>
+          {t("usageConfig.error")}: {error}
+        </div>
+      )}
 
       {/* 2. Top Row: Raw Token Cost & Chart */}
       <div
@@ -1008,6 +1056,25 @@ export function UsageConfig() {
               >
                 {t("usageConfig.project").toUpperCase()}
               </button>
+              {showHosts && (
+                <button
+                  type="button"
+                  aria-pressed={view === "host"}
+                  onClick={() => setBreakdownView("host")}
+                  style={{
+                    padding: "3px 8px",
+                    fontSize: 11,
+                    fontWeight: view === "host" ? 600 : 400,
+                    borderRadius: "calc(var(--radius-control) - 2px)",
+                    border: "none",
+                    background: view === "host" ? "var(--bg-selected)" : "transparent",
+                    color: view === "host" ? "var(--text)" : "var(--text-muted)",
+                    cursor: "pointer",
+                  }}
+                >
+                  {t("usageConfig.host").toUpperCase()}
+                </button>
+              )}
             </div>
           </div>
 
@@ -1017,11 +1084,13 @@ export function UsageConfig() {
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--text-dim)", textAlign: "left" }}>
                   <th style={{ padding: "6px 4px", fontWeight: 500 }}>
-                    {breakdownView === "model"
+                    {view === "model"
                       ? t("usageConfig.model")
-                      : breakdownView === "day"
+                      : view === "day"
                         ? t("usageConfig.day")
-                        : t("usageConfig.project")}
+                        : view === "host"
+                          ? t("usageConfig.host")
+                          : t("usageConfig.project")}
                   </th>
                   <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>{t("usageConfig.cost")}</th>
                   <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>{t("usageConfig.share")}</th>
@@ -1029,7 +1098,7 @@ export function UsageConfig() {
                 </tr>
               </thead>
               <tbody>
-                {breakdownView === "model" &&
+                {view === "model" &&
                   (modelBreakdown.length === 0 ? (
                     <tr>
                       <td colSpan={4} style={{ padding: "16px 4px", textAlign: "center", color: "var(--text-dim)" }}>
@@ -1060,7 +1129,7 @@ export function UsageConfig() {
                     ))
                   ))}
 
-                {breakdownView === "day" &&
+                {view === "day" &&
                   (dayBreakdown.length === 0 ? (
                     <tr>
                       <td colSpan={4} style={{ padding: "16px 4px", textAlign: "center", color: "var(--text-dim)" }}>
@@ -1086,7 +1155,7 @@ export function UsageConfig() {
                     ))
                   ))}
 
-                {breakdownView === "project" &&
+                {view === "project" &&
                   (projectBreakdown.length === 0 ? (
                     <tr>
                       <td colSpan={4} style={{ padding: "16px 4px", textAlign: "center", color: "var(--text-dim)" }}>
@@ -1095,9 +1164,12 @@ export function UsageConfig() {
                     </tr>
                   ) : (
                     projectBreakdown.map((p) => (
-                      <tr key={p.project} style={{ borderBottom: "1px solid var(--bg-subtle)" }}>
+                      <tr key={`${p.hostId}:${p.project}`} style={{ borderBottom: "1px solid var(--bg-subtle)" }}>
                         <td style={{ padding: "6px 4px", color: "var(--text)", fontWeight: 500 }}>
-                          <span title={p.project}>{p.projectName}</span>
+                          <span title={p.project}>
+                            {p.projectName}
+                            {p.hostId && p.hostId !== "local" ? ` · ${p.hostLabel}` : ""}
+                          </span>
                         </td>
                         <td style={{ padding: "6px 8px", textAlign: "right", color: "var(--text)", fontWeight: 600 }}>
                           {formatCurrency(p.cost)}
@@ -1111,6 +1183,30 @@ export function UsageConfig() {
                       </tr>
                     ))
                   ))}
+
+                {view === "host" &&
+                  hostBreakdown.map((h) => {
+                    const syncLine = hostSyncLine(h);
+                    return (
+                      <tr key={h.hostId} style={{ borderBottom: "1px solid var(--bg-subtle)" }}>
+                        <td style={{ padding: "6px 4px", color: "var(--text)", fontWeight: 500 }}>
+                          <div>{h.label || t("hostsConfig.thisMachine")}</div>
+                          {syncLine && (
+                            <div style={{ fontSize: 10, fontWeight: 400, color: "var(--text-dim)" }}>{syncLine}</div>
+                          )}
+                        </td>
+                        <td style={{ padding: "6px 8px", textAlign: "right", color: "var(--text)", fontWeight: 600 }}>
+                          {formatCurrency(h.cost)}
+                        </td>
+                        <td style={{ padding: "6px 8px", textAlign: "right", color: "var(--text-muted)" }}>
+                          {h.share.toFixed(1)}%
+                        </td>
+                        <td style={{ padding: "6px 4px", textAlign: "right", color: "var(--text-muted)" }}>
+                          {formatTokens(h.tokens)}
+                        </td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           </div>

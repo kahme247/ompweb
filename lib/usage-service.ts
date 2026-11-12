@@ -1,19 +1,17 @@
-import { statSync } from "fs";
+import { closeSync, openSync, statSync } from "fs";
 import { basename, join } from "path";
 import { readModelsConfig } from "./omp/models-config";
-import { forEachFileLineSync, invalidateSessionFileListCache, readSessionHeaderSync } from "./omp/session-files";
+import { forEachFileLineSync, readSessionHeaderSync } from "./omp/session-files";
 import { SUBAGENT_ID_RE } from "./subagent-types";
 import { isRecord } from "./type-guards";
 import {
   calculateCacheSavings,
   calculateUsageCost,
+  clearRatesCache,
   resolveModelRates,
 } from "./usage-rates";
-import { getUsageReportFromDb } from "./usage-db";
 import type {
-  UsageQueryOptions,
   UsageRecord,
-  UsageReport,
   UsageTimeRange,
 } from "./usage-types";
 
@@ -27,8 +25,23 @@ import type {
  * reload that brings in new rules.
  * v2: artifact transcripts counted; entry ids, task-summary targets and the
  * owning session's start stored.
+ * v3: lines whose numbers no request can have are skipped.
  */
-export const USAGE_PARSER_VERSION = 2;
+export const USAGE_PARSER_VERSION = 3;
+
+/** The most one request can report. A record beyond it, or with a token count that is no whole number, is a malformed
+ * line. Kept out, the rows left cannot make a report's cost sums go non-finite. */
+export const USAGE_RECORD_LIMITS = { tokens: 1e9, cost: 1e6 };
+
+/** Whether every number of `record` is one a request can have. */
+export function hasPlausibleNumbers(record: UsageRecord): boolean {
+  const count = (value: number) => Number.isInteger(value) && value >= 0 && value <= USAGE_RECORD_LIMITS.tokens;
+  return count(record.input) && count(record.output) && count(record.reasoning)
+    && count(record.cacheRead) && count(record.cacheWrite) && count(record.totalTokens)
+    && record.cost >= 0 && record.cost <= USAGE_RECORD_LIMITS.cost
+    && Math.abs(record.cacheSavings) <= USAGE_RECORD_LIMITS.cost
+    && Number.isFinite(record.timestamp) && Number.isFinite(record.sessionStarted);
+}
 
 interface SessionUsageCacheEntry {
   parserVersion: number;
@@ -77,10 +90,12 @@ function setUsageCacheEntry(filePath: string, entry: SessionUsageCacheEntry): vo
   }
 }
 
-/** Clear in-memory usage cache (useful on session mutation or manual refresh). */
+/** Clear the in-memory usage cache and the model rates cached beside it (manual refresh): both keep the prices
+ * `models.yml` had when they were read. */
 export function invalidateUsageCache(): void {
   globalThis.__ompUsageCache?.clear();
   usageCacheApproxBytes = 0;
+  clearRatesCache();
 }
 
 /**
@@ -182,17 +197,23 @@ export function computeTimeRangeBounds(
  * that session's artifacts directory (subagent, advisor, `/tan` clone,
  * extension sub-session) the records carry the owner's id and cwd rather than
  * the transcript's own header, so they count toward that session and project.
+ *
+ * A transcript that cannot be read to its end yields what was read, uncached.
+ * With `strict` that throws instead, as does an unreadable file or owner: the
+ * caller stores the result as the whole transcript.
  */
 export function parseSessionUsage(
   filePath: string,
   customModelsConfig = readModelsConfig(),
   sessionFile = filePath,
+  strict = false,
 ): UsageRecord[] {
   let stats;
   try {
     stats = statSync(filePath);
     if (!stats.isFile() || stats.size === 0) return [];
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
 
@@ -204,6 +225,8 @@ export function parseSessionUsage(
 
   const isArtifact = sessionFile !== filePath;
   const owner = isArtifact ? readSessionHeaderSync(sessionFile) : null;
+  // An owner that opens but has no header is malformed and its artifacts go by its file name; one that does not open throws.
+  if (strict && isArtifact && !owner) closeSync(openSync(sessionFile, "r"));
   let sessionId = owner?.id ?? basename(sessionFile, ".jsonl");
   let sessionCwd = owner?.cwd ?? "";
   let sessionTimestamp = stats.mtimeMs;
@@ -212,6 +235,9 @@ export function parseSessionUsage(
   let activeProvider = "";
   let activeModel = "";
   const records: UsageRecord[] = [];
+  const keep = (record: UsageRecord): void => {
+    if (hasPlausibleNumbers(record)) records.push(record);
+  };
 
   try {
     forEachFileLineSync(filePath, (rawLine) => {
@@ -293,7 +319,7 @@ export function parseSessionUsage(
             const cacheSavings = calculateCacheSavings(rawUsage, rates);
 
             if (totalTokens > 0 || cost > 0) {
-              records.push({
+              keep({
                 timestamp,
                 sessionId,
                 sessionCwd,
@@ -372,7 +398,7 @@ export function parseSessionUsage(
               const cacheSavings = calculateCacheSavings(u, rates);
 
               if (totalTokens > 0 || cost > 0) {
-                records.push({
+                keep({
                   timestamp,
                   sessionId,
                   sessionCwd,
@@ -399,8 +425,10 @@ export function parseSessionUsage(
         }
       }
     });
-  } catch {
-    // Return partially collected records on read error
+  } catch (error) {
+    if (strict) throw error;
+    // Not cached: its stamp would vouch for a transcript that was only partly read.
+    return records;
   }
 
   setUsageCacheEntry(filePath, {
@@ -412,16 +440,4 @@ export function parseSessionUsage(
   });
 
   return records;
-}
-
-/**
- * Generate full usage report over all sessions according to query options.
- * Backed by the persistent local SQLite usage database.
- */
-export async function getUsageReport(options: UsageQueryOptions = {}): Promise<UsageReport> {
-  if (options.forceRefresh) {
-    invalidateUsageCache();
-    invalidateSessionFileListCache();
-  }
-  return getUsageReportFromDb(options);
 }

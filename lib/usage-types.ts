@@ -1,7 +1,7 @@
 export type UsageTimeRange = "today" | "7d" | "30d" | "90d" | "month" | "all";
 export type UsageGranularity = "daily" | "monthly" | "projects";
 export type UsageMetricView = "cost" | "tokens";
-export type UsageBreakdownView = "model" | "day" | "project";
+export type UsageBreakdownView = "model" | "day" | "project" | "host";
 export type CostQualityTier = "provider_reported" | "model_priced" | "unpriced";
 
 export interface ModelRates {
@@ -112,6 +112,8 @@ export interface DayUsageSummary {
 export interface ProjectUsageSummary {
   project: string; // directory path
   projectName: string; // display folder name
+  hostId: string;
+  hostLabel: string;
   cost: number;
   tokens: number;
   share: number; // 0-100 percentage
@@ -135,6 +137,7 @@ export interface UsageReport {
   modelBreakdown: ModelUsageSummary[];
   dayBreakdown: DayUsageSummary[];
   projectBreakdown: ProjectUsageSummary[];
+  hostBreakdown: HostUsageSummary[];
   scanInfo: UsageReportScanInfo;
 }
 
@@ -145,4 +148,60 @@ export interface UsageQueryOptions {
   from?: number;
   to?: number;
   forceRefresh?: boolean;
+}
+
+/** One transcript as its host last saw it; a changed stamp means it must be read again. */
+export interface UsageTranscriptStamp {
+  path: string;
+  mtimeMs: number;
+  size: number;
+}
+
+export interface UsageSessionStamps {
+  session: string;
+  transcripts: UsageTranscriptStamp[];
+}
+
+/** Every transcript the host counts usage from. The host fails the op rather than leave one out it cannot examine. */
+export interface UsageTranscriptIndex {
+  parserVersion: number;
+  sessions: UsageSessionStamps[];
+}
+
+export interface UsageReadRequest {
+  session: string;
+  paths: string[];
+  /** Records of `paths[0]` that earlier answers delivered: this one continues after them. */
+  skip?: number;
+}
+
+export interface UsageTranscriptRecords extends UsageTranscriptStamp {
+  records: UsageRecord[];
+  /** The transcript has more records than one answer holds: ask for it again, skipping the ones received. */
+  more?: boolean;
+}
+
+/** `missing`: gone, or not a transcript this host lists. A path asked for and in neither list was not reached within
+ * the page limits: ask again. A file with `more` is the last of its page. */
+export interface UsageRecordsPage {
+  files: UsageTranscriptRecords[];
+  missing: string[];
+}
+
+/** `stale`: the last pull failed. `unsupported`: the host's daemon predates the usage ops. */
+export type HostUsageSyncState = "current" | "syncing" | "offline" | "stale" | "unsupported";
+
+export interface HostUsageStatus {
+  hostId: string;
+  label: string;
+  state: HostUsageSyncState;
+  /** When the stored rows were last brought up to date; null before the first full pull. */
+  syncedAt: number | null;
+}
+
+export interface HostUsageSummary extends HostUsageStatus {
+  cost: number;
+  tokens: number;
+  share: number; // 0-100 percentage
+  sessionsCount: number;
 }
