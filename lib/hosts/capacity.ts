@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { availableParallelism, loadavg } from "node:os";
+import { availableParallelism, cpus, freemem, loadavg } from "node:os";
 import { posix } from "node:path";
 
 export interface HostCapacity {
@@ -163,8 +163,29 @@ function readOptional(path: string): string | undefined {
 
 let previousCounters: CpuCounters | null = null;
 
+/** Windows has no /proc or cgroups: Node reads per-CPU times and available physical memory from the OS.
+ * shortcut: Job Object CPU/memory limits are not applied; read them if Windows workers ever run inside a job. */
+function windowsSample(): { current: CpuCounters; resources: EffectiveResources } | null {
+  let busy = 0, idle = 0;
+  for (const { times } of cpus()) {
+    // libuv's Windows `sys` is kernel time minus idle, which already includes interrupt time; `irq` repeats it.
+    busy += times.user + times.nice + times.sys;
+    idle += times.idle;
+  }
+  const available = freemem();
+  if (!Number.isSafeInteger(busy) || !Number.isSafeInteger(idle) || busy + idle <= 0 || !Number.isSafeInteger(available)) return null;
+  return { current: { busy, idle, steal: 0 }, resources: { effectiveCpus: availableParallelism(), availableMemoryBytes: available } };
+}
+
 /** Samples shared host counters; callers supply active turns, not saved sessions. */
 export function sampleHostCapacity(activeSessions: number): HostCapacity | null {
+  if (process.platform === "win32") {
+    const sample = windowsSample();
+    // Windows reports no load average; busyFraction carries the CPU pressure there.
+    const capacity = sample ? capacityFromInterval(previousCounters, sample.current, sample.resources, 0, activeSessions) : null;
+    previousCounters = sample?.current ?? null;
+    return capacity;
+  }
   if (process.platform !== "linux") return null;
   try {
     const current = parseProcStat(readFileSync("/proc/stat", "utf8"));

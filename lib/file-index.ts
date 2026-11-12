@@ -4,7 +4,7 @@ import type { Dirent } from "fs";
 import { readdir } from "node:fs/promises";
 import path from "path";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "./file-fuzzy";
-import { createChildProcessEnvironment } from "./project-command-env";
+import { createGitEnvironment } from "./project-command-env";
 import type { WorkspaceIndex } from "./workspace-types";
 const execFileAsync = promisify(execFile);
 
@@ -69,7 +69,7 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
     const gitOptions = {
       timeout: 10_000,
       maxBuffer: 64 * 1024 * 1024,
-      env: createChildProcessEnvironment({ LC_ALL: "C" }),
+      env: createGitEnvironment({ LC_ALL: "C" }),
     };
     // --cached lists index entries, including files already removed from the
     // working tree. Those would show up as results that 404 the moment anyone

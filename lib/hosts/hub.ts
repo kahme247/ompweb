@@ -1502,13 +1502,15 @@ export class RemoteHost implements Host {
         if (!(error instanceof HostRegistryUnreadableError)) throw error;
         throw new HostOpError(503, "host_registry_unreadable", "The linked-hosts registry cannot be read; no session was started");
       }
+      // A link that outlived its record (hosts.json deleted or hand-edited) cannot say whether it shares.
+      if (!record) throw new HostOpError(409, "host_unregistered", "This host is no longer in the linked-hosts registry; no session was started");
       let pools: HostPool[];
       try {
         pools = loadPools();
       } catch {
         throw new HostOpError(503, "pool_storage_unavailable", "The host pool configuration cannot be read; no session was started");
       }
-      sharing = record !== undefined && sharesCredentials(record, pools);
+      sharing = sharesCredentials(record, pools);
     }
     if (sharing && (!link.shared || (link.hostVersion ?? 0) < SHARED_CREDENTIALS_SINCE_VERSION)) {
       throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to share credentials with it`);

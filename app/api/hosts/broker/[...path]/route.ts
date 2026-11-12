@@ -15,7 +15,7 @@ const fail = (error: string, status: number) => Response.json({ error }, { statu
 const ALLOWED: readonly (readonly [method: string, path: RegExp])[] = [
   ["GET", /^\/v1\/(?:healthz|snapshot|snapshot\/stream|credentials\/disabled|usage|usage\/history|usage\/clients)$/],
   ["POST", /^\/v1\/credential\/\d+\/(?:refresh|disable|block)$/],
-  ["DELETE", /^\/v1\/credential\/\d+\/blocks$/],
+  ["DELETE", /^\/v1\/credential\/\d+\/blocks?$/],
   ["POST", /^\/v1\/usage\/(?:observed|stale)$/],
 ];
 const REQUEST_HEADERS = ["content-type", "accept", "if-none-match", "omp-auth-broker-capabilities"];
@@ -77,7 +77,7 @@ async function forward(request: Request, { params, disableIdleTimeout }: { param
   // Public to proxy.ts, so Bun's idle timeout is still on: the snapshot stream and the long poll stay open without traffic.
   disableIdleTimeout();
   let body: ArrayBuffer | undefined;
-  if (request.method === "POST") {
+  if (request.method !== "GET") {
     try {
       body = (await readBodyWithinLimit(request, MAX_BODY_BYTES)).buffer;
     } catch (error) {
