@@ -16,17 +16,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionUIContext, ExtensionUIDialogOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { logger } from "@oh-my-pi/pi-utils";
+import { commands, frames } from "./commands";
+import type { CommandContext } from "./commands/types";
 
 export const CHANNEL_PROTO = 1;
 
-export type HostMessage =
-	| { t: "cmd"; id: number; op: "get_state" }
-	| { t: "cmd"; id: number; op: "set_model"; args: { provider: string; modelId: string } }
-	| { t: "cmd"; id: number; op: "prompt"; args: { text: string; streamingBehavior?: "steer" | "followUp" } }
-	| { t: "cmd"; id: number; op: "abort" }
-	| { t: "ui_response"; id: number; value: unknown };
+/** One parsed host line; `#receive` narrows it by `t`. */
+export type HostMessage = { t: string } & Record<string, unknown>;
 
-type Command = Extract<HostMessage, { t: "cmd" }>;
+type Command = { t: "cmd"; id: number; op: string; args?: Record<string, unknown> };
 
 /** Argument index of `ExtensionUIDialogOptions` in each dialog the host can answer. */
 const DIALOG_OPTIONS_INDEX: Record<string, number> = {
@@ -45,41 +44,10 @@ export function hostSocketPath(): string {
 	return path.join(process.env.XDG_RUNTIME_DIR || os.tmpdir(), "ompweb", "host.sock");
 }
 
-function state(session: AgentSession) {
-	const model = session.model;
-	return {
-		sessionId: session.sessionId,
-		sessionFile: session.sessionFile,
-		sessionName: session.sessionName,
-		model: model && { provider: model.provider, id: model.id },
-		thinkingLevel: session.thinkingLevel,
-		isStreaming: session.isStreaming,
-	};
-}
-
-async function run(session: AgentSession, cmd: Command): Promise<unknown> {
-	switch (cmd.op) {
-		case "get_state":
-			return state(session);
-		case "set_model": {
-			const { provider, modelId } = cmd.args;
-			const model = session.modelRegistry.find(provider, modelId);
-			if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-			await session.setModel(model);
-			return state(session);
-		}
-		case "prompt":
-			// The run continues after the reply; its progress arrives as events.
-			void session.prompt(cmd.args.text, { streamingBehavior: cmd.args.streamingBehavior ?? "followUp", userInitiated: true });
-			return undefined;
-		case "abort":
-			await session.abort();
-			return undefined;
-		default: {
-			const unknown: never = cmd;
-			throw new Error(`unknown command: ${JSON.stringify(unknown)}`);
-		}
-	}
+async function run(ctx: CommandContext, cmd: Command): Promise<unknown> {
+	const handler = Object.hasOwn(commands, cmd.op) ? commands[cmd.op] : undefined;
+	if (!handler) throw new Error(`unknown command: ${cmd.op}`);
+	return handler(ctx, cmd.args ?? {});
 }
 
 export class HostChannel {
@@ -132,13 +100,25 @@ export class HostChannel {
 	}
 
 	#receive(session: AgentSession, message: HostMessage): void {
+		const ctx: CommandContext = { session, send: frame => this.#send(frame) };
 		if (message.t === "ui_response") {
-			this.#pendingUi.get(message.id)?.(message.value);
+			if (typeof message.id === "number") this.#pendingUi.get(message.id)?.(message.value);
 			return;
 		}
-		run(session, message).then(
-			data => this.#send({ t: "res", id: message.id, ok: true, data }),
-			(err: unknown) => this.#send({ t: "res", id: message.id, ok: false, error: err instanceof Error ? err.message : String(err) }),
+		if (message.t !== "cmd") {
+			const handler = Object.hasOwn(frames, message.t) ? frames[message.t] : undefined;
+			try {
+				handler?.(ctx, message);
+			} catch (err) {
+				logger.warn("ompweb channel: bad host frame", { t: message.t, error: String(err) });
+			}
+			return;
+		}
+		if (typeof message.id !== "number" || typeof message.op !== "string") return;
+		const cmd = message as Command;
+		run(ctx, cmd).then(
+			data => this.#send({ t: "res", id: cmd.id, ok: true, data }),
+			(err: unknown) => this.#send({ t: "res", id: cmd.id, ok: false, error: err instanceof Error ? err.message : String(err) }),
 		);
 	}
 
