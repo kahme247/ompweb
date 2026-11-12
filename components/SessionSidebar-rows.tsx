@@ -3,7 +3,7 @@
 import { memo, useCallback, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
-import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pencil, Pin, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, GitBranch, MessageCircleQuestion, MoreHorizontal, Pencil, Pin, Plus } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
@@ -101,6 +101,7 @@ interface ProjectRowProps {
   hiddenCount: number;
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
+  awaitingInputIds: Set<string>;
   unreadSessionIds: Set<string>;
   recentlyCompletedIds?: Set<string>;
   exitedSessions: Map<string, ExitedRpcSession>;
@@ -140,6 +141,7 @@ function ProjectRow({
   hiddenCount,
   selectedSessionId,
   runningSessionIds,
+  awaitingInputIds,
   unreadSessionIds,
   recentlyCompletedIds,
   exitedSessions,
@@ -482,6 +484,7 @@ function ProjectRow({
                   node={node}
                   selectedSessionId={selectedSessionId}
                   runningSessionIds={runningSessionIds}
+                  awaitingInputIds={awaitingInputIds}
                   unreadSessionIds={unreadSessionIds}
                   exitedSessions={exitedSessions}
                   recentlyCompletedIds={recentlyCompletedIds}
@@ -535,6 +538,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   node,
   selectedSessionId,
   runningSessionIds,
+  awaitingInputIds,
   unreadSessionIds,
   exitedSessions,
   recentlyCompletedIds,
@@ -549,6 +553,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   node: SessionTreeNode;
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
+  awaitingInputIds: Set<string>;
   unreadSessionIds: Set<string>;
   exitedSessions: Map<string, ExitedRpcSession>;
   recentlyCompletedIds?: Set<string>;
@@ -570,6 +575,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   // check then never re-renders unless this row's flags actually changed.
   const isSelected = sessionId === selectedSessionId;
   const isRunning = runningSessionIds.has(sessionId);
+  const isAwaitingInput = awaitingInputIds.has(sessionId);
   const isUnread = unreadSessionIds.has(sessionId);
   const isRecentlyCompleted = !isRunning && (recentlyCompletedIds?.has(sessionId) ?? false);
   const exited = exitedSessions.get(sessionId);
@@ -610,6 +616,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
           session={node.session}
           isSelected={isSelected}
           isRunning={isRunning}
+          isAwaitingInput={isAwaitingInput}
           isUnread={isUnread}
           exited={exited}
           isRecentlyCompleted={isRecentlyCompleted}
@@ -636,6 +643,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
               node={child}
               selectedSessionId={selectedSessionId}
               runningSessionIds={runningSessionIds}
+              awaitingInputIds={awaitingInputIds}
               unreadSessionIds={unreadSessionIds}
               exitedSessions={exitedSessions}
               recentlyCompletedIds={recentlyCompletedIds}
@@ -664,6 +672,10 @@ const SessionTreeItem = memo(function SessionTreeItem({
     const id = prev.node.session.id;
     if (prev.runningSessionIds.has(id) !== next.runningSessionIds.has(id)) return false;
   }
+  if (prev.awaitingInputIds !== next.awaitingInputIds) {
+    const id = prev.node.session.id;
+    if (prev.awaitingInputIds.has(id) !== next.awaitingInputIds.has(id)) return false;
+  }
   if (prev.recentlyCompletedIds !== next.recentlyCompletedIds) {
     const id = prev.node.session.id;
     if ((prev.recentlyCompletedIds?.has(id) ?? false) !== (next.recentlyCompletedIds?.has(id) ?? false)) return false;
@@ -685,6 +697,7 @@ const SessionItem = memo(function SessionItem({
   session,
   isSelected,
   isRunning,
+  isAwaitingInput,
   isUnread,
   exited,
   isRecentlyCompleted,
@@ -702,6 +715,7 @@ const SessionItem = memo(function SessionItem({
   session: SessionInfo;
   isSelected: boolean;
   isRunning?: boolean;
+  isAwaitingInput?: boolean;
   isUnread?: boolean;
   exited?: ExitedRpcSession;
   isRecentlyCompleted?: boolean;
@@ -882,6 +896,11 @@ const SessionItem = memo(function SessionItem({
             <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
               {title}
             </span>
+            {isAwaitingInput && (
+              <span role="img" title={t("sessionSidebar.awaitingInput")} aria-label={t("sessionSidebar.awaitingInput")} style={{ display: "inline-flex", flexShrink: 0, marginLeft: 5, color: "var(--accent)" }}>
+                <MessageCircleQuestion size={11} strokeWidth={2.2} aria-hidden="true" />
+              </span>
+            )}
             {hasUnsentDraft && (
               <span role="img" title={t("sessionSidebar.unsentDraft")} aria-label={t("sessionSidebar.unsentDraft")} style={{ display: "inline-flex", flexShrink: 0, marginLeft: 5, color: "var(--accent)" }}>
                 <Pencil size={11} strokeWidth={2.2} aria-hidden="true" />

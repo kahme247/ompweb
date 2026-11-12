@@ -600,6 +600,10 @@ export class AgentSessionWrapper {
       || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0);
   }
 
+  isAwaitingInput(): boolean {
+    return this.pendingUiRequests.size > 0;
+  }
+
   /** Local history navigation is busy control work, not an interruptible model turn. */
   isEditingHistory(): boolean {
     return this.historyEditInFlight;
@@ -1465,7 +1469,8 @@ export class AgentSessionWrapper {
 
   /** Forget a pending dialog and its expiry timer. */
   private forgetPendingUiRequest(id: string): void {
-    this.pendingUiRequests.delete(id);
+    // An answered or expired dialog no longer waits on the user: the sidebar follows.
+    if (this.pendingUiRequests.delete(id)) notifyRunningChange();
     const timer = this.uiExpiryTimers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -3109,6 +3114,8 @@ export interface RunningRpcSession {
   cwd: string;
   /** Absent on this machine, as on `SessionInfo`: the sidebar groups a placeholder under it. */
   hostId?: string;
+  /** A blocking dialog (ask, confirm, input, …) waits for the user. */
+  awaitingInput?: true;
 }
 
 export interface RunningSessionUpdate {
@@ -3197,7 +3204,12 @@ export function getRunningRpcSessions(): RunningRpcSession[] {
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) {
       const id = session.sessionId || sessionId;
-      map.set(id, { id, cwd: session.cwd, ...(session.host.id === LOCAL_HOST_ID ? {} : { hostId: session.host.id }) });
+      map.set(id, {
+        id,
+        cwd: session.cwd,
+        ...(session.host.id === LOCAL_HOST_ID ? {} : { hostId: session.host.id }),
+        ...(session.isAwaitingInput() ? { awaitingInput: true as const } : {}),
+      });
     }
   }
   return [...map.values()];
