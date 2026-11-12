@@ -76,76 +76,120 @@ const under = (root: string, name: string) => `${root}${root.includes("\\") ? "\
 /** `path` is `root` or below it; both in comparableProjectPath form. */
 const within = (path: string, root: string) => path === root || path.startsWith(`${root}/`);
 
+/** What a cluster change did besides the pools: checkouts left separate, each with why, for the server log. */
+export interface ClusterChange { pools: HostPool[]; conflicts: string[] }
+
+/** What a checkout's registry entry lends a cluster project that lacks it. */
+const PRESENTATION = ["alias", "sortOrder", "pinOrder"] as const;
+
 /**
- * Adds one host and moves its projects (spec M3). Returns new pools; never mutates its input.
- * `valid` decides, for each project a host checkout would create or bind, whether the resulting cluster project is acceptable
- * (the caller passes a check built on `validatePools`, which this module cannot import); a project that fails stays pinned
- * to its host and any existing cluster project is left unchanged, so one odd remote or launch setting cannot fail the join.
+ * Adds one host and moves its projects (spec M3), by `reconcileMember`'s rules. Returns new pools; never mutates its input.
  */
 export function joinCluster(
   pools: readonly HostPool[],
   member: { hostId: string; projectsRoot: string },
   projects: readonly HostProjectFacts[],
+  sessionRoots: ReadonlySet<string>,
   now: string,
   newId: () => string,
   valid: (project: PoolProject) => boolean,
-): HostPool[] {
+): ClusterChange {
   const current = clusterOf(pools);
   if (current?.members.some((existing) => existing.hostId === member.hostId)) {
     throw new ClusterError("already_member", "The host is already in the cluster");
   }
   const base = current ?? { id: CLUSTER_ID, label: CLUSTER_LABEL, enabled: true, members: [], projects: [] };
-  const next: HostPool = {
-    ...base,
-    members: [...base.members, { hostId: member.hostId, projectsRoot: member.projectsRoot, provisioned: true, draining: false }],
-    projects: base.projects.map((project) => ({ ...project, clonePaths: { ...project.clonePaths } })),
-  };
-  const root = comparableProjectPath(member.projectsRoot);
-  for (const { project, origin, mainCheckout } of projects) {
-    if (!mainCheckout || origin === null) continue;
-    const key = repositoryKey(origin);
-    if (key === null) continue;
-    // Pinned when at or below projectsRoot (leaving would keep it bound) or above it (seeded clones would land inside it).
+  const next: HostPool = { ...base, members: [...base.members, { hostId: member.hostId, projectsRoot: member.projectsRoot, provisioned: true, draining: false }] };
+  return reconcileMember([next, ...pools.slice(1)], member.hostId, projects, sessionRoots, now, newId, valid);
+}
+
+/**
+ * Binds a member's existing Git checkouts to the cluster project of the same repository (`repositoryKey` of the origin;
+ * never the path), creating the project when none has it, then gives every member a folder for each project it has no
+ * checkout of, where its first session there clones. Returns new pools; never mutates its input; idempotent.
+ * `projects` are the host's registered and session-discovered projects; `sessionRoots` the comparableProjectPath of every
+ * session's project root on the host. A project's binding for the host is replaced by a checkout only when no session
+ * there belongs to it and it is not itself one of the host's checkouts of that repository (else two checkouts would
+ * swap on every run); such a checkout stays separate and is reported. Plain folders, other worktrees, unusable origins,
+ * a checkout at or above the member's projectsRoot (seeded clones would land in it) and one another pool binds stay on
+ * their host. `valid` decides, for each project a checkout would create or bind, whether the result is acceptable (the
+ * caller passes a check built on `validatePools`, which this module cannot import); one that fails stays on its host
+ * and any existing cluster project is left unchanged, so one odd remote or launch setting cannot fail the call.
+ * Binding keeps the cluster project's alias, sort and pin order, taking the checkout's only where it has none.
+ */
+export function reconcileMember(
+  pools: readonly HostPool[],
+  hostId: string,
+  projects: readonly HostProjectFacts[],
+  sessionRoots: ReadonlySet<string>,
+  now: string,
+  newId: () => string,
+  valid: (project: PoolProject) => boolean,
+): ClusterChange {
+  const current = clusterOf(pools);
+  const self = current?.members.find((member) => member.hostId === hostId);
+  if (!current || !self) return { pools: [...pools], conflicts: [] };
+  const next: HostPool = { ...current, projects: current.projects.map((project) => ({ ...project, clonePaths: { ...project.clonePaths } })) };
+  const bound = new Set<string>();
+  for (const pool of [next, ...pools.slice(1)]) {
+    for (const project of pool.projects) if (Object.hasOwn(project.clonePaths, hostId)) bound.add(comparableProjectPath(project.clonePaths[hostId]));
+  }
+  const root = comparableProjectPath(self.projectsRoot);
+  const eligible = projects.flatMap(({ project, origin, mainCheckout }) => {
+    const key = mainCheckout && origin !== null ? repositoryKey(origin) : null;
     const path = comparableProjectPath(project.path);
-    if (within(path, root) || within(root, path)) continue;
-    // Already bound for this host, so already in the cluster.
-    if (next.projects.some((candidate) => Object.hasOwn(candidate.clonePaths, member.hostId) && comparableProjectPath(candidate.clonePaths[member.hostId]) === path)) continue;
+    return key === null || within(root, path) ? [] : [{ project, origin: origin!, key, path }];
+  });
+  const checkouts = new Map(eligible.map(({ path, key }) => [path, key]));
+  const conflicts: string[] = [];
+  for (const { project, origin, key, path } of eligible) {
+    if (bound.has(path)) continue;
     const existing = next.projects.find((candidate) => repositoryKey(candidate.origin) === key);
-    if (existing && Object.hasOwn(existing.clonePaths, member.hostId)) continue; // an existing binding may already hold sessions
+    const held = existing && Object.hasOwn(existing.clonePaths, hostId) ? comparableProjectPath(existing.clonePaths[hostId]) : null;
+    if (existing && held !== null && (sessionRoots.has(held) || checkouts.get(held) === key)) {
+      conflicts.push(`${hostId}: ${project.path} stays separate from cluster project ${existing.name}, bound to ${existing.clonePaths[hostId]}, which ${sessionRoots.has(held) ? "has sessions" : "is another checkout of it"}`);
+      continue;
+    }
     // A visible checkout keeps a hidden cluster project visible, else the project and its sessions vanish from the sidebar.
     const result: PoolProject = existing
-      ? { ...existing, hidden: existing.hidden && project.hidden === true, clonePaths: { ...existing.clonePaths, [member.hostId]: project.path } }
+      ? {
+        ...existing, ...Object.fromEntries(PRESENTATION.filter((field) => existing[field] === undefined && project[field] !== undefined).map((field) => [field, project[field]])),
+        hidden: existing.hidden && project.hidden === true, clonePaths: { ...existing.clonePaths, [hostId]: project.path },
+      }
       : {
         // The name the host showed: its own, else its folder's (spec M3); the origin's only for a root path.
-        id: newId(), name: project.name || project.path.split(/[\\/]/).filter(Boolean).pop() || cloneDirectoryName(origin)!, origin, clonePaths: { [member.hostId]: project.path },
+        id: newId(), name: project.name || project.path.split(/[\\/]/).filter(Boolean).pop() || cloneDirectoryName(origin)!, origin, clonePaths: { [hostId]: project.path },
         addedAt: project.addedAt ?? now, hidden: project.hidden ?? false,
         alias: project.alias, sortOrder: project.sortOrder, pinOrder: project.pinOrder, launchConfig: project.launchConfig,
       };
     if (!valid(result)) continue;
+    if (held !== null) bound.delete(held);
+    bound.add(path);
     if (existing) Object.assign(existing, result);
     else next.projects.push(result);
   }
   for (const project of next.projects) {
-    for (const { hostId, projectsRoot } of next.members) {
-      if (!Object.hasOwn(project.clonePaths, hostId)) project.clonePaths[hostId] = under(projectsRoot, project.id);
+    for (const { hostId: memberId, projectsRoot } of next.members) {
+      if (!Object.hasOwn(project.clonePaths, memberId)) project.clonePaths[memberId] = under(projectsRoot, project.id);
     }
   }
-  return [next, ...pools.slice(1)];
+  return { pools: [next, ...pools.slice(1)], conflicts };
 }
 
-/** Removes one host (spec M6). Returns new pools. */
+/** Removes one host (spec M6). Returns new pools. Only the folders the cluster made for it stay bound, for a later join;
+ *  its own checkouts go back to it, with their sessions. */
 export function leaveCluster(pools: readonly HostPool[], hostId: string): HostPool[] {
   if (hostId === LOCAL_HOST_ID) throw new ClusterError("master_cannot_leave", "This machine is the cluster master and cannot leave");
   const current = clusterOf(pools);
   const leaving = current?.members.find((member) => member.hostId === hostId);
   if (!current || !leaving) throw new ClusterError("not_member", `Host ${hostId} is not in the cluster`);
-  const root = comparableProjectPath(leaving.projectsRoot);
   const next: HostPool = {
     ...current,
     members: current.members.filter((member) => member !== leaving),
     projects: current.projects.map((project) => {
       const { [hostId]: path, ...others } = project.clonePaths;
-      return { ...project, clonePaths: path === undefined || within(comparableProjectPath(path), root) ? { ...project.clonePaths } : others };
+      const made = path !== undefined && comparableProjectPath(path) === comparableProjectPath(under(leaving.projectsRoot, project.id));
+      return { ...project, clonePaths: path === undefined || made ? { ...project.clonePaths } : others };
     }),
   };
   return [next, ...pools.slice(1)];

@@ -1,24 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
-import { comparableProjectPath } from "@/lib/comparable-path";
-import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, ClusterError, clusterJoinBlock, isClusterMember, joinCluster, leaveCluster, MIN_SHARED_CREDENTIALS_OMP, type HostProjectFacts } from "@/lib/hosts/cluster";
+import { CLUSTER_PROJECTS_DIR, ClusterError, clusterJoinBlock, isClusterMember, joinCluster, leaveCluster, MIN_SHARED_CREDENTIALS_OMP, type HostProjectFacts } from "@/lib/hosts/cluster";
+import { logClusterConflicts, memberFacts, passes } from "@/lib/hosts/cluster-reconcile";
 import type { Host } from "@/lib/hosts/host";
 import { clusterConfigOp, getHost, getHostLinkProtocol, getHostOmpVersion, listHosts, masterConfigVersion, notifyHostsChange } from "@/lib/hosts/hub";
 import { CLUSTER_CONFIG_SINCE_VERSION, HostOpError } from "@/lib/hosts/link-protocol";
-import { loadPools, poolProjectBindings, savePools, validatePools, type HostPool, type PoolMember, type PoolProject } from "@/lib/hosts/pools";
+import { loadPools, savePools, type HostPool, type PoolProject } from "@/lib/hosts/pools";
 import { LOCAL_HOST_ID, loadHosts } from "@/lib/hosts/registry";
 import type { OpResult } from "@/lib/hosts/session-ops";
-import { hostSessions } from "@/lib/hosts/session-index";
 import { abortBrokerRequests } from "@/lib/omp/auth-broker";
-import { mergeProjects } from "@/lib/project-registry";
 import { isApiRequestOriginAllowed, shouldCheckApiRequestOrigin } from "@/lib/request-security";
 import { isRecord } from "@/lib/type-guards";
-import type { GitOrigin } from "@/lib/workspace-types";
 
 type Context = { params: Promise<{ id: string }> };
-/** gitOrigins' input bounds: it refuses the whole call beyond them. */
-const MAX_ORIGIN_PATHS = 500;
-const MAX_ORIGIN_PATH_LENGTH = 4096;
 const noStore = { "cache-control": "no-store" };
 const fail = (error: string, code: string, status: number) => Response.json({ error, code }, { status, headers: noStore });
 const storageFailure = () => fail("The pool registry (omp-web/pools.json) cannot be read or written; fix it before changing the cluster", "pool_storage_unavailable", 503);
@@ -30,16 +24,6 @@ function errorResponse(error: unknown): Response {
   // A failed pools.json write: filesystem errors name their syscall.
   if (isRecord(error) && typeof error.syscall === "string") return storageFailure();
   return fail("The cluster change failed", "cluster_change_failed", 500);
-}
-
-/** The pool rules, applied to one member or one project. */
-function passes(members: PoolMember[], projects: PoolProject[]): boolean {
-  try {
-    validatePools([{ id: CLUSTER_ID, label: CLUSTER_LABEL, enabled: true, members, projects }]);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function valueOf<T>(result: OpResult<T>): T {
@@ -55,30 +39,6 @@ function requireReady(host: Host): void {
   throw host.id === LOCAL_HOST_ID
     ? new HostOpError(409, "host_restart_required", "Restart this machine's ompweb host daemon to join the cluster")
     : new HostOpError(409, "host_upgrade_required", `Update ompweb on ${host.label} to join the cluster`);
-}
-
-/** The host's projects in its own order (mergeProjects: the order the user sees), then its hidden registry entries, which move too. */
-async function hostFacts(host: Host): Promise<HostProjectFacts[]> {
-  const registry = await host.sessionOps.listProjects();
-  const discovered = (await hostSessions(host.id)).map((session) => session.projectRoot ?? session.cwd);
-  // As listProjectsAllHosts: only this machine's paths resolve here.
-  const projects: HostProjectFacts["project"][] = mergeProjects({ version: 1, projects: registry }, discovered, host.id === LOCAL_HOST_ID ? undefined : (path) => path);
-  const seen = new Set(projects.map((project) => comparableProjectPath(project.path)));
-  for (const entry of registry) {
-    const key = comparableProjectPath(entry.path);
-    if (!entry.hidden || seen.has(key)) continue;
-    seen.add(key);
-    projects.push(entry);
-  }
-  // Longer paths are not sent: they stay pinned.
-  const sendable = projects.map((project) => project.path).filter((path) => path.length <= MAX_ORIGIN_PATH_LENGTH);
-  const origins = new Map<string, GitOrigin | undefined>();
-  for (let start = 0; start < sendable.length; start += MAX_ORIGIN_PATHS) {
-    const paths = sendable.slice(start, start + MAX_ORIGIN_PATHS);
-    const answers = valueOf(await host.workspaceOps.gitOrigins(paths)).origins;
-    paths.forEach((path, i) => origins.set(path, answers[i]));
-  }
-  return projects.map((project) => ({ project, origin: origins.get(project.path)?.origin ?? null, mainCheckout: origins.get(project.path)?.mainCheckout ?? false }));
 }
 
 async function localProjectsRoot(host: Host): Promise<string> {
@@ -115,10 +75,11 @@ export async function PUT(request: Request, { params }: Context) {
     }
     // The host round trips come first. pools.json is then read again, joined and saved with no await between, so a change
     // made meanwhile (a leave, another join, a pool edit) is kept.
-    const gathered: { member: { hostId: string; projectsRoot: string }; facts: HostProjectFacts[] }[] = [];
+    const gathered: { member: { hostId: string; projectsRoot: string }; facts: HostProjectFacts[]; sessionRoots: Set<string> }[] = [];
     for (const target of joining) {
       const root = target === host ? projectsRoot : await localProjectsRoot(target);
-      gathered.push({ member: { hostId: target.id, projectsRoot: root }, facts: await hostFacts(target) });
+      const { projects: facts, sessionRoots } = await memberFacts(target);
+      gathered.push({ member: { hostId: target.id, projectsRoot: root }, facts, sessionRoots });
     }
     // The master's version comes first: nothing may wait between the save and the apply, so a leave cannot come before it.
     // A master configuration that cannot be served sends none now; the 30 s sync sends it once it can.
@@ -132,12 +93,12 @@ export async function PUT(request: Request, { params }: Context) {
     if (!addLocal && !isClusterMember(pools, LOCAL_HOST_ID)) return fail("The cluster changed during the join; try again", "cluster_changed", 409);
     const now = new Date().toISOString();
     const valid = (project: PoolProject) => passes([], [project]);
-    for (const { member, facts } of gathered) {
+    for (const { member, facts, sessionRoots } of gathered) {
       // Added meanwhile by another join.
       if (member.hostId === LOCAL_HOST_ID && isClusterMember(pools, LOCAL_HOST_ID)) continue;
-      // A checkout a pool already binds for this host stays with that pool.
-      const bound = poolProjectBindings(pools).get(member.hostId);
-      pools = joinCluster(pools, member, facts.filter(({ project }) => !bound?.has(comparableProjectPath(project.path))), now, randomUUID, valid);
+      const change = joinCluster(pools, member, facts, sessionRoots, now, randomUUID, valid);
+      logClusterConflicts(change.conflicts);
+      pools = change.pools;
     }
     savePools(pools);
     notifyHostsChange();

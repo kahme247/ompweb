@@ -87,6 +87,14 @@ export async function register(): Promise<void> {
     console.warn(`[omp-web] cluster configuration sync not started: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // In the cluster a repository is one project: each member's checkouts bind to it when the member links (lib/hosts/cluster-reconcile.ts).
+  try {
+    const { startClusterReconcile } = await import("@/lib/hosts/cluster-reconcile");
+    startClusterReconcile();
+  } catch (error) {
+    console.warn(`[omp-web] cluster reconcile not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Resume sessions that were mid-run when omp-web last stopped (opt-in
   // setting). Fire-and-forget: resuming must not block boot.
   void (async () => {
