@@ -141,6 +141,7 @@ export async function POST(req: Request) {
 
 export async function PATCH(req: Request) {
   const body = await readBody(req);
+  if (body && body.poolId !== undefined) return renamePool(body);
   if (!body || typeof body.id !== "string" || !body.id) return fail("id is required", 400);
   const isLocal = body.id === "local";
   if (isLocal && body.allowAgentStart !== undefined) return fail("This machine's agent-start setting cannot be changed", 400);
@@ -160,6 +161,29 @@ export async function PATCH(req: Request) {
   } catch (error) {
     return failFor(error);
   }
+}
+
+/** `{ poolId, label }`: renames one pool (the cluster) without replacing the registry the way PUT does. */
+function renamePool(body: Record<string, unknown>) {
+  if (!hasOnlyKeys(body, ["poolId", "label"]) || typeof body.poolId !== "string") return fail("poolId and label are required", 400);
+  const label = parseLabel(body.label);
+  if (!label) return fail(`label must be a non-empty string of at most ${MAX_LABEL_LENGTH} characters`, 400);
+  let pools: HostPool[];
+  try {
+    pools = loadPools();
+  } catch {
+    return poolStorageFailure();
+  }
+  const pool = pools.find((candidate) => candidate.id === body.poolId);
+  if (!pool) return fail("Unknown pool", 404);
+  pool.label = label;
+  try {
+    savePools(pools);
+  } catch {
+    return poolStorageFailure();
+  }
+  notifyHostsChange();
+  return Response.json({ pools }, { headers: noStore });
 }
 
 export async function DELETE(req: Request) {

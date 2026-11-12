@@ -16,7 +16,7 @@ import { useHostRows } from "@/hooks/useHostRows";
 import { HOST_STATUS_COLOR, hostName, hostStatusText, isLocalRow, localInstallCommand } from "./host-status";
 import { HostUpdates } from "./HostUpdates";
 
-type Dialogs = { kind: "add" } | { kind: "rename"; host: HostRow } | null;
+type Dialogs = { kind: "add" } | { kind: "rename"; host: HostRow } | { kind: "renameCluster"; pool: HostPool } | null;
 
 const inputStyle = { width: "100%", padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", font: "13px var(--font-mono)" } as const;
 const buttonStyle = { padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", cursor: "pointer", fontSize: 13 } as const;
@@ -51,12 +51,12 @@ export function CopyField({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** Name form shared by "Add host" and "Rename"; adding ends in the one-time token view. */
+/** Name form shared by "Add host" and "Rename" (a host or the cluster); adding ends in the one-time token view. */
 function HostDialog({ dialog, onClose }: { dialog: NonNullable<Dialogs>; onClose: () => void }) {
   const { t } = useI18n();
   const adding = dialog.kind === "add";
   const local = dialog.kind === "rename" && dialog.host.id === "local";
-  const [label, setLabel] = useState(dialog.kind === "rename" ? dialog.host.label : "");
+  const [label, setLabel] = useState(dialog.kind === "rename" ? dialog.host.label : dialog.kind === "renameCluster" ? dialog.pool.label : "");
   const [busy, setBusy] = useState(false);
   const hintId = useId();
   const [created, setCreated] = useState<{ token: string; command: string } | null>(null);
@@ -68,6 +68,9 @@ function HostDialog({ dialog, onClose }: { dialog: NonNullable<Dialogs>; onClose
       if (dialog.kind === "add") {
         const data = await call("POST", "/api/hosts", { label });
         setCreated({ token: String(data.token), command: String(data.command) });
+      } else if (dialog.kind === "renameCluster") {
+        await call("PATCH", "/api/hosts", { poolId: dialog.pool.id, label });
+        onClose();
       } else {
         await call("PATCH", "/api/hosts", { id: dialog.host.id, label });
         onClose();
@@ -79,7 +82,7 @@ function HostDialog({ dialog, onClose }: { dialog: NonNullable<Dialogs>; onClose
     }
   };
 
-  const title = created || adding ? t("hostsConfig.addTitle") : t("hostsConfig.renameTitle");
+  const title = created || adding ? t("hostsConfig.addTitle") : dialog.kind === "renameCluster" ? t("hostsConfig.renameClusterTitle") : t("hostsConfig.renameTitle");
   return (
     // The token is shown once: only Done may close it, never Escape or an outside press.
     <Dialog open onOpenChange={(open) => { if (!open && !created) onClose(); }}>
@@ -305,7 +308,8 @@ export function HostsConfig() {
   const localBlock = poolsLoaded && localJoins && local ? joinBlock(local) : null;
   const localReason = !local || localBlock === null ? null
     : localBlock === "omp-old" ? t("hostsConfig.joinOmpOld", { name: hostName(t, local) }) : t("hostsConfig.joinLocalRestart");
-  const linkedMembers = clusterOf(pools)?.members.some((member) => member.hostId !== LOCAL_HOST_ID) ?? false;
+  const cluster = clusterOf(pools);
+  const linkedMembers = cluster?.members.some((member) => member.hostId !== LOCAL_HOST_ID) ?? false;
 
   const share = async () => {
     if (!sharing) return;
@@ -364,6 +368,14 @@ export function HostsConfig() {
           <Plus size={14} aria-hidden="true" />{t("hostsConfig.add")}
         </button>
       </div>
+      {cluster && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 500, overflowWrap: "anywhere" }}>{t("hostsConfig.clusterName", { name: cluster.label })}</span>
+          <button type="button" className="ui-focus-ring" style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0 }} onClick={() => setDialog({ kind: "renameCluster", pool: cluster })}>
+            <Pencil size={13} aria-hidden="true" />{t("hostsConfig.renameCluster")}
+          </button>
+        </div>
+      )}
       {loadFailed && <div role="alert" style={{ fontSize: 12, color: "var(--status-error)" }}>{t("hostsConfig.loadFailed")}</div>}
       {/* Once for every member: none of them can get this machine's configuration (spec K1). */}
       {masterConfigError && linkedMembers && <div role="alert" style={{ fontSize: 12, color: "var(--status-error)", overflowWrap: "anywhere" }}>{t("hostsConfig.masterConfigFailed", { reason: masterConfigError.message })}</div>}
