@@ -208,6 +208,20 @@ async function assertForwardReentry(browser, hook) {
   assert.equal(reentered.result.current.session, "first");
 }
 
+test("a fragment link's native entry joins the managed stack, so in-app Back still changes the view", async () => {
+  const browser = browserHistory();
+  const hook = mount();
+  // The skip link pushes a stateless same-document entry and fires popstate.
+  window.history.pushState(null, "", "/?session=first#main-content");
+  await act(() => browser.fire("popstate", { state: null }));
+  act(() => hook.result.current.router.push("/?session=second"));
+  act(() => hook.result.current.back());
+  await browser.flush();
+  assert.equal(hook.result.current.session, "first");
+  act(() => hook.result.current.router.push("/?session=third"));
+  assert.equal(hook.result.current.session, "third");
+});
+
 test("clean native root Back leaves rather than consuming a sidebar-only step", async () => {
   const browser = browserHistory();
   const hook = mount();
