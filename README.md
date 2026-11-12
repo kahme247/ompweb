@@ -236,9 +236,11 @@ remains an explicit user action.
 **Joining and leaving.** Each linked host has an **In the cluster** switch in **Settings →
 Hosts**. Turning it on asks for a folder on that host for the checkouts the cluster creates
 (default `<home>/ompweb-cluster`) and shows what changes. It needs the host online, its daemon
-on link protocol 9 and the `gitOrigins` operation; otherwise the disabled switch asks for an
-update or shows the host's unavailable status. While this machine is not a member yet, its own
-daemon needs the same, and the switch asks to restart the host service on this machine.
+on link protocol 9 with the `gitOrigins` operation, and omp 15.13.1 or newer (a member always
+uses this machine's provider logins); otherwise the disabled switch asks for an update of
+ompweb or omp, or shows the host's unavailable status. While this machine is not a member yet,
+its own daemon needs the same, and the switch asks to restart the host service on this machine
+(or to update its omp).
 
 - **Joining:** the host's Git projects are matched by repository: the same repository on
   several members is one cluster project, and its sessions are listed together. `git@github.com:a/b.git`
@@ -258,7 +260,9 @@ daemon needs the same, and the switch asks to restart the host service on this m
   the host again. Checkouts the cluster created inside the host's folder stay bound, so
   sessions the cluster started there stay under the cluster's projects. The cluster keeps the
   projects it gained from the host, so they may now be listed twice; hide any you do not want.
-  This machine cannot leave, and the cluster stays when the last linked host does.
+  This machine cannot leave, and the cluster stays when the last linked host does. Revoking a
+  member removes it from the cluster the same way; while `pools.json` cannot be read, the revoke
+  is refused.
 - **Provider logins:** a member always uses this machine's provider logins, whatever its own
   [**Use this server's provider logins**](#use-the-servers-provider-logins-on-a-host) setting
   says; Settings shows it on and disabled. This is computed from membership, so leaving brings

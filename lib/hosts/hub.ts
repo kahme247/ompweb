@@ -1744,6 +1744,10 @@ export function getHostLinkProtocol(hostId: string): number | null {
   return hub().links.get(hostId)?.hostVersion ?? null;
 }
 
+export function getHostOmpVersion(hostId: string): string | null {
+  return hub().links.get(hostId)?.ompVersion ?? null;
+}
+
 export function onHostsChange(listener: () => void): () => void {
   const listeners = hub().changeListeners;
   listeners.add(listener);

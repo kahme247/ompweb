@@ -184,8 +184,9 @@ async function prepare(input: {
     // Reject multiple literal URLs: Git fetches the first, whereas config --get returns the last.
     // remote get-url expands insteadOf rewrites and cannot verify the registered literal origin.
     const origins = (await git(cloneRoot, "config", "--null", "--get-all", "remote.origin.url")).split("\0").slice(0, -1);
+    // The registered literal first: repositoryKey has no key for some origins Git accepts (an IPv6 SSH host).
     const key = repositoryKey(origin);
-    if (origins.length !== 1 || key === null || repositoryKey(origins[0]) !== key) {
+    if (origins.length !== 1 || (origins[0] !== origin && (key === null || repositoryKey(origins[0]) !== key))) {
       throw new PreparationError("pool_origin_mismatch", "Clone must have exactly one origin matching the registered project");
     }
     try {

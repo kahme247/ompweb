@@ -418,6 +418,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     if (hosts) prevHostsRef.current = hosts;
   }, [hosts, loadProjects, scheduleRefresh]);
 
+  // A join or leave changes which projects the server lists, not only their grouping. Frames repeat unchanged
+  // pools, and the first load fetches on its own: refetch only when the loaded content changes.
+  const loadedPoolsRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!poolsLoaded) return;
+    const loaded = JSON.stringify(pools);
+    if (loadedPoolsRef.current !== null && loadedPoolsRef.current !== loaded) void loadProjects();
+    loadedPoolsRef.current = loaded;
+  }, [pools, poolsLoaded, loadProjects]);
+
   useEffect(() => {
     // Live running status and session-list invalidations arrive on the shared
     // event stream; the sidebar never has to poll while an agent is working.
