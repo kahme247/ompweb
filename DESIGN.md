@@ -16,8 +16,8 @@ do not assume that Pi-specific implementation changes can be merged unchanged.
 ## Product principles
 
 1. **OMP remains authoritative.** Sessions, credentials, providers, and agent
-   behavior belong to the installed `omp` CLI. ompweb must not invent a
-   parallel data format or credential store.
+   behavior belong to omp (run as ompweb's own build of it, `runner/`). ompweb
+   must not invent a parallel data format or credential store.
 2. **Local-first by default.** The server binds to `127.0.0.1`; remote access
    is an explicit user choice and must be protected by a trusted network
    boundary and HTTPS.
@@ -55,29 +55,32 @@ Browser
 ompweb (Bun server, started by the Node launcher)
   ├─ reads native OMP session files and selected configuration
   ├─ serves allow-listed project files
-  └─ starts one `omp --mode rpc-ui` child per active session
-       │ NDJSON over stdio
+  └─ starts one `ompweb-omp --headless` child per active session
+       │ ompweb channel, NDJSON over stdio
        ▼
-     installed OMP CLI and its existing ~/.omp/agent state
+     ompweb's own omp build (runner/) and the existing ~/.omp/agent state
 ```
 
-### Why the CLI boundary is locked
+### The omp boundary
 
 OMP SDK packages are Bun-only TypeScript and import Bun APIs. Importing
 `@oh-my-pi/*` or `@earendil-works/*` into the ompweb server, even though it runs on
 Bun, would tie it to omp's internals and make the application unreliable.
-Therefore, production code must not add those runtime dependencies.
+Therefore, the ompweb server and daemon must not add those runtime dependencies.
 
-Live work goes through the user’s installed `omp --mode rpc-ui` process. This
-keeps the agent version, providers, extensions, and session behavior aligned
-with the CLI the user already trusts. The RPC layer negotiates v2 when the CLI
-advertises it, reassembles bounded chunked frames, and remains compatible with
-v1-capable installations.
+Live work goes through ompweb's own omp build, `runner/`: upstream omp's CLI
+pinned to an exact release, with one change, its session factory connects every
+session to `ompweb host` over ompweb's channel. The host receives the same
+`AgentSession` events and calls the same session methods omp's TUI does, so
+nothing depends on omp's RPC mode. A session started from the runner's TUI
+connects to the daemon's Unix socket and shows up live in the web; dialogs open
+on both sides and the first answer wins. The design and the wire are in
+`docs/specs/2026-11-12-omp-runner-design.md`.
 
 ### The Host seam
 
 Every machine-local action of a session goes through one interface,
-`Host` (`lib/hosts/host.ts`): spawning `omp --mode rpc-ui`, checking that a
+`Host` (`lib/hosts/host.ts`): spawning `ompweb-omp --headless`, checking that a
 session file exists, invalidating cached session lists, and the
 file-reading operations behind the session and project routes. The web server
 has no direct path to any machine, its own included: it reaches every host
@@ -86,9 +89,9 @@ through the link described below. The implementation on the web server is
 the machine whose omp it owns.
 
 ```
-Browser ─▶ ompweb ◀── link (loopback)  ── ompweb host ── spawn omp --mode rpc-ui (stdio)
+Browser ─▶ ompweb ◀── link (loopback)  ── ompweb host ── spawn ompweb-omp --headless (stdio)
                  ◀── link (WebSocket) ── ompweb host on another machine
-                                           └─ spawn omp --mode rpc-ui
+                                           └─ spawn ompweb-omp --headless
 ```
 
 "This machine" is the host with the fixed id `local`, linked to the daemon
@@ -98,8 +101,8 @@ a run: the restarted server adopts the live children from the daemon's hello,
 with their open blocking requests replayed. A direct spawn path would tie
 every run to the web server's lifetime, which is why none exists.
 
-The CLI boundary above holds on every machine: a remote machine runs its own
-installed `omp`, its own `~/.omp/agent` and its own credentials, unless sharing is
+The omp boundary above holds on every machine: a remote machine runs its own
+runner build, its own `~/.omp/agent` and its own credentials, unless sharing is
 turned on for that host (Settings → Hosts): then its sessions use the server's
 provider logins through `omp auth-broker serve`, and the host never gets a
 refresh token. ompweb only routes. `RpcProcess` takes its byte pipe

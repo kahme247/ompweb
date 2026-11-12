@@ -1,5 +1,5 @@
 // Types mirrored from oh-my-pi coding-agent session-entries (v3 format).
-import type { RpcAskDialogAnswer, RpcAskDialogQuestion, TodoPhase } from "./pi-types";
+import type { HtmlFormData, RpcAskDialogAnswer, RpcAskDialogQuestion, TodoPhase } from "./pi-types";
 
 // omp-web cannot import the Bun-only @oh-my-pi packages, so the on-disk
 // shapes are re-declared here. Legacy pi v1/v2 fields are kept optional.
@@ -243,6 +243,15 @@ export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
       id: string;
+      /** omp's whole-form ask: the agent's `<form>` HTML, rendered as controls, never as markup. */
+      method: "form";
+      html: string;
+      timeout?: number;
+      expiresAt?: number;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
       method: "notify";
       message: string;
       notifyType?: "info" | "warning" | "error";
@@ -286,7 +295,8 @@ export type ExtensionUiResponse =
   | { type: "extension_ui_response"; id: string; value: string }
   | { type: "extension_ui_response"; id: string; confirmed: boolean }
   | { type: "extension_ui_response"; id: string; cancelled: true }
-  | { type: "extension_ui_response"; id: string; answers: RpcAskDialogAnswer[] };
+  | { type: "extension_ui_response"; id: string; answers: RpcAskDialogAnswer[] }
+  | { type: "extension_ui_response"; id: string; data: HtmlFormData };
 
 export interface ExtensionStatusItem {
   key: string;

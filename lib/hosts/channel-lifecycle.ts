@@ -1,6 +1,5 @@
-import { BLOCKING_UI_METHODS } from "../notification-events";
-import type { RpcFrameRecord } from "../omp/rpc-frame";
 import { isRecord } from "../type-guards";
+import { idOf, requestKey, wireEvent, type WireFrame } from "./pending-requests";
 
 type Timer = NodeJS.Timeout;
 type LifecycleOptions = {
@@ -83,38 +82,41 @@ export class ChannelLifecycle {
     this.changed();
   }
 
-  noteStdin(frame: RpcFrameRecord): void {
+  noteStdin(frame: WireFrame): void {
     this.idleSince = this.clock();
-    if (frame.type === "extension_ui_response" || frame.type === "host_tool_result" || frame.type === "host_uri_result") {
-      if (typeof frame.id === "string") this.requests.delete(frame.id);
-    } else if (typeof frame.id === "string") this.commands.add(frame.id);
-    if (typeof frame.id === "string" && (frame.type === "prompt" || frame.type === "abort_and_prompt" || frame.type === "steer" || frame.type === "follow_up" || frame.type === "followUp")) {
-      const queued = frame.type === "steer" || frame.type === "follow_up" || frame.type === "followUp"
-        || frame.streamingBehavior === "steer" || frame.streamingBehavior === "followUp";
-      if (queued) this.awaitingQueue.set(frame.id, false);
-      else this.awaitingStart.add(frame.id);
-    }
-    if (typeof frame.id === "string" && (frame.type === "remove_queued_message" || frame.type === "abort_and_restore_queue")) {
-      this.queueWithdrawals.set(frame.id, this.queueRevision);
+    const request = requestKey(frame), id = frame.t === "cmd" ? idOf(frame.id) : null;
+    if (request && !request.open) this.requests.delete(request.key);
+    if (id !== null) {
+      this.commands.add(id);
+      const op = frame.op, args = isRecord(frame.args) ? frame.args : {};
+      if (op === "prompt" || op === "abort_and_prompt" || op === "steer" || op === "follow_up" || op === "followUp") {
+        const queued = op === "steer" || op === "follow_up" || op === "followUp"
+          || args.streamingBehavior === "steer" || args.streamingBehavior === "followUp";
+        if (queued) this.awaitingQueue.set(id, false);
+        else this.awaitingStart.add(id);
+      }
+      if (op === "remove_queued_message" || op === "abort_and_restore_queue") this.queueWithdrawals.set(id, this.queueRevision);
     }
     this.changed();
   }
-  noteStdout(frame: RpcFrameRecord): void {
+  noteStdout(frame: WireFrame): void {
     this.idleSince = this.clock();
     const before = this.isRunning;
-    switch (frame.type) {
+    // The runner sends its own frames (prompt_result, …) top level, AgentSession's inside `event`.
+    const event = wireEvent(frame) ?? { ...frame, type: frame.t };
+    switch (event.type) {
       case "agent_start":
         this.running = true; this.unsettled = true; this.awaitingStart.clear(); this.awaitingQueue.clear(); break;
-      case "agent_end": if (frame.isTerminal !== false) this.running = false; break;
+      case "agent_end": if (event.isTerminal !== false) this.running = false; break;
       case "session_settled":
         this.running = false; this.unsettled = false;
         this.awaitingStart.clear(); this.awaitingQueue.clear(); this.queuePresent = false; this.queueWithdrawals.clear(); this.withdrawalAfter = null; break;
       case "prompt_result": case "prompt_error":
         this.awaitingStart.clear(); this.awaitingQueue.clear(); this.queuePresent = false; this.queueWithdrawals.clear(); this.withdrawalAfter = null; break;
       case "queue_update":
-        if (!Array.isArray(frame.steering) || !Array.isArray(frame.followUp)) break;
+        if (!Array.isArray(event.steering) || !Array.isArray(event.followUp)) break;
         this.queueRevision += 1;
-        this.queuePresent = frame.steering.length > 0 || frame.followUp.length > 0;
+        this.queuePresent = event.steering.length > 0 || event.followUp.length > 0;
         if (this.queuePresent) {
           for (const id of this.awaitingQueue.keys()) if (!this.commands.has(id)) this.awaitingQueue.set(id, true);
         }
@@ -123,32 +125,27 @@ export class ChannelLifecycle {
         break;
       case "auto_compaction_start": this.compacting = true; break;
       case "auto_compaction_end": this.compacting = false; break;
-      case "response":
-        if (typeof frame.id !== "string") break;
-        this.commands.delete(frame.id);
-        if (frame.success === false || (isRecord(frame.data) && frame.data.agentInvoked === false)) {
-          this.awaitingStart.delete(frame.id); this.awaitingQueue.delete(frame.id);
-        } else if (this.awaitingQueue.has(frame.id) && (this.queuePresent || (isRecord(frame.data) && frame.data.queued === true))) {
-          this.awaitingQueue.set(frame.id, true);
-        }
-        if (this.queueWithdrawals.has(frame.id)) {
-          const revision = this.queueWithdrawals.get(frame.id)!;
-          this.queueWithdrawals.delete(frame.id);
-          if (frame.success === true) {
-            this.withdrawalAfter = revision;
-            this.releaseWithdrawnQueue();
-          }
-        }
-        break;
-      case "host_tool_call": case "host_uri_request":
-        if (typeof frame.id === "string") this.requests.add(frame.id); break;
-      case "extension_ui_request":
-        if (typeof frame.method === "string" && BLOCKING_UI_METHODS.has(frame.method) && typeof frame.id === "string") this.requests.add(frame.id);
-        else if (frame.method === "cancel" && typeof frame.targetId === "string") this.requests.delete(frame.targetId);
-        break;
-      case "host_tool_cancel": case "host_uri_cancel":
-        if (typeof frame.targetId === "string") this.requests.delete(frame.targetId); break;
     }
+    const id = frame.t === "res" ? idOf(frame.id) : null;
+    if (id !== null) {
+      this.commands.delete(id);
+      if (frame.ok === false || (isRecord(frame.data) && frame.data.agentInvoked === false)) {
+        this.awaitingStart.delete(id); this.awaitingQueue.delete(id);
+      } else if (this.awaitingQueue.has(id) && (this.queuePresent || (isRecord(frame.data) && frame.data.queued === true))) {
+        this.awaitingQueue.set(id, true);
+      }
+      if (this.queueWithdrawals.has(id)) {
+        const revision = this.queueWithdrawals.get(id)!;
+        this.queueWithdrawals.delete(id);
+        if (frame.ok === true) {
+          this.withdrawalAfter = revision;
+          this.releaseWithdrawnQueue();
+        }
+      }
+    }
+    const request = requestKey(frame);
+    if (request?.open) this.requests.add(request.key);
+    else if (request) this.requests.delete(request.key);
     if (before !== this.isRunning) this.options.onRunning?.(this.isRunning);
     this.changed();
   }

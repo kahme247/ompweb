@@ -1,17 +1,16 @@
-import { BLOCKING_UI_METHODS } from "../notification-events";
-import type { RpcFrameRecord } from "../omp/rpc-frame";
 import { isRecord } from "../type-guards";
 import { HostOpError, type HostUriScheme } from "./link-protocol";
+import { requestKey, type WireFrame } from "./pending-requests";
 
 /** `def`: the tool definition omp was advertised when it made the call. */
-type Callback = { frame: RpcFrameRecord; lines: string[]; executor: string | null; def?: string };
+type Callback = { frame: WireFrame; lines: string[]; executor: string | null; def?: string };
 type Registration = { tools: Record<string, unknown>[]; schemes: HostUriScheme[] };
 type SharedRequestDeps = {
   members(): string[];
   isUp(id: string): boolean;
   deliver(id: string, lines: string[]): void;
-  /** `onReply`: omp read the frame (its successful reply arrived); called before any later output is handled. */
-  write(frame: RpcFrameRecord, onReply?: () => void): void;
+  /** Sends a daemon-owned `cmd`. `onReply`: omp read it (its successful reply arrived); called before any later output is handled. */
+  write(op: string, args: Record<string, unknown>, onReply?: () => void): void;
 };
 
 export function validateHostTools(tools: unknown[], schemes: HostUriScheme[]): void {
@@ -39,52 +38,47 @@ export class SharedRequests {
 
   constructor(private readonly deps: SharedRequestDeps) {}
 
-  isCompleted(frame: RpcFrameRecord): boolean {
-    return typeof frame.id === "string" && this.completed.has(frame.id)
-      && (frame.type === "host_tool_call" || frame.type === "host_uri_request"
-        || frame.type === "extension_ui_request" && typeof frame.method === "string" && BLOCKING_UI_METHODS.has(frame.method));
+  isCompleted(frame: WireFrame): boolean {
+    const request = requestKey(frame);
+    return request !== null && request.open && this.completed.has(request.key);
   }
 
   /** True: broadcast this frame; callbacks alone have one executor. */
-  note(frame: RpcFrameRecord, lines: string[]): boolean {
-    if (this.isCompleted(frame)) return false;
-    if (frame.type === "extension_ui_request") {
-      if (typeof frame.method === "string" && BLOCKING_UI_METHODS.has(frame.method) && typeof frame.id === "string") {
-        this.dialogs.set(frame.id, lines);
-      } else if (frame.method === "cancel" && typeof frame.targetId === "string") {
-        this.dialogs.delete(frame.targetId); this.completed.add(frame.targetId);
-      }
-    }
-    if ((frame.type === "host_tool_call" || frame.type === "host_uri_request") && typeof frame.id === "string") {
-      if (!this.callbacks.has(frame.id)) this.callbacks.set(frame.id, { frame: { type: frame.type, toolName: frame.toolName, url: frame.url, operation: frame.operation }, lines, executor: null,
-        def: frame.type === "host_tool_call" ? this.toolDefs.get(frame.toolName as string) : undefined });
+  note(frame: WireFrame, line: string): boolean {
+    const request = requestKey(frame);
+    if (!request) return true;
+    if (request.open && this.completed.has(request.key)) return false;
+    if (frame.t === "ui_request") this.dialogs.set(request.key, [line]);
+    else if (frame.t === "ui_end") { this.dialogs.delete(request.key); this.completed.add(request.key); }
+    else if (request.open) {
+      if (!this.callbacks.has(request.key)) this.callbacks.set(request.key, { frame: { t: frame.t, toolName: frame.toolName, url: frame.url, operation: frame.operation }, lines: [line], executor: null,
+        def: frame.t === "host_tool_call" ? this.toolDefs.get(frame.toolName as string) : undefined });
       this.dispatch();
       return false;
-    }
-    if ((frame.type === "host_tool_cancel" || frame.type === "host_uri_cancel") && typeof frame.targetId === "string") {
-      const call = this.callbacks.get(frame.targetId);
-      if (call?.executor) this.deps.deliver(call.executor, lines);
-      this.callbacks.delete(frame.targetId);
-      this.completed.add(frame.targetId);
+    } else {
+      const call = this.callbacks.get(request.key);
+      if (call?.executor) this.deps.deliver(call.executor, [line]);
+      this.callbacks.delete(request.key);
+      this.completed.add(request.key);
       return false;
     }
     return true;
   }
 
-  answer(id: string, frame: RpcFrameRecord): boolean {
-    if (typeof frame.id !== "string") return false;
-    if (frame.type === "extension_ui_response") {
-      if (!this.dialogs.delete(frame.id)) return false;
-      this.completed.add(frame.id);
-      const cancel = JSON.stringify({ type: "extension_ui_request", method: "cancel", targetId: frame.id });
-      for (const other of this.deps.members()) if (other !== id) this.deps.deliver(other, [cancel]);
+  answer(id: string, frame: WireFrame): boolean {
+    const request = requestKey(frame);
+    if (!request || request.open) return false;
+    if (frame.t === "ui_response") {
+      if (!this.dialogs.delete(request.key)) return false;
+      this.completed.add(request.key);
+      const end = JSON.stringify({ t: "ui_end", id: frame.id });
+      for (const other of this.deps.members()) if (other !== id) this.deps.deliver(other, [end]);
       return true;
     }
-    const call = this.callbacks.get(frame.id);
-    const resultType = call?.frame.type === "host_tool_call" ? "host_tool_result" : "host_uri_result";
-    if (!call || call.executor !== id || frame.type !== resultType) return false;
-    this.callbacks.delete(frame.id);
-    this.completed.add(frame.id);
+    const call = this.callbacks.get(request.key);
+    if (!call || call.executor !== id) return false;
+    this.callbacks.delete(request.key);
+    this.completed.add(request.key);
     return true;
   }
 
@@ -118,14 +112,14 @@ export class SharedRequests {
     const mergedTools = [...tools.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
     const mergedSchemes = [...schemes].sort(([a], [b]) => a.localeCompare(b)).map(([scheme, writable]) => ({ scheme, writable }));
     const toolUnion = JSON.stringify(mergedTools), schemeUnion = JSON.stringify(mergedSchemes);
-    if (toolUnion !== this.toolUnion) { this.toolUnion = toolUnion; this.deps.write({ type: "set_host_tools", tools: mergedTools }, confirm); }
-    if (schemeUnion !== this.schemeUnion) { this.schemeUnion = schemeUnion; this.deps.write({ type: "set_host_uri_schemes", schemes: mergedSchemes }); }
+    if (toolUnion !== this.toolUnion) { this.toolUnion = toolUnion; this.deps.write("set_host_tools", { tools: mergedTools }, confirm); }
+    if (schemeUnion !== this.schemeUnion) { this.schemeUnion = schemeUnion; this.deps.write("set_host_uri_schemes", { schemes: mergedSchemes }); }
   }
 
   private eligible(id: string, call: Callback): boolean {
     if (!this.deps.isUp(id) || !this.deps.members().includes(id)) return false;
     const registration = this.registrations.get(id);
-    if (call.frame.type === "host_tool_call") {
+    if (call.frame.t === "host_tool_call") {
       return registration?.tools.some(tool => tool.name === call.frame.toolName && JSON.stringify(tool) === call.def) ?? false;
     }
     const scheme = typeof call.frame.url === "string" ? call.frame.url.split(":", 1)[0] : "";

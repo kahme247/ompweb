@@ -1,0 +1,63 @@
+name: omp runner binaries
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    # Bun cross-compiles every target from Linux, as omp's own release does.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: linux, cpu: x64, binary: ompweb-omp-linux-x64 }
+          - { target: linux-arm64, os: linux, cpu: arm64, binary: ompweb-omp-linux-arm64 }
+          - { target: darwin-x64, os: darwin, cpu: x64, binary: ompweb-omp-darwin-x64 }
+          - { target: darwin-arm64, os: darwin, cpu: arm64, binary: ompweb-omp-darwin-arm64 }
+          - { target: windows-x64, os: win32, cpu: x64, binary: ompweb-omp-windows-x64.exe }
+    defaults:
+      run:
+        working-directory: runner
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      # The host's own addon package is not needed; the target's is what gets embedded.
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --os=${{ matrix.os }} --cpu=${{ matrix.cpu }}
+
+      - name: Build binary
+        run: bun scripts/build-binary.ts ${{ matrix.target }}
+
+      - name: Smoke test
+        if: matrix.target == 'linux-x64'
+        run: |
+          set -euo pipefail
+          runtime_dir="$(mktemp -d)"
+          HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" release/${{ matrix.binary }} --version
+          HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" release/${{ matrix.binary }} --smoke-test
+
+      - name: Upload binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.binary }}
+          path: runner/release/${{ matrix.binary }}
+          if-no-files-found: error

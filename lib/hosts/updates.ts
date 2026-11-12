@@ -154,7 +154,7 @@ function installSupport(method: "npm" | "bun" | "binary"): string | null {
     if (!info.isDirectory() || info.isSymbolicLink() || realpathSync(directory) !== directory || (process.getuid && info.uid !== process.getuid()) || (process.platform !== "win32" && (info.mode & 0o022))) throw new Error("Host install is not an owned, writable release directory");
     if (method === "binary") {
       hostReleaseName();
-      if (realpathSync(process.execPath) !== join(directory, process.platform === "win32" ? "ompweb.exe" : "ompweb") || !existsSync(join(directory, "dist", "index.html")) || !existsSync(join(directory, "lib", "omp", "session-edit-extension.mjs"))) throw new Error("Binary updates require a complete owned host release directory");
+      if (realpathSync(process.execPath) !== join(directory, process.platform === "win32" ? "ompweb.exe" : "ompweb") || !existsSync(join(directory, "dist", "index.html")) || !existsSync(join(directory, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp"))) throw new Error("Binary updates require a complete owned host release directory");
     } else if (basename(directory) !== "ompweb" || basename(dirname(directory)) !== "@kahme247" || basename(dirname(dirname(directory))) !== "node_modules") throw new Error("Host updates require an installed npm/bun package; source checkouts are manual-only");
     if (!safetyGuard) throw new Error("Host daemon restart safety is not configured");
     return safetyGuard();

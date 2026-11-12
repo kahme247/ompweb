@@ -221,7 +221,7 @@ export interface SessionStatsInfo {
   contextUsage?: ContextUsage;
 }
 
-/** One question of omp's RPC ask dialog (`method: "ask"`, opt-in via `set_ask_dialog`). */
+/** One question of omp's ask dialog (`method: "ask"`, omp's `askDialog`). */
 export interface RpcAskDialogQuestion {
   id: string;
   question: string;
@@ -240,6 +240,13 @@ export interface RpcAskDialogAnswer {
 }
 
 /**
+ * A submitted whole-form ask (omp's `formDialog`), by control `name`: radios, single checkboxes and
+ * single selects give their value (omitted when nothing is chosen), checkbox groups and multi-selects
+ * an array, `number`/`range` inputs a number, other text fields their text. Mirrors pi-tui's html-form.
+ */
+export type HtmlFormData = Record<string, string | number | string[]>;
+
+/**
  * omp's rpc-ui extension UI request frames, including the methods missing from
  * the browser-facing union in lib/types.ts (`open_url`, `cancel`). The wrapper
  * adds `expiresAt` when a timeout is present so reconnecting clients can
@@ -251,6 +258,7 @@ export type OmpExtensionUiRequest =
   | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "ask"; questions: RpcAskDialogQuestion[]; timeout?: number; expiresAt?: number }
+  | { type: "extension_ui_request"; id: string; method: "form"; html: string; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
   | { type: "extension_ui_request"; id: string; method: "notify"; message: string; notifyType?: "info" | "warning" | "error" }
   | { type: "extension_ui_request"; id: string; method: "setStatus"; statusKey: string; statusText: string | undefined }

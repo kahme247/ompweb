@@ -391,7 +391,6 @@ const { ChatWindow } = await import("@/components/ChatWindow");
 const { SessionSidebar } = await import("@/components/SessionSidebar");
 const { AppShell } = await import("@/components/AppShell");
 const { FileExplorer } = await import("@/components/FileExplorer");
-const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await import("@/lib/omp/session-edit-extension.mjs");
 // Edit only opens a confirm dialog; the edit starts from its confirm button.
 async function confirmEdit(view, button) {
   await act(async () => { fireEvent.click(button); });
@@ -4152,35 +4151,27 @@ async function attachEditableWrapper(t, native, { holdHistory = false } = {}) {
   const historyFrames = [];
   const identityChanges = [];
   const ready = { type: "ready", protocolVersion: 2 };
-  let protocolNegotiated = false;
+  let readied = false;
   const emitNative = (frame) => { for (const listener of [...listeners]) listener(frame); };
   const wrapper = new AgentSessionWrapper({
     isAlive: true,
-    async waitReady() { return ready; },
-    async negotiateProtocol(frame) {
-      assert.equal(frame, ready, "the wrapper must negotiate the announced ready frame");
-      protocolNegotiated = true;
-    },
+    async waitReady() { readied = true; return ready; },
     onFrame(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     async sendCommand(command) {
-      assert.equal(protocolNegotiated, true, "commands must wait for readiness and protocol negotiation");
+      assert.equal(readied, true, "commands must wait for readiness");
       if (command.type === "get_state") return {
         sessionId: native.sessionId, sessionFile: native.filePath,
         isStreaming: world.agents.get(native.sessionId)?.state?.isStreaming ?? false,
         isCompacting: false, isSettled: true, hasPendingAsyncWork: false, queuedMessageCount: 0,
       };
-      if (command.type === "get_available_commands") return { commands: [{ name: SESSION_EDIT_COMMAND, source: "extension" }] };
-      if (command.type === "prompt" && command.message.startsWith(`/${SESSION_EDIT_COMMAND} `)) {
-        const request = JSON.parse(command.message.slice(SESSION_EDIT_COMMAND.length + 2));
-        const response = await native.command({ type: "edit_message", entryId: request.entryId });
+      if (command.type === "edit_message") {
+        const response = await native.command(command);
         const value = await response.json();
         if (native.editOutcome === "persistence-error") {
           emitNative({ type: "notice", source: "session-persistence", level: "error", message: value.error });
         }
-        emitNative({ type: "extension_ui_request", method: "notify", message: SESSION_EDIT_RESPONSE_PREFIX + JSON.stringify({
-          requestId: request.requestId, ...(response.ok ? value.data : { error: value.error }),
-        }) });
-        return { agentInvoked: false };
+        if (!response.ok) throw new Error(value.error);
+        return value.data;
       }
       if (command.type === "prompt") { await native.command(command); return { agentInvoked: true }; }
       return {};

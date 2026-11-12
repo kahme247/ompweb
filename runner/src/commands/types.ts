@@ -3,8 +3,20 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 /** What a command handler can reach besides its arguments. */
 export interface CommandContext {
 	session: AgentSession;
+	/** The `cmd` frame's id while a command runs; absent for inbound non-command frames. */
+	id?: number;
 	/** Send an unsolicited frame to the host (streamed output, progress, subscriptions). */
 	send(frame: { t: string } & Record<string, unknown>): void;
+}
+
+/** A command failure with a machine-readable `code` (RPC's `session_busy`, `entry_not_found`, …); the `res` frame carries it. */
+export class CommandError extends Error {
+	constructor(
+		message: string,
+		readonly code: string,
+	) {
+		super(message);
+	}
 }
 
 /**

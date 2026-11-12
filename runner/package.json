@@ -2,6 +2,9 @@
   "name": "@kahme247/ompweb-omp",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "bun scripts/build-binary.ts"
+  },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "18.19.0",
     "@oh-my-pi/pi-natives": "18.19.0",

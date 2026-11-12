@@ -1,12 +1,12 @@
 import { applyMessageDelta, isDeltaUpdate, withStreamedArguments } from "../message-delta";
-import type { RpcFrameRecord } from "../omp/rpc-frame";
 import { isRecord } from "../type-guards";
+import type { WireEvent } from "./pending-requests";
 
-/** One open assistant message, fed by the channel's logical decoder. */
+/** One open assistant message, fed the events of the channel's `event` frames. */
 export class StreamSnapshot {
-  private frame: RpcFrameRecord | null = null;
+  private frame: WireEvent | null = null;
 
-  note(frame: RpcFrameRecord): boolean {
+  note(frame: WireEvent): boolean {
     if ((frame.type === "message_end" && (!isRecord(frame.message) || frame.message.role === "assistant")
       && (frame.messageId === undefined || this.frame?.messageId === undefined || frame.messageId === this.frame.messageId))
       || (frame.type === "agent_end" && frame.isTerminal !== false)) {
@@ -28,7 +28,7 @@ export class StreamSnapshot {
   whole(): string | null {
     if (!this.frame || !isRecord(this.frame.message)) return null;
     // A snapshot is a full update, not the delta already represented by it.
-    return JSON.stringify({ ...this.frame, assistantMessageEvent: undefined, message: withStreamedArguments(this.frame.message) });
+    return JSON.stringify({ t: "event", event: { ...this.frame, assistantMessageEvent: undefined, message: withStreamedArguments(this.frame.message) } });
   }
 
   clear(): void { this.frame = null; }
