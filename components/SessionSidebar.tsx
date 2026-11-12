@@ -205,6 +205,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [runningSessionPlaces, setRunningSessionPlaces] = useState<Record<string, LivePlace>>({});
   const [exitedSessions, setExitedSessions] = useState<Map<string, ExitedRpcSession>>(() => new Map());
+  const awaitingInputIds = useMemo(() => new Set(Object.keys(runningSessionPlaces).filter((id) => runningSessionPlaces[id].awaitingInput)), [runningSessionPlaces]);
   const knownRunningPlacesRef = useRef<Map<string, LivePlace>>(new Map());
   const { limit: recentRunsLimit } = useRecentRunsLimit();
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
@@ -1804,6 +1805,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                   hiddenCount={filtersActive ? 0 : Math.max(0, tree.length - MAX_PROJECT_SESSIONS)}
                   selectedSessionId={selectedSessionId}
                   runningSessionIds={runningSessionIds}
+                  awaitingInputIds={awaitingInputIds}
                   unreadSessionIds={unreadSessionIds}
                   exitedSessions={exitedSessions}
                   recentlyCompletedIds={effectiveRecentCompletedSet}

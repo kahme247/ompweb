@@ -213,6 +213,8 @@ interface LivePlace {
   poolId?: string;
   projectId?: string;
   projectKey?: string;
+  /** Running entries only: a blocking dialog waits for the user. */
+  awaitingInput?: boolean;
 }
 
 /** Where a live session the session list lacks gets its placeholder row: the
