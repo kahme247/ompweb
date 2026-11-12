@@ -116,8 +116,7 @@ async function startProcess(state: UtilityRpcState): Promise<RpcProcess> {
     },
   });
   try {
-    const ready = await proc.waitReady(READY_TIMEOUT_MS);
-    await proc.negotiateProtocol(ready);
+    await proc.waitReady(READY_TIMEOUT_MS);
   } catch (error) {
     void proc.dispose();
     throw error;
@@ -177,8 +176,7 @@ export async function runIsolatedUtilityCommand<T = unknown>(
     else signal.addEventListener("abort", onAbort, { once: true });
   }
   try {
-    const ready = await proc.waitReady(READY_TIMEOUT_MS);
-    await proc.negotiateProtocol(ready);
+    await proc.waitReady(READY_TIMEOUT_MS);
     return await proc.sendCommand<T>(command, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
   } catch (error) {
     if (signal?.aborted) {

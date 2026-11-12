@@ -26,7 +26,7 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 
 ## Requirements
 
-- [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
+- Nothing else for omp: ompweb ships its own [omp](https://github.com/can1357/oh-my-pi) build, `ompweb-omp` (beside the single binary, or as the `@kahme247/ompweb-omp-<os>-<arch>` optional dependency of the npm package). It reads your `~/.omp` settings, auth and sessions. `OMP_WEB_OMP_BIN` points ompweb at another one
 - Node.js `>= 24`. The server runs on [Bun](https://bun.sh), which installs automatically as a dependency of the npm package (a Bun on your `PATH` is used if the bundled one is missing)
 
 The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
@@ -454,7 +454,7 @@ Each [release](https://github.com/kahme247/ompweb/releases/latest) also ships
 ompweb as one compiled program with the files it serves beside it:
 `ompweb-linux-x64.tar.gz`, `ompweb-linux-arm64.tar.gz`, `ompweb-darwin-x64.tar.gz`,
 `ompweb-darwin-arm64.tar.gz` and `ompweb-windows-x64.zip`. It needs no Node, npm
-or Bun; only omp must be installed. The x64 builds use Bun's baseline runtime, so
+or Bun, and no omp: its own omp build, `ompweb-omp`, is beside it. The x64 builds use Bun's baseline runtime, so
 they also run on CPUs without AVX2. Each archive carries the licenses of what it
 bundles in `licenses/`. Every commit on `main` that passes CI is also published as a
 [prerelease](https://github.com/kahme247/ompweb/releases) named after the time it was
@@ -466,7 +466,7 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
 ~/.local/share/ompweb-linux-x64/ompweb host          # the local daemon, in a second terminal
 ```
 
-- **Keep `ompweb` in its directory.** It serves `dist/`, `public/` and the other
+- **Keep `ompweb` in its directory.** It runs `ompweb-omp` and serves `dist/`, `public/` and the other
   files from the directory it is in (a symlink to it on your `PATH` works), or
   from `OMP_WEB_PACKAGE_DIR` when that is set.
 - **macOS** quarantines downloads: run `xattr -dr com.apple.quarantine ompweb-darwin-arm64`
@@ -480,8 +480,7 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
   `ompweb host`, replace the directory with the new release, and start both again;
   **Settings → System** links the release page when a new version is out.
   Your sessions and settings live in `~/.omp`, not in that directory.
-- **As systemd user services**, write the two units yourself (adjust the paths;
-  add omp's directory to `PATH`, or set `OMP_WEB_OMP_BIN`):
+- **As systemd user services**, write the two units yourself (adjust the paths):
 
 ```ini
 # ~/.config/systemd/user/ompweb.service
@@ -826,7 +825,7 @@ update, stop the service, replace the release directory, and start it again. Aft
 revoking a host, stop and remove its service: it otherwise keeps retrying.
 
 **Linux (systemd user service).** Create `~/.config/systemd/user/ompweb-host.service`
-(adjust the release path, and add omp's directory to `PATH` or set `OMP_WEB_OMP_BIN`):
+(adjust the release path):
 
 ```ini
 [Unit]

@@ -12,7 +12,8 @@ npm run build:binary [-- --target bun-<os>-<arch>]   # build, then compile relea
 npm run typecheck && npm run lint
 ```
 
-The dev server needs the `omp` binary installed (on `PATH`, or set `OMP_WEB_OMP_BIN`).
+The dev server needs ompweb's omp build (`runner/`: `cd runner && bun install`, then point
+`OMP_WEB_OMP_BIN` at `runner/release/ompweb-omp-<os>-<arch>` or a wrapper running `bun runner/src/cli.ts`).
 All live-agent features go through it; session browsing works without it.
 
 ---
@@ -20,8 +21,8 @@ All live-agent features go through it; session browsing works without it.
 ## Architecture
 
 omp-web never imports `@oh-my-pi/*` or `@earendil-works/*` packages, even
-though the server now runs on Bun: live work goes through the installed `omp`
-child. See `DESIGN.md` for the full porting contract.
+though the server now runs on Bun: live work goes through the `ompweb-omp`
+child (`runner/`, ompweb's own omp build). See `DESIGN.md` for the full porting contract.
 
 ```
 Browser              Bun server (server/app.ts)          omp child process
@@ -32,8 +33,8 @@ Browser              Bun server (server/app.ts)          omp child process
   │   (all tabs)     POST /api/events ─▶ subscribe running/session/file  │
   │                        │                                    │
   ├─ send message ─────────▶ POST /api/agent/[id]               │
-  │                        │   startRpcSession() ── spawn ─────▶│ omp --mode rpc-ui
-  │                        │   sendCommand({type:"prompt"}) ───▶│ (NDJSON stdio)
+  │                        │   startRpcSession() ── spawn ─────▶│ ompweb-omp --headless
+  │                        │   sendCommand({type:"prompt"}) ───▶│ (channel, NDJSON stdio)
   │                        │                                    │
   ├─ session subscription ─▶ event-stream-hub onEvent()            │
   │                        │   onFrame() ◀── event frames ──────│
@@ -52,7 +53,7 @@ its own process (no launcher), `ompweb host` and `ompweb hash-password`.
 files via `lib/session-reader.ts` — no child process involved.  
 **Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` asks the
 session's `Host` (`lib/hosts/host.ts`; `localHost` in `lib/hosts/local-host.ts`)
-to spawn `omp --mode rpc-ui` (one process per active session) and runs
+to spawn `ompweb-omp --headless` (one process per active session) and runs
 `lib/omp/rpc-process.ts` over the returned transport. Every machine-local
 action of a session wrapper (spawn, session-file checks, list invalidation)
 goes through that host.
@@ -61,7 +62,7 @@ Shared foundations in `lib/omp/`:
 
 - `paths.ts` — Node port of omp's directory resolution (`~/.omp/agent`,
   XDG, session dir slugs) and `sessionLocalRoot`, omp's `local://` root rule.
-- `omp-cli.ts` — locate/probe the installed `omp` binary (`resolveOmpBin`,
+- `omp-cli.ts` — locate/probe the `ompweb-omp` binary (`resolveOmpBin`,
   `getOmpVersion`).
 - `rpc-process.ts` — process + NDJSON protocol layer (`RpcProcess`).
 - `rpc-transport.ts` — `RpcTransport`: the byte pipe under `RpcProcess`

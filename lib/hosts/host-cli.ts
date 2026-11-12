@@ -69,14 +69,15 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
   // Login/logout need none of the daemon, which jiti would otherwise transpile on every run.
-  const { runHostDaemon } = await import("./daemon");
+  const [{ runHostDaemon }, { hostSocketPath }] = await Promise.all([import("./daemon"), import("./omp-socket")]);
   let daemon: HostDaemon | undefined;
   const endpoint = await createHostControlServer((command) => {
     if (!daemon) throw new Error("The host daemon is starting");
     return daemon.control(command);
   });
   try {
-    daemon = runHostDaemon({ allowHttp: argv.includes("--allow-http") });
+    // Windows has no host socket yet (a current-user named pipe is open in the runner spec).
+    daemon = runHostDaemon({ allowHttp: argv.includes("--allow-http"), hostSocket: process.platform === "win32" ? undefined : hostSocketPath() });
     // Worker cutover starts fail-closed; ordinary hosts have no maintenance environment.
     if (process.env.OMP_WEB_HOST_DRAINED === "1") daemon.control("drain");
     const stop = () => void daemon!.stop();

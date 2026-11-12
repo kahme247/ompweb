@@ -238,8 +238,10 @@ async function stageBinary(d: HostUpdateDescriptor, staging: string): Promise<st
     }
   }
   const binary = join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb");
+  const runner = join(release, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp");
+  if (!existsSync(join(release, "dist", "index.html")) || !existsSync(runner)) throw new Error("Incomplete host binary release layout");
   chmodSync(binary, 0o755);
-  if (!existsSync(join(release, "dist", "index.html")) || !existsSync(join(release, "lib", "omp", "session-edit-extension.mjs"))) throw new Error("Incomplete host binary release layout");
+  chmodSync(runner, 0o755);
   if (!(await binaryReportsVersion(binary, release, d.version))) throw new Error("Downloaded host binary reports a different version");
   return release;
 }
@@ -490,7 +492,7 @@ function validateDescriptor(path: string): HostUpdateDescriptor {
   if (!parent.isDirectory() || parent.isSymbolicLink() || (process.getuid && parent.uid !== process.getuid()) || (process.platform !== "win32" && (parent.mode & 0o022))) throw new Error("Unsafe host installation parent directory");
   if (d.installMethod === "binary") {
     hostReleaseName();
-    if (!existsSync(join(d.installDir, process.platform === "win32" ? "ompweb.exe" : "ompweb")) || !existsSync(join(d.installDir, "dist", "index.html")) || !existsSync(join(d.installDir, "lib", "omp", "session-edit-extension.mjs"))) throw new Error("Incomplete host binary release layout");
+    if (!existsSync(join(d.installDir, process.platform === "win32" ? "ompweb.exe" : "ompweb")) || !existsSync(join(d.installDir, "dist", "index.html")) || !existsSync(join(d.installDir, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp"))) throw new Error("Incomplete host binary release layout");
   } else {
     if (basename(d.installDir) !== "ompweb" || basename(dirname(d.installDir)) !== "@kahme247" || basename(dirname(dirname(d.installDir))) !== "node_modules") throw new Error("Package updates require an installed npm/bun package layout");
     const current = JSON.parse(readFileSync(join(d.installDir, "package.json"), "utf8"));

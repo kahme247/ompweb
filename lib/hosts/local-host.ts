@@ -1,7 +1,5 @@
 import { existsSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
-import { fileURLToPath } from "url";
 import { comparableProjectPath } from "../comparable-path";
 import { isValidOmpProfile } from "../omp-profile";
 import { getAgentEnvOverrides } from "../omp/agent-env";
@@ -15,13 +13,6 @@ import { resolveProject } from "../worktree";
 import { HostOpError } from "./link-protocol";
 import type { Host } from "./host";
 import { sessionOps } from "./session-ops";
-
-const EXTENSION_BESIDE_MODULE = fileURLToPath(new URL("../omp/session-edit-extension.mjs", import.meta.url));
-/** omp loads it for history edits (#278). Next to this module, not in the cwd: the daemon runs in HOME. In the compiled
- * binary this module lives in Bun's virtual filesystem, which omp cannot read, so the file ships in its static root. */
-export const SESSION_EDIT_EXTENSION_PATH = existsSync(EXTENSION_BESIDE_MODULE)
-  ? EXTENSION_BESIDE_MODULE
-  : join(process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd(), "lib", "omp", "session-edit-extension.mjs");
 
 // omp aliases "find"->"glob" and has no "ls" tool; the web UI presets still use
 // the pi names (lib/tool-presets.ts), so translate before building --tools.
@@ -42,7 +33,7 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
-/** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
+/** Extra CLI args for spawning `ompweb-omp --headless` for a session. */
 export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig, modelOverride?: string): string[] {
   const args: string[] = [];
   if (sessionFile) {
@@ -165,7 +156,7 @@ export const localHost: Omit<Host, "workspaceOps" | "supportsWorkspaceOp"> = {
       // Re-read per spawn so a respawn picks up environment values the user
       // added in Settings after the session was created (#104).
       env: { ...getAgentEnvOverrides(), ...options?.env },
-      extraArgs: [...buildSessionSpawnArgs(request.sessionFile, request.toolNames, request.advisor, launchConfig, request.spawnModel), "--extension", SESSION_EDIT_EXTENSION_PATH],
+      extraArgs: [...buildSessionSpawnArgs(request.sessionFile, request.toolNames, request.advisor, launchConfig, request.spawnModel)],
     });
     return {
       transport,

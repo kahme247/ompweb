@@ -1,7 +1,8 @@
-// `npm run build:binary [-- --target bun-<os>-<arch>]` (after the client build): compiles server/binary.ts into
-// release/ompweb-<os>-<arch>/ompweb (ompweb.exe for Windows) next to the files it serves and hands to omp and the
-// licenses of what it redistributes, then archives that directory as release/ompweb-<os>-<arch>.tar.gz (.zip for
-// Windows). Default target: this machine.
+// `npm run build:binary [-- --target bun-<os>-<arch>]` (after the client build and the runner build,
+// `bun runner/scripts/build-binary.ts <os>-<arch>`): compiles server/binary.ts into release/ompweb-<os>-<arch>/ompweb
+// (ompweb.exe for Windows) next to the files it serves, the omp runner it spawns (ompweb-omp) and the licenses of what
+// it redistributes, then archives that directory as release/ompweb-<os>-<arch>.tar.gz (.zip for Windows). Default
+// target: this machine.
 import { cpSync, existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -43,10 +44,18 @@ const result = await Bun.build({
 for (const log of result.logs) console.log(log);
 if (!result.success) process.exit(1);
 
-// The static root (server/binary.ts): the client, the public files, the extension the daemon hands omp, the KaTeX CSS
-// and fonts (where the server resolves the katex package), and the licenses of what ships.
+// The static root (server/binary.ts): the client, the public files, the KaTeX CSS and fonts (where the server
+// resolves the katex package), and the licenses of what ships. Beside the binary: the omp runner it spawns
+// (`ompweb-omp`, lib/omp/omp-cli.ts), built first by runner/scripts/build-binary.ts.
 const copy = (from: string, to: string) => cpSync(from, path.join(out, to), { recursive: true });
-for (const file of ["dist", "public", "LICENSE", "lib/omp/session-edit-extension.mjs"]) copy(path.join(root, file), file);
+for (const file of ["dist", "public", "LICENSE"]) copy(path.join(root, file), file);
+const runnerTarget = name.slice("ompweb-".length);
+const runner = path.join(root, "runner", "release", `ompweb-omp-${runnerTarget}${windows ? ".exe" : ""}`);
+if (!existsSync(runner)) {
+  console.error(`No ${path.relative(root, runner)}: run \`bun runner/scripts/build-binary.ts ${runnerTarget}\` first.`);
+  process.exit(1);
+}
+copy(runner, windows ? "ompweb-omp.exe" : "ompweb-omp");
 for (const file of new Bun.Glob("app/fonts/*-{OFL.txt,LICENSE.*}").scanSync(root)) copy(path.join(root, file), file);
 const katex = path.dirname(Bun.resolveSync("katex/package.json", root));
 for (const file of ["package.json", "LICENSE", "dist/katex.min.css", "dist/fonts"]) copy(path.join(katex, file), `node_modules/katex/${file}`);

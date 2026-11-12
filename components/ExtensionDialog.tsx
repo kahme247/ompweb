@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { createElement, Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import type { ExtensionUiRequest } from "@/lib/types";
-import type { RpcAskDialogAnswer } from "@/lib/pi-types";
+import type { HtmlFormData, RpcAskDialogAnswer } from "@/lib/pi-types";
 import { useI18n } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useTouchTargets } from "@/hooks/useTouchTargets";
@@ -11,14 +11,15 @@ import { matchMobileViewport } from "@/hooks/useIsMobile";
 
 export type ExtensionDialogRequest = Extract<
   ExtensionUiRequest,
-  { method: "select" | "confirm" | "input" | "editor" | "ask" }
+  { method: "select" | "confirm" | "input" | "editor" | "ask" | "form" }
 >;
 
 export type ExtensionDialogResponse =
   | { value: string }
   | { confirmed: boolean }
   | { cancelled: true }
-  | { answers: RpcAskDialogAnswer[] };
+  | { answers: RpcAskDialogAnswer[] }
+  | { data: HtmlFormData };
 
 // The Other text lives as long as the question: choosing a regular option only
 // unchooses it, so the text is still in its row when Other is chosen again.
@@ -219,6 +220,96 @@ function initialAskDrafts(request: ExtensionDialogRequest): AskDraft[] {
   });
 }
 
+// The agent's form markup becomes React elements: these tags render as themselves with only the
+// attributes copied below; others contribute just their text, and dropped ones nothing at all.
+const FORM_TAGS: Record<string, true> = {
+  fieldset: true, legend: true, p: true, label: true, div: true, span: true, section: true, strong: true, em: true, b: true, i: true,
+  code: true, small: true, br: true, hr: true, ul: true, ol: true, li: true, h1: true, h2: true, h3: true, h4: true, h5: true, h6: true,
+  input: true, select: true, option: true, optgroup: true, textarea: true,
+};
+const DROPPED_TAGS: Record<string, true> = {
+  script: true, style: true, template: true, noscript: true, button: true, iframe: true, object: true, embed: true, img: true, svg: true, math: true,
+};
+const INPUT_TYPES: Record<string, true> = {
+  radio: true, checkbox: true, text: true, number: true, range: true, email: true, url: true, tel: true, search: true, date: true, time: true, hidden: true,
+};
+const FIELD_STYLE = { padding: "7px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12.5, fontFamily: "inherit" } as const;
+
+function formNode(node: ChildNode, prefix: string, key: string): ReactNode {
+  if (node.nodeType === 3) return node.textContent;
+  if (node.nodeType !== 1) return null;
+  const element = node as Element;
+  const tag = element.localName;
+  if (DROPPED_TAGS[tag]) return null;
+  const children = Array.from(element.childNodes, (child, index) => formNode(child, prefix, `${key}.${index}`));
+  if (!FORM_TAGS[tag]) return createElement(Fragment, { key }, ...children);
+  const attr = (name: string) => element.getAttribute(name) ?? undefined;
+  const length = (name: string) => element.hasAttribute(name) ? Number(element.getAttribute(name)) : undefined;
+  const props: Record<string, unknown> = { key };
+  const id = attr("id");
+  if (id) props.id = `${prefix}-${id}`;
+  if (tag === "label" && attr("for")) props.htmlFor = `${prefix}-${attr("for")}`;
+  if (tag === "input" || tag === "select" || tag === "textarea") {
+    Object.assign(props, { name: attr("name"), required: element.hasAttribute("required"), disabled: element.hasAttribute("disabled") });
+  }
+  if (tag === "input") {
+    const rawType = attr("type")?.toLowerCase() ?? "text";
+    const type = INPUT_TYPES[rawType] ? rawType : "text";
+    Object.assign(props, { type, placeholder: attr("placeholder"), min: attr("min"), max: attr("max"), step: attr("step"), pattern: attr("pattern"), minLength: length("minlength"), maxLength: length("maxlength") });
+    if (type === "radio" || type === "checkbox") {
+      Object.assign(props, { value: attr("value") ?? "on", defaultChecked: element.hasAttribute("checked"), style: { accentColor: "var(--accent-strong)" } });
+    } else {
+      Object.assign(props, { defaultValue: attr("value") ?? "", style: FIELD_STYLE });
+    }
+    return createElement("input", props);
+  }
+  if (tag === "textarea") {
+    Object.assign(props, { placeholder: attr("placeholder"), rows: length("rows"), minLength: length("minlength"), maxLength: length("maxlength"), defaultValue: element.textContent ?? "", style: { ...FIELD_STYLE, width: "100%", resize: "vertical" } });
+    return createElement("textarea", props);
+  }
+  if (tag === "select") {
+    const multiple = element.hasAttribute("multiple");
+    const selected = Array.from(element.querySelectorAll("option"))
+      .filter((option) => option.hasAttribute("selected"))
+      .map((option) => option.getAttribute("value") ?? option.textContent ?? "");
+    Object.assign(props, { multiple, defaultValue: multiple ? selected : selected[0], style: FIELD_STYLE });
+  }
+  if (tag === "option") Object.assign(props, { value: attr("value") ?? element.textContent ?? "", disabled: element.hasAttribute("disabled") });
+  if (tag === "optgroup") props.label = attr("label");
+  if (tag === "br" || tag === "hr") return createElement(tag, props);
+  return createElement(tag, props, ...children);
+}
+
+/** What the form submits, as omp's html-form reports it (see HtmlFormData). */
+export function readFormData(form: HTMLFormElement): HtmlFormData {
+  const data: HtmlFormData = {};
+  const controls = Array.from(form.elements).filter((element) =>
+    ["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName) && (element as HTMLInputElement).name && !(element as HTMLInputElement).disabled,
+  ) as Array<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>;
+  for (const control of controls) {
+    const { name } = control;
+    if (control.tagName === "SELECT") {
+      const select = control as HTMLSelectElement;
+      const values = Array.from(select.selectedOptions).filter((option) => !option.disabled).map((option) => option.value);
+      if (select.multiple) data[name] = values;
+      else if (values[0] !== undefined) data[name] = values[0];
+      continue;
+    }
+    const { type, value } = control as HTMLInputElement;
+    if (type === "radio" || type === "checkbox") {
+      const group = controls.filter((other) => other.name === name && (other as HTMLInputElement).type === type) as HTMLInputElement[];
+      const checked = group.filter((input) => input.checked).map((input) => input.value);
+      if (type === "checkbox" && group.length > 1) data[name] = checked;
+      else if (checked[0] !== undefined) data[name] = checked[0];
+    } else if ((type === "number" || type === "range") && value.trim() !== "" && Number.isFinite(Number(value))) {
+      data[name] = Number(value);
+    } else {
+      data[name] = value;
+    }
+  }
+  return data;
+}
+
 /**
  * Overlay dialog for `select` / `confirm` / `input` / `editor` / `ask` extension UI
  * requests. Polished UX:
@@ -255,6 +346,14 @@ export function ExtensionDialog({
   const [askDrafts, setAskDrafts] = useState(() => initialAskDrafts(request));
   const viewportMaxHeight = useViewportMaxHeight();
   const { touchTargets } = useTouchTargets();
+  const formRef = useRef<HTMLFormElement>(null);
+  // Parsed in an inert document and never attached: only formNode's elements reach the page.
+  const formContent = useMemo(() => {
+    if (request.method !== "form") return null;
+    const doc = new window.DOMParser().parseFromString(request.html, "text/html");
+    const root = doc.querySelector("form") ?? doc.body;
+    return Array.from(root.childNodes, (node, index) => formNode(node, `form-${request.id}`, String(index)));
+  }, [request]);
 
   useEffect(() => {
     // SSE reconnects replay the same request as a fresh object, not a new question.
@@ -277,7 +376,7 @@ export function ExtensionDialog({
       return question.multi || selected.length > 0 || (otherChosen && other.trim() !== "");
     })
     : request.method !== "select" || selectedOption !== null;
-  const title = request.method === "ask" ? t("chatWindow.askTitle") : request.title;
+  const title = request.method === "ask" || request.method === "form" ? t("chatWindow.askTitle") : request.title;
 
   // Answering removes the panel. Release its text field first, in the same
   // task, so the phone keyboard closes once instead of flashing as the
@@ -351,6 +450,9 @@ export function ExtensionDialog({
           };
         }),
       });
+    } else if (request.method === "form") {
+      const form = formRef.current;
+      if (form?.reportValidity()) respond({ data: readFormData(form) });
     } else {
       respond({ value });
     }
@@ -689,6 +791,16 @@ export function ExtensionDialog({
                 );
               })}
             </div>
+          )}
+          {request.method === "form" && (
+            <form
+              key={request.id}
+              ref={formRef}
+              onSubmit={(event) => { event.preventDefault(); submitValue(); }}
+              style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8, color: "var(--text)", fontSize: 13, lineHeight: 1.55 }}
+            >
+              {formContent}
+            </form>
           )}
         </div>
         </div>
