@@ -72,10 +72,13 @@ export async function listPlugins(run: (args: string[]) => Promise<string>): Pro
     throw new Error("`omp plugin list --json` did not print a plugin list.");
   }
   // A linked plugin's path is its own directory, anywhere: only one under node_modules leads to omp's package.json.
-  const sources = await declaredSources(list.npm.find((plugin) => typeof plugin.path === "string" && plugin.path.endsWith(join("node_modules", plugin.name))));
+  const installed = (plugin: { name: string; path?: unknown }) => typeof plugin.path === "string" && plugin.path.endsWith(join("node_modules", plugin.name));
+  const sources = await declaredSources(list.npm.find(installed));
   const plugins: PluginEntry[] = list.npm.map((plugin) => {
     const entry: PluginEntry = { kind: "npm", id: plugin.name, version: typeof plugin.version === "string" ? plugin.version : null, enabled: plugin.enabled === true };
-    if (sources) entry.source = typeof sources[plugin.name] === "string" ? (sources[plugin.name] as string) : null;
+    // A path outside node_modules is linked, whether or not the package.json can be read.
+    if (typeof plugin.path === "string" && !installed(plugin)) entry.source = null;
+    else if (sources) entry.source = typeof sources[plugin.name] === "string" ? (sources[plugin.name] as string) : null;
     return entry;
   });
   for (const plugin of list.marketplace) {

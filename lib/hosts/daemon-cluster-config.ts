@@ -465,7 +465,7 @@ export function createClusterConfig(deps: {
         // Same version from another source (the registry's package for a Git plugin) is not the master's plugin. A master that
         // sent no source counts by version; a member whose source is unknown installs the master's.
         const sameSource = plugin.source === undefined || (present?.source !== undefined && installSpec(present) === spec);
-        if (present && (plugin.kind !== "npm" || plugin.version === null || (present.version === plugin.version && sameSource))) continue;
+        if (present && (plugin.kind !== "npm" || ((plugin.version === null || present.version === plugin.version) && sameSource))) continue;
         if (spec === null) {
           failed ??= `${plugin.id} is installed from a local directory on the master; install it on this host by hand`;
           deps.log(`cluster-config: ${plugin.id} cannot be installed here (a local directory on the master)`);
