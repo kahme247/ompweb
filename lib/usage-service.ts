@@ -29,13 +29,13 @@ import type {
  */
 export const USAGE_PARSER_VERSION = 3;
 
-/** The most one request can report. A record beyond it is a malformed line, and without such rows no number of them
- * makes a report's sums overflow (tokens are summed as integers) or go non-finite (cost). */
+/** The most one request can report. A record beyond it, or with a token count that is no whole number, is a malformed
+ * line. Kept out, the rows left cannot make a report's cost sums go non-finite. */
 export const USAGE_RECORD_LIMITS = { tokens: 1e9, cost: 1e6 };
 
 /** Whether every number of `record` is one a request can have. */
 export function hasPlausibleNumbers(record: UsageRecord): boolean {
-  const count = (value: number) => value >= 0 && value <= USAGE_RECORD_LIMITS.tokens;
+  const count = (value: number) => Number.isInteger(value) && value >= 0 && value <= USAGE_RECORD_LIMITS.tokens;
   return count(record.input) && count(record.output) && count(record.reasoning)
     && count(record.cacheRead) && count(record.cacheWrite) && count(record.totalTokens)
     && record.cost >= 0 && record.cost <= USAGE_RECORD_LIMITS.cost

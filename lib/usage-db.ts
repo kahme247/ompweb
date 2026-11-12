@@ -493,18 +493,19 @@ export async function getUsageReportFromDb(
   }
 
   // 1. Summary Query
+  // Tokens are added with TOTAL throughout: unlike SUM it cannot overflow, however many rows there are.
   const summaryRow = db
     .prepare(
       `
       SELECT
         COUNT(*) AS usageRecordsCount,
         COALESCE(SUM(cost), 0) AS totalCost,
-        COALESCE(SUM(total_tokens), 0) AS totalTokens,
-        COALESCE(SUM(input_tokens), 0) AS inputTokens,
-        COALESCE(SUM(output_tokens), 0) AS outputTokens,
-        COALESCE(SUM(reasoning_tokens), 0) AS reasoningTokens,
-        COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
-        COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens,
+        TOTAL(total_tokens) AS totalTokens,
+        TOTAL(input_tokens) AS inputTokens,
+        TOTAL(output_tokens) AS outputTokens,
+        TOTAL(reasoning_tokens) AS reasoningTokens,
+        TOTAL(cache_read_tokens) AS cacheReadTokens,
+        TOTAL(cache_write_tokens) AS cacheWriteTokens,
         COALESCE(SUM(cache_savings), 0) AS cacheSavings,
         COUNT(DISTINCT strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch', 'localtime')) AS activeDays,
         SUM(CASE WHEN cost_quality = 'provider_reported' THEN 1 ELSE 0 END) AS providerReportedCount,
@@ -562,7 +563,7 @@ export async function getUsageReportFromDb(
       SELECT
         provider,
         COALESCE(SUM(cost), 0) AS cost,
-        COALESCE(SUM(total_tokens), 0) AS tokens
+        TOTAL(total_tokens) AS tokens
       FROM usage_records
       WHERE ${COUNTED_ROWS} AND timestamp >= ? AND timestamp <= ? ${whereProject}
       GROUP BY provider
@@ -592,7 +593,7 @@ export async function getUsageReportFromDb(
         provider,
         MIN(timestamp) AS minTimestamp,
         COALESCE(SUM(cost), 0) AS cost,
-        COALESCE(SUM(total_tokens), 0) AS tokens
+        TOTAL(total_tokens) AS tokens
       FROM usage_records
       WHERE ${COUNTED_ROWS} AND timestamp >= ? AND timestamp <= ? ${whereProject}
       GROUP BY bucketDate, provider
@@ -707,12 +708,12 @@ export async function getUsageReportFromDb(
         model,
         provider,
         COALESCE(SUM(cost), 0) AS cost,
-        COALESCE(SUM(total_tokens), 0) AS tokens,
-        COALESCE(SUM(input_tokens), 0) AS inputTokens,
-        COALESCE(SUM(output_tokens), 0) AS outputTokens,
-        COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
-        COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens,
-        COALESCE(SUM(reasoning_tokens), 0) AS reasoningTokens,
+        TOTAL(total_tokens) AS tokens,
+        TOTAL(input_tokens) AS inputTokens,
+        TOTAL(output_tokens) AS outputTokens,
+        TOTAL(cache_read_tokens) AS cacheReadTokens,
+        TOTAL(cache_write_tokens) AS cacheWriteTokens,
+        TOTAL(reasoning_tokens) AS reasoningTokens,
         COUNT(*) AS recordsCount
       FROM usage_records
       WHERE ${COUNTED_ROWS} AND timestamp >= ? AND timestamp <= ? ${whereProject}
@@ -745,10 +746,10 @@ export async function getUsageReportFromDb(
       SELECT
         strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch', 'localtime') AS date,
         COALESCE(SUM(cost), 0) AS cost,
-        COALESCE(SUM(total_tokens), 0) AS tokens,
-        COALESCE(SUM(input_tokens), 0) AS inputTokens,
-        COALESCE(SUM(output_tokens), 0) AS outputTokens,
-        COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens
+        TOTAL(total_tokens) AS tokens,
+        TOTAL(input_tokens) AS inputTokens,
+        TOTAL(output_tokens) AS outputTokens,
+        TOTAL(cache_read_tokens) AS cacheReadTokens
       FROM usage_records
       WHERE ${COUNTED_ROWS} AND timestamp >= ? AND timestamp <= ? ${whereProject}
       GROUP BY date
@@ -778,7 +779,7 @@ export async function getUsageReportFromDb(
         host_id AS hostId,
         session_cwd AS project,
         COALESCE(SUM(cost), 0) AS cost,
-        COALESCE(SUM(total_tokens), 0) AS tokens,
+        TOTAL(total_tokens) AS tokens,
         COUNT(DISTINCT session_id) AS sessionsCount
       FROM usage_records
       WHERE ${COUNTED_ROWS} AND timestamp >= ? AND timestamp <= ? ${whereProject}
@@ -817,7 +818,7 @@ export async function getUsageReportFromDb(
       SELECT
         host_id AS hostId,
         COALESCE(SUM(cost), 0) AS cost,
-        COALESCE(SUM(total_tokens), 0) AS tokens,
+        TOTAL(total_tokens) AS tokens,
         COUNT(DISTINCT session_id) AS sessionsCount
       FROM usage_records
       WHERE ${COUNTED_ROWS} AND timestamp >= ? AND timestamp <= ? ${whereProject}
