@@ -79,7 +79,22 @@ function parseJson(text: string, what: string): unknown {
 }
 
 const isPlugin = (p: unknown): p is PluginEntry =>
-  isRecord(p) && (p.kind === "npm" || p.kind === "marketplace") && typeof p.id === "string" && /^[^-\s]\S*$/.test(p.id) && (p.version === null || typeof p.version === "string") && typeof p.enabled === "boolean";
+  isRecord(p) && (p.kind === "npm" || p.kind === "marketplace") && typeof p.id === "string" && /^[^-\s]\S*$/.test(p.id) && (p.version === null || typeof p.version === "string") && typeof p.enabled === "boolean" && (p.source === undefined || p.source === null || typeof p.source === "string");
+
+/**
+ * What `omp plugin install` takes for `plugin`, or null when only a directory on the master holds it (linked, `file:`).
+ * A git source (`github:…`, `git+…`, a repository URL) installs as itself, a tarball URL under the plugin's name, and a
+ * registry range, or a master that sent no source, as the version the master runs.
+ */
+function installSpec(plugin: PluginEntry): string | null {
+  const { source } = plugin;
+  if (plugin.kind === "marketplace") return plugin.id; // a marketplace plugin cannot be pinned to a version
+  if (source === null || (source !== undefined && /^(file:|link:|portal:|[./~\\]|[A-Za-z]:)/.test(source))) return null;
+  if (source !== undefined && /^https?:\/\/\S+\.(tgz|tar\.gz)$/i.test(source)) return `${plugin.id}@${source}`;
+  if (source !== undefined && /^(?!npm:)([A-Za-z][\w+.-]*:|git@)\S+$/.test(source)) return source;
+  return plugin.version === null ? plugin.id : `${plugin.id}@${plugin.version}`;
+}
+
 const isFile = (f: unknown): f is ManifestFile =>
   isRecord(f) &&
   (f.root === "agent" || f.root === "home") &&
@@ -446,8 +461,13 @@ export function createClusterConfig(deps: {
       for (const plugin of target) {
         const present = have.get(key(plugin));
         if (present && (plugin.kind !== "npm" || plugin.version === null || present.version === plugin.version)) continue;
-        // A marketplace plugin cannot be pinned to a version.
-        await run(["install", plugin.kind === "npm" && plugin.version !== null ? `${plugin.id}@${plugin.version}` : plugin.id], INSTALL_MS);
+        const spec = installSpec(plugin);
+        if (spec === null) {
+          failed ??= `${plugin.id} is installed from a local directory on the master; install it on this host by hand`;
+          deps.log(`cluster-config: ${plugin.id} cannot be installed here (a local directory on the master)`);
+          continue;
+        }
+        await run(["install", spec], INSTALL_MS);
         installed = true;
       }
       for (const plugin of have.values()) if (!wanted.has(key(plugin))) await run(["uninstall", plugin.id], UNINSTALL_MS);

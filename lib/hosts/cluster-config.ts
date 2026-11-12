@@ -45,7 +45,8 @@ export const LOCAL_SETTINGS: readonly (readonly string[])[] = [
 ];
 
 export interface ManifestFile { root: ConfigRoot; path: string; hash: string; size: number; exec: boolean }
-export interface PluginEntry { kind: "npm" | "marketplace"; id: string; version: string | null; enabled: boolean }
+/** `source` (npm only): the master's dependency spec for the plugin (`github:…`, a range, `file:…`); null for a linked plugin; absent from a master that cannot read it. */
+export interface PluginEntry { kind: "npm" | "marketplace"; id: string; version: string | null; enabled: boolean; source?: string | null }
 export interface ConfigManifest { version: string; files: ManifestFile[]; agentEnv: Record<string, string>; plugins: PluginEntry[] }
 
 export class ClusterConfigError extends Error {
