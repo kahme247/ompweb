@@ -335,15 +335,18 @@ async function binaryReportsVersion(binary: string, packageDir: string, version:
   const { stdout } = await exec(binary, ["--version"], { timeout: 10000, env: workerEnvironment({ OMP_WEB_PACKAGE_DIR: packageDir }), maxBuffer: 1024 * 1024 });
   return stdout.trim().split(/\s+/).some((token) => token.replace(/^v/, "") === version);
 }
+/** PREFLIGHT_MARKER (lib/hosts/preflight.ts), encoded so this module, bundled into the same binary, does not embed it. */
+export const PREFLIGHT_MARKER_BASE64 = "b21wd2ViLXByZWZsaWdodC1zY3JhdGNoLQ==";
 /** The candidate's `ompweb preflight` (lib/hosts/preflight.ts) in this host's environment: the session omp it resolves
- * must start and say hello before the switch. A release without the command gets it only if it has no runner either. */
+ * must start and say hello before the switch. A new release without the command gets it only if it has no runner
+ * either; a restart-only update of an install that predates the command restarts what already runs. */
 async function preflightHostRelease(d: HostUpdateDescriptor, release: string): Promise<void> {
   const binary = d.installMethod === "binary";
   const entry = binary ? join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb") : join(release, "bin", "omp-web.js");
   // Detected statically: an older ompweb takes `preflight` for a positional and starts the web server.
-  if (!(binary ? readFileSync(entry).includes("preflight ok: ") : existsSync(join(release, "lib", "hosts", "preflight.ts")))) {
+  if (!(binary ? readFileSync(entry).includes(Buffer.from(PREFLIGHT_MARKER_BASE64, "base64")) : existsSync(join(release, "lib", "hosts", "preflight.ts")))) {
     const runner = binary || Object.keys(JSON.parse(readFileSync(join(release, "package.json"), "utf8")).optionalDependencies ?? {}).some((name) => name.startsWith("@kahme247/ompweb-omp-"));
-    if (runner) throw new Error("The new host release has no preflight command to check its omp with");
+    if (runner && !d.restartOnly) throw new Error("The new host release has no preflight command to check its omp with");
     console.warn(`ompweb ${d.version} has no preflight command; its omp was not checked`);
     return;
   }
