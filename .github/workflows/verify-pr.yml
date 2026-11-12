@@ -74,11 +74,16 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
             npx bun scripts/build-binary.ts --target bun-windows-x64-baseline
-            npm run smoke -- --binary release/ompweb-windows-x64/ompweb.exe
+            bin=release/ompweb-windows-x64/ompweb.exe
           else
             npx bun scripts/build-binary.ts --target bun-linux-x64-baseline
-            npm run smoke -- --binary release/ompweb-linux-x64/ompweb
+            bin=release/ompweb-linux-x64/ompweb
           fi
+          npm run smoke -- --binary "$bin"
+          # What the host updater checks on a new release before it switches (lib/hosts/update-worker.ts): the marker
+          # it finds the command by, then the command itself against the bundled ompweb-omp.
+          grep -qa ompweb-preflight-scratch- "$bin"
+          timeout 120 "$bin" preflight
 
       - name: Packed install smoke test
         shell: bash
