@@ -3475,7 +3475,7 @@ function createAgentToolOps(source: AgentToolContext, replaying: boolean): Agent
         }
         const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
         const waiter = input.wait ? target.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
-        await target.send({ type: input.delivery, message: input.message });
+        await target.send({ type: input.delivery === "followUp" ? "follow_up" : input.delivery, message: input.message });
         return { waiter }; // Boxed: the lease ends at delivery, not at the turn's end.
       };
       const { waiter } = cold ? await wrapper.withPendingCommand(send, true) : await send();
