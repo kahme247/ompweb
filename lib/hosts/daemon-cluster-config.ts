@@ -79,7 +79,22 @@ function parseJson(text: string, what: string): unknown {
 }
 
 const isPlugin = (p: unknown): p is PluginEntry =>
-  isRecord(p) && (p.kind === "npm" || p.kind === "marketplace") && typeof p.id === "string" && /^[^-\s]\S*$/.test(p.id) && (p.version === null || typeof p.version === "string") && typeof p.enabled === "boolean";
+  isRecord(p) && (p.kind === "npm" || p.kind === "marketplace") && typeof p.id === "string" && /^[^-\s]\S*$/.test(p.id) && (p.version === null || typeof p.version === "string") && typeof p.enabled === "boolean" && (p.source === undefined || p.source === null || typeof p.source === "string");
+
+/**
+ * What `omp plugin install` takes for `plugin`, or null when only a directory on the master holds it (linked, `file:`).
+ * A git source (`github:…`, `git+…`, a repository URL) installs as itself, a tarball URL under the plugin's name, and a
+ * registry range, or a master that sent no source, as the version the master runs.
+ */
+function installSpec(plugin: PluginEntry): string | null {
+  const { source } = plugin;
+  if (plugin.kind === "marketplace") return plugin.id; // a marketplace plugin cannot be pinned to a version
+  if (source === null || (source !== undefined && /^(file:|link:|portal:|[./~\\]|[A-Za-z]:)/.test(source))) return null;
+  if (source !== undefined && /^https?:\/\/\S+\.(tgz|tar\.gz)$/i.test(source)) return `${plugin.id}@${source}`;
+  if (source !== undefined && /^(?!npm:)([A-Za-z][\w+.-]*:|git@)\S+$/.test(source)) return source;
+  return plugin.version === null ? plugin.id : `${plugin.id}@${plugin.version}`;
+}
+
 const isFile = (f: unknown): f is ManifestFile =>
   isRecord(f) &&
   (f.root === "agent" || f.root === "home") &&
@@ -429,33 +444,48 @@ export function createClusterConfig(deps: {
   /** omp's plugins in line with `target`: installs, then removals, then enabled states. Answers the first failure's last line of omp output. */
   async function reconcile(target: PluginEntry[]): Promise<string | null> {
     let failed: string | null = null;
-    const run = async (args: string[], timeoutMs: number) => {
+    // Logs name the plugin, never the install spec: a declared source can carry credentials (`git+https://user:token@…`).
+    const run = async (action: string, id: string, timeoutMs: number, spec = id) => {
       if (stopped) return;
       try {
-        await deps.runOmp(["plugin", ...args], timeoutMs, halt.signal);
+        await deps.runOmp(["plugin", action, spec], timeoutMs, halt.signal);
       } catch (error) {
         failed ??= lastLine(error);
-        deps.log(`cluster-config: omp plugin ${args.join(" ")} failed`);
+        deps.log(`cluster-config: omp plugin ${action} ${id} failed`);
       }
     };
     const key = (plugin: PluginEntry) => `${plugin.kind}:${plugin.id}`;
     try {
       let have = new Map((await installedPlugins()).map((plugin) => [key(plugin), plugin]));
       const wanted = new Set(target.map(key));
-      let installed = false;
+      const installed: PluginEntry[] = [];
       for (const plugin of target) {
         const present = have.get(key(plugin));
-        if (present && (plugin.kind !== "npm" || plugin.version === null || present.version === plugin.version)) continue;
-        // A marketplace plugin cannot be pinned to a version.
-        await run(["install", plugin.kind === "npm" && plugin.version !== null ? `${plugin.id}@${plugin.version}` : plugin.id], INSTALL_MS);
-        installed = true;
+        const spec = installSpec(plugin);
+        // Same version from another source (the registry's package for a Git plugin) is not the master's plugin. A master that
+        // sent no source counts by version; a member whose source is unknown installs the master's.
+        const sameSource = plugin.source === undefined || (present?.source !== undefined && installSpec(present) === spec);
+        if (present && (plugin.kind !== "npm" || ((plugin.version === null || present.version === plugin.version) && sameSource))) continue;
+        if (spec === null) {
+          failed ??= `${plugin.id} is installed from a local directory on the master; install it on this host by hand`;
+          deps.log(`cluster-config: ${plugin.id} cannot be installed here (a local directory on the master)`);
+          continue;
+        }
+        await run("install", plugin.id, INSTALL_MS, spec);
+        installed.push(plugin);
       }
-      for (const plugin of have.values()) if (!wanted.has(key(plugin))) await run(["uninstall", plugin.id], UNINSTALL_MS);
+      for (const plugin of have.values()) if (!wanted.has(key(plugin))) await run("uninstall", plugin.id, UNINSTALL_MS);
       // Whether a fresh install starts enabled is omp's choice: read it back.
-      if (installed && !stopped) have = new Map((await installedPlugins()).map((plugin) => [key(plugin), plugin]));
+      if (installed.length > 0 && !stopped) have = new Map((await installedPlugins()).map((plugin) => [key(plugin), plugin]));
+      // An unpinned source (a git branch, a tarball) can resolve to another version than the master runs.
+      for (const plugin of installed) {
+        const present = have.get(key(plugin));
+        if (stopped || plugin.kind !== "npm" || plugin.version === null || present?.version === plugin.version) continue;
+        failed ??= `${plugin.id}: installed ${present?.version ?? "nothing"}, the master runs ${plugin.version}`;
+      }
       for (const plugin of target) {
         const present = have.get(key(plugin));
-        if (present && present.enabled !== plugin.enabled) await run([plugin.enabled ? "enable" : "disable", plugin.id], TOGGLE_MS);
+        if (present && present.enabled !== plugin.enabled) await run(plugin.enabled ? "enable" : "disable", plugin.id, TOGGLE_MS);
       }
     } catch (error) {
       failed ??= lastLine(error);
