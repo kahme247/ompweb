@@ -1198,6 +1198,17 @@ export function isGone(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
 }
 
+/** Nothing is at `target`: not even a link to something that is gone, which reads as gone itself. */
+function isAbsent(target: string): boolean {
+  try {
+    lstatSync(target);
+    return false;
+  } catch (error) {
+    if (isGone(error)) return true;
+    throw error;
+  }
+}
+
 /** `complete` throws for a root or project directory it cannot read. `restore` is the restore preflight, which also
  * throws for symlinks and for a root that disappears once seen. */
 function collectSessionFiles(sessionsRoot: string, mode: "lenient" | "complete" | "restore" = "lenient"): string[] {
@@ -1215,7 +1226,7 @@ function collectSessionFiles(sessionsRoot: string, mode: "lenient" | "complete" 
   } catch (error) {
     // Only a root absent from the outset is an empty inventory. Once observed, disappearance is uncertainty.
     if (strict && (observedRoot || !(error && typeof error === "object" && "code" in error && error.code === "ENOENT"))) throw error;
-    if (mode === "complete" && !isGone(error)) throw error;
+    if (mode === "complete" && !(isGone(error) && isAbsent(sessionsRoot))) throw error;
     return [];
   }
   for (const dirent of projects) {
@@ -1463,7 +1474,7 @@ export function listSessionArtifactTranscripts(sessionFile: string, complete = f
     try {
       entries = readDirectorySyncRuntime(dir, { withFileTypes: true });
     } catch (error) {
-      if (complete && (dir !== root || !isGone(error))) throw error;
+      if (complete && !(dir === root && isGone(error) && isAbsent(dir))) throw error;
       continue;
     }
     for (const entry of entries) {

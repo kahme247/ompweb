@@ -103,6 +103,10 @@ async function syncHostUsage(host: Host, db: Database, refresh: boolean): Promis
         throw new HostOpError(409, "usage_changed", `${host.label} changed a usage transcript while it was being read`);
       }
       const whole: UsageTranscriptRecords = earlier ? { ...file, records: earlier.records.concat(file.records) } : file;
+      // No transcript holds more records than bytes: slices beyond that would be held without end.
+      if (whole.records.length > file.size) {
+        throw new HostOpError(502, "host_bad_result", `${host.label} sent more usage records than a transcript can hold`);
+      }
       if (file.more) {
         held = whole;
         sliced += file.records.length;

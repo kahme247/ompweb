@@ -309,8 +309,8 @@ function normalizeCwd(cwd: string): string {
   return isAbsolute(cwd) ? cwd : resolve(cwd);
 }
 
-/** One `readUsageRecords` answer stops growing at either limit; bytes are estimated (256 per file, 512 per record). A
- * transcript too large for one answer goes out in slices, so no answer comes near the link's 64 MiB result limit. */
+/** One `readUsageRecords` answer holds at most `bytes` of serialized records and stops growing after `ms`. A transcript
+ * with more goes out in slices, so no answer comes near the link's 64 MiB result limit. */
 export const USAGE_PAGE_LIMITS = { bytes: 8 * 1024 * 1024, ms: 10_000 };
 
 /** Null for a path that is gone, empty or not a file. Any other stat failure throws: unreadable is not gone. */
@@ -325,14 +325,21 @@ function usageStamp(path: string): UsageTranscriptStamp | null {
   return stats.isFile() && stats.size > 0 ? { path, mtimeMs: stats.mtimeMs, size: stats.size } : null;
 }
 
-/** A transcript's usage, whole. Null when it was deleted since it was stamped; any other read failure throws. */
-function usageRecords(path: string, modelsConfig: ModelsFileConfig, session: string): UsageRecord[] | null {
+/** A transcript's usage, whole, and what each record weighs serialized. Null when it was deleted since it was stamped;
+ * any other read failure throws. A record no answer has room for is no usage a transcript can hold: it is left out, like
+ * any malformed line. */
+function usageRecords(path: string, modelsConfig: ModelsFileConfig, session: string): { records: UsageRecord[]; sizes: number[] } | null {
+  let records: UsageRecord[];
   try {
-    return parseSessionUsage(path, modelsConfig, session, true);
+    records = parseSessionUsage(path, modelsConfig, session, true);
   } catch (error) {
     if (isGone(error)) return null;
     throw error;
   }
+  const sizes = records.map((record) => Buffer.byteLength(JSON.stringify(record)));
+  if (sizes.every((size) => size <= USAGE_PAGE_LIMITS.bytes)) return { records, sizes };
+  const fits = (_: unknown, index: number) => sizes[index] <= USAGE_PAGE_LIMITS.bytes;
+  return { records: records.filter(fits), sizes: sizes.filter(fits) };
 }
 
 /** Main stores what the usage ops answer as the whole truth: it drops the rows of every transcript they leave out or
@@ -873,8 +880,6 @@ export const sessionOps: SessionOps = {
     const files: UsageTranscriptRecords[] = [];
     const missing: string[] = [];
     let bytes = 0;
-    // The records an empty answer has room for: a transcript with more of them is sent in slices.
-    const slice = Math.max(1, Math.floor((USAGE_PAGE_LIMITS.bytes - 256) / 512));
     try {
       const sessions = new Set(inventorySessionFiles(getSessionsDir()));
       const modelsConfig = readModelsConfig();
@@ -884,18 +889,21 @@ export const sessionOps: SessionOps = {
           if (files.length > 0 && Date.now() - started > USAGE_PAGE_LIMITS.ms) return ok({ files, missing });
           // Stamped before parsing: a write that lands during the parse changes the stamp and is read again next time.
           const stamp = transcripts?.has(path) ? usageStamp(path) : null;
-          const records = stamp && usageRecords(path, modelsConfig, session);
-          if (!stamp || !records) {
+          const usage = stamp && usageRecords(path, modelsConfig, session);
+          if (!stamp || !usage) {
             missing.push(path);
             continue;
           }
-          const from = at === 0 ? skip : 0;
-          const sent = from === 0 && records.length <= slice ? records : records.slice(from, from + slice);
-          const size = 256 + 512 * sent.length;
-          // An answer that holds a file takes no other past its limit; an empty one takes any, to settle something.
-          if (files.length > 0 && bytes + size > USAGE_PAGE_LIMITS.bytes) return ok({ files, missing });
-          bytes += size;
-          if (from + sent.length < records.length) {
+          const { records, sizes } = usage;
+          const from = at === 0 ? Math.min(skip, records.length) : 0;
+          let end = from;
+          let room = USAGE_PAGE_LIMITS.bytes - bytes;
+          while (end < records.length && sizes[end] <= room) room -= sizes[end++];
+          // Sliced only when it must be: a transcript that does not fit behind the others waits for the next answer.
+          if (end < records.length && files.length > 0) return ok({ files, missing });
+          bytes = USAGE_PAGE_LIMITS.bytes - room;
+          const sent = from === 0 && end === records.length ? records : records.slice(from, end);
+          if (end < records.length) {
             files.push({ ...stamp, records: sent, more: true });
             return ok({ files, missing });
           }

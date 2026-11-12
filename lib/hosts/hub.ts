@@ -12,7 +12,8 @@ import { appendTransportSamples, transportMetricsPath } from "../transport-metri
 import { isRecord } from "../type-guards";
 import type { HostCapacity } from "./capacity";
 import type { ArchivedSessionInfo, SessionInfo } from "../types";
-import type { CostQualityTier } from "../usage-types";
+import { hasPlausibleNumbers } from "../usage-service";
+import type { CostQualityTier, UsageRecord } from "../usage-types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
 import {
   CREATION_ID_RE,
@@ -1090,6 +1091,8 @@ function usageRecord(value: unknown): boolean {
   return [sessionId, sessionCwd, provider, model].every((field) => typeof field === "string")
     && (["timestamp", "input", "output", "reasoning", "cacheRead", "cacheWrite", "totalTokens", "cost", "cacheSavings", "sessionStarted"] as const)
       .every((field) => finiteNumber(value[field]))
+    // The limits the host's own parser keeps: a report sums these over every stored row.
+    && hasPlausibleNumbers(value as unknown as UsageRecord)
     && COST_QUALITY_TIERS.includes(costQuality) && optionalString(entryId) && optionalString(subagentFile);
 }
 

@@ -25,8 +25,23 @@ import type {
  * reload that brings in new rules.
  * v2: artifact transcripts counted; entry ids, task-summary targets and the
  * owning session's start stored.
+ * v3: lines whose numbers no request can have are skipped.
  */
-export const USAGE_PARSER_VERSION = 2;
+export const USAGE_PARSER_VERSION = 3;
+
+/** The most one request can report. A record beyond it is a malformed line, and without such rows no number of them
+ * makes a report's sums overflow (tokens are summed as integers) or go non-finite (cost). */
+export const USAGE_RECORD_LIMITS = { tokens: 1e9, cost: 1e6 };
+
+/** Whether every number of `record` is one a request can have. */
+export function hasPlausibleNumbers(record: UsageRecord): boolean {
+  const count = (value: number) => value >= 0 && value <= USAGE_RECORD_LIMITS.tokens;
+  return count(record.input) && count(record.output) && count(record.reasoning)
+    && count(record.cacheRead) && count(record.cacheWrite) && count(record.totalTokens)
+    && record.cost >= 0 && record.cost <= USAGE_RECORD_LIMITS.cost
+    && Math.abs(record.cacheSavings) <= USAGE_RECORD_LIMITS.cost
+    && Number.isFinite(record.timestamp) && Number.isFinite(record.sessionStarted);
+}
 
 interface SessionUsageCacheEntry {
   parserVersion: number;
@@ -220,6 +235,9 @@ export function parseSessionUsage(
   let activeProvider = "";
   let activeModel = "";
   const records: UsageRecord[] = [];
+  const keep = (record: UsageRecord): void => {
+    if (hasPlausibleNumbers(record)) records.push(record);
+  };
 
   try {
     forEachFileLineSync(filePath, (rawLine) => {
@@ -301,7 +319,7 @@ export function parseSessionUsage(
             const cacheSavings = calculateCacheSavings(rawUsage, rates);
 
             if (totalTokens > 0 || cost > 0) {
-              records.push({
+              keep({
                 timestamp,
                 sessionId,
                 sessionCwd,
@@ -380,7 +398,7 @@ export function parseSessionUsage(
               const cacheSavings = calculateCacheSavings(u, rates);
 
               if (totalTokens > 0 || cost > 0) {
-                records.push({
+                keep({
                   timestamp,
                   sessionId,
                   sessionCwd,
