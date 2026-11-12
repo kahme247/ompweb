@@ -145,7 +145,7 @@ test("status/drain/resume consume the real CLI daemon endpoint and SIGTERM remov
           const frame = JSON.parse(line);
           if (frame.type === "hello") {
             hellos += 1;
-            ws.send(JSON.stringify({ type: "welcome", v: 10, hostId: "cli-fixture" }));
+            ws.send(JSON.stringify({ type: "welcome", v: frame.v, hostId: "cli-fixture" }));
           } else if (typeof frame.seq === "number") ws.send(JSON.stringify({ type: "ack", ack: frame.seq }));
         }
       },

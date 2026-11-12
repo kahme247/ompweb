@@ -22,10 +22,10 @@ export function ompSharesCredentials(version: string | null): boolean {
 
 /**
  * Why a host cannot join the cluster now, or null: the one rule behind the join route and the Settings switch.
- * Non-online hosts retain their status as the reason; online hosts need the protocol and operation below ("upgrade"),
- * then an omp that takes shared credentials, which members always use ("omp-old").
+ * Non-online hosts retain their status as the reason; online ones (older link protocols are refused at link time) need the
+ * operation below ("upgrade"), then an omp that takes shared credentials, which members always use ("omp-old").
  */
-export function clusterJoinBlock(host: { status: HostStatus; protocol: number | null; ompVersion: string | null; supports: (operation: "gitOrigins") => boolean }): Exclude<HostStatus, "online"> | "upgrade" | "omp-old" | null {
+export function clusterJoinBlock(host: { status: HostStatus; ompVersion: string | null; supports: (operation: "gitOrigins") => boolean }): Exclude<HostStatus, "online"> | "upgrade" | "omp-old" | null {
   if (host.status !== "online") return host.status;
   if (!host.supports("gitOrigins")) return "upgrade";
   return ompSharesCredentials(host.ompVersion) ? null : "omp-old";
