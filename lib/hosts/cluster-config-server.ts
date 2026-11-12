@@ -1,4 +1,5 @@
-import { readdirSync, realpathSync, statSync, type Stats } from "node:fs";
+import type { Stats } from "node:fs";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "../omp/paths";
@@ -14,14 +15,15 @@ import { LOCAL_HOST_ID, type HostRecord } from "./registry";
 
 type Current = { manifest: ConfigManifest; content(hash: string): Uint8Array | null };
 
-const PLUGIN_LIST_TTL_MS = 30_000;
+// Four 30 s sync ticks: a plugin installed or removed on the master reaches the members within about two minutes.
+const PLUGIN_LIST_TTL_MS = 120_000;
 const noStore = { "cache-control": "no-store" };
 
 let plugins: { at: number; list: PluginEntry[] } | null = null;
-let pluginRead: Promise<PluginEntry[]> | null = null;
+let building: Promise<Current> | null = null;
 let cached: { fingerprint: string; current: Current } | null = null;
 
-/** One `omp plugin list` at a time. A failed read keeps the last good list (members remove the plugins the manifest lacks, so never an empty one), retried after the same lifetime; with no list ever read it is an error. */
+/** A failed read keeps the last good list (members remove the plugins the manifest lacks, so never an empty one), retried after the same lifetime; with no list ever read it is an error. */
 async function readPluginList(): Promise<PluginEntry[]> {
   try {
     plugins = { at: Date.now(), list: await listPlugins((args) => runOmpCli(args, 30_000)) };
@@ -36,72 +38,73 @@ async function readPluginList(): Promise<PluginEntry[]> {
 
 function pluginList(): Promise<PluginEntry[]> {
   if (plugins && Date.now() - plugins.at < PLUGIN_LIST_TTL_MS) return Promise.resolve(plugins.list);
-  pluginRead ??= readPluginList().finally(() => {
-    pluginRead = null;
-  });
-  return pluginRead;
+  return readPluginList();
 }
 
-const statOrNull = (path: string): Stats | null => {
-  try {
-    return statSync(path);
-  } catch {
-    return null;
-  }
-};
+const statOrNull = (path: string): Promise<Stats | null> => stat(path).catch(() => null);
 
 /**
  * Path, file identity (device, inode), size, modification and change time, and executable bit of every file `buildManifest` would read, following links, without
  * reading any content. Mirrors buildManifest's walk (skipped `.git` and `node_modules`, link loops, `.yaml` standing in
  * for an absent `.yml`); a read error here only leaves the file out, and buildManifest then reports it.
  */
-function treeFingerprint(roots: Record<ConfigRoot, string>): string {
+async function treeFingerprint(roots: Record<ConfigRoot, string>): Promise<string> {
   const parts: string[] = [];
   const note = (path: string, stat: Stats) => parts.push(`${path}\0${stat.dev}\0${stat.ino}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0${stat.mode & 0o100}`);
-  const walk = (dir: string, walking: Set<string>) => {
+  const walk = async (dir: string, walking: Set<string>) => {
     let real: string;
     let names: string[];
     try {
-      real = realpathSync(dir);
-      names = readdirSync(dir);
+      real = await realpath(dir);
+      names = await readdir(dir);
     } catch {
       return;
     }
     if (walking.has(real)) return;
     walking.add(real);
-    for (const name of names) {
-      if (name === ".git") continue;
+    // One directory's entries are stat'ed together; the descent stays in order, so the fingerprint is the sequential walk's.
+    const stats = await Promise.all(names.map((name) => (name === ".git" ? null : statOrNull(join(dir, name)))));
+    for (const [i, name] of names.entries()) {
       const source = join(dir, name);
-      const stat = statOrNull(source);
-      if (stat?.isDirectory()) {
-        if (name !== "node_modules") walk(source, walking);
-      } else if (stat?.isFile()) note(source, stat);
+      if (stats[i]?.isDirectory()) {
+        if (name !== "node_modules") await walk(source, walking);
+      } else if (stats[i]?.isFile()) note(source, stats[i]);
     }
     walking.delete(real);
   };
   for (const entry of MIRRORED) {
     const base = join(roots[entry.root], entry.path);
     if (entry.kind === "dir") {
-      if (statOrNull(base)?.isDirectory()) walk(base, new Set());
+      if ((await statOrNull(base))?.isDirectory()) await walk(base, new Set());
       continue;
     }
     const sources = entry.root === "agent" && (entry.path === "config.yml" || entry.path === "models.yml") ? [base, base.replace(/\.yml$/, ".yaml")] : [base];
     for (const source of sources) {
-      const stat = statOrNull(source);
-      if (!stat?.isFile()) continue;
-      note(source, stat);
+      const found = await statOrNull(source);
+      if (!found?.isFile()) continue;
+      note(source, found);
       break;
     }
   }
   return parts.join("\n");
 }
 
-/** Rebuilt only when the fingerprint (files, agent environment, plugin list) differs from the last build's. Throws ClusterConfigError. */
-export async function currentClusterConfig(): Promise<Current> {
+/**
+ * Rebuilt only when the fingerprint (files, agent environment, plugin list) differs from the last build's. One build at
+ * a time: concurrent callers share its walk, its `omp plugin list` and its result. Throws ClusterConfigError.
+ */
+export function currentClusterConfig(): Promise<Current> {
+  building ??= build().finally(() => {
+    building = null;
+  });
+  return building;
+}
+
+async function build(): Promise<Current> {
   const roots = { agent: getAgentDir(), home: homedir() };
   const list = await pluginList();
   const { agentEnv } = loadWebServerSettings();
-  const fingerprint = JSON.stringify([treeFingerprint(roots), agentEnv, list]);
+  const fingerprint = JSON.stringify([await treeFingerprint(roots), agentEnv, list]);
   if (cached?.fingerprint === fingerprint) return cached.current;
   const current = buildManifest(roots, { agentEnv, plugins: list });
   cached = { fingerprint, current };

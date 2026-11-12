@@ -161,7 +161,7 @@ lib/
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
     cluster.ts         pure cluster rules: `clusterOf` (= `pools[0]`), `isClusterMember`, `sharesCredentials`, `joinCluster`/`leaveCluster`, `clusterJoinBlock`, `ompSharesCredentials` (also the daemon's spawn check); browser-importable (Settings uses it)
     cluster-config.ts  pure, daemon-safe: what a cluster member mirrors from the master (`MIRRORED`, `LOCAL_SETTINGS`, `CONFIG_LIMITS`), `buildManifest`, `stripLocalSettings`/`mergeLocalSettings`, `isManagedPath`, `ClusterConfigError`
-    cluster-config-server.ts main side: `currentClusterConfig` (the manifest cached per fingerprint, `omp plugin list` cached 30 s), `clusterConfigVersion`, `admitClusterMember`, `configErrorResponse`; used by the two `app/api/hosts/cluster-config/` routes and `hub.ts`
+    cluster-config-server.ts main side: `currentClusterConfig` (the manifest cached per fingerprint, one build at a time, `omp plugin list` cached 120 s), `clusterConfigVersion`, `admitClusterMember`, `configErrorResponse`; used by the two `app/api/hosts/cluster-config/` routes and `hub.ts`
     daemon-cluster-config.ts daemon side: `createClusterConfig` (`ensure`/`apply`/`restore`/`state`/`holds`/`stop`): download, verify, apply whole or not at all, the member's backup (`own-config/`), plugins, leaving; Node only, relative imports
     host-bearer.ts     `hostFromBearer`: the host an `Authorization: Bearer <host token>` request names, or the 401/503 answer; used by `admitClusterMember`
     update-types.ts    shared per-host software status and operation contract
@@ -625,7 +625,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     50 MiB per bundle (`CONFIG_LIMITS`); a configuration over one is not served at all
     (`ClusterConfigError`, which names a file and never its content; it reaches Settings as `masterConfigError`
     in the `hosts` snapshot). `currentClusterConfig` rebuilds only when its fingerprint changes
-    (stat of every file, agent environment, plugin list, which is read at most every 30 s and keeps the
+    (an async stat of every file, agent environment, plugin list, which is read at most every 120 s, so a
+    plugin change reaches members within about two minutes, and keeps the
     last good list when `omp plugin list` fails: a member removes the plugins the manifest lacks).
     `startClusterConfigSync` (`instrumentation.node.ts`) runs `syncClusterConfig` at start, every 30 s, and
     whenever `masterConfigVersion` finds a new version after a known one (a member start reads it too):
