@@ -1813,7 +1813,7 @@ export async function syncClusterConfig(): Promise<void> {
   // Read and sent with no await between: a host that joins meanwhile gets its apply after this restore. A host without omp
   // still gets it: its files go back before its plugins are tried.
   for (const link of hub().links.values()) {
-    if (!before.has(link.id) && (link.configOwned || link.configState === null) && isLinkUp(link.status) && ready(link)) clusterConfigOp(link.id, { action: "restore" }).catch(() => {});
+    if (link.id !== LOCAL_HOST_ID && !before.has(link.id) && (link.configOwned || link.configState === null) && isLinkUp(link.status) && ready(link)) clusterConfigOp(link.id, { action: "restore" }).catch(() => {});
   }
   if (![...before].some((id) => id !== LOCAL_HOST_ID)) return;
   let version: string;

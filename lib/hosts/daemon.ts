@@ -119,9 +119,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     runOmp: runOmpCli,
     commandExists,
     // Never called while createClusterConfig runs: `config` is set by then.
-    onState: state => {
-      if (!stopped) for (const link of links.values()) if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state, owned: config.holds(link.login.url) });
-    },
+    onState: state => reportConfig(state),
     // Configured, connected or not: host.json, or the links given on the command line. Unreadable, it may still be.
     isLinked: url => {
       let saved: HostLink[];
@@ -239,6 +237,10 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     const old = notifierId; notifierId = next;
     for (const link of links.values()) if (link.version >= 7 && (link.id === old || link.id === next)) link.queue({ type: "notifier", on: link.id === next }, "notifier");
   }
+  /** Tells each v10 link the configuration state and whether it holds that configuration. */
+  function reportConfig(state = config.state()): void {
+    if (!stopped) for (const link of links.values()) if (link.version >= CLUSTER_CONFIG_SINCE_VERSION) link.report({ type: "config_state", state, owned: config.holds(link.login.url) });
+  }
   /** Stops a removed link's workspace service (tracked so shutdown awaits it) and frees its upload ownership so other servers can take those uploads. */
   function dropLink(link: DaemonLink): void {
     const service = services.get(link.id); services.delete(link.id);
@@ -312,7 +314,8 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
       log("host.json changed; dialing " + login.url);
       const link = makeLink(login, login.url === (readHostLogin()?.url.replace(/\/+$/, "") ?? saved[0]?.url)); link.start();
     }
-    electNotifier(); return source ? links.get(source.login.url) !== source || source.login.token !== previousToken : true;
+    // Who holds the configuration follows host.json (holds()): a removed holder hands it to the links that remain.
+    reportConfig(); electNotifier(); return source ? links.get(source.login.url) !== source || source.login.token !== previousToken : true;
   }
 
   function handleDown(link: DaemonLink, message: DownMessage | UnknownMessage): void {
