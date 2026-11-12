@@ -3,8 +3,8 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { CLUSTER_ID, CLUSTER_LABEL, CLUSTER_PROJECTS_DIR, ClusterError, clusterJoinBlock, isClusterMember, joinCluster, leaveCluster, MIN_SHARED_CREDENTIALS_OMP, type HostProjectFacts } from "@/lib/hosts/cluster";
 import type { Host } from "@/lib/hosts/host";
-import { clusterConfigOp, getHost, getHostLinkProtocol, getHostOmpVersion, listHosts, masterConfigVersion, notifyHostsChange } from "@/lib/hosts/hub";
-import { CLUSTER_CONFIG_SINCE_VERSION, HostOpError } from "@/lib/hosts/link-protocol";
+import { clusterConfigOp, getHost, getHostOmpVersion, listHosts, masterConfigVersion, notifyHostsChange } from "@/lib/hosts/hub";
+import { HostOpError } from "@/lib/hosts/link-protocol";
 import { loadPools, poolProjectBindings, savePools, validatePools, type HostPool, type PoolMember, type PoolProject } from "@/lib/hosts/pools";
 import { LOCAL_HOST_ID, loadHosts } from "@/lib/hosts/registry";
 import type { OpResult } from "@/lib/hosts/session-ops";
@@ -48,7 +48,7 @@ function valueOf<T>(result: OpResult<T>): T {
 }
 
 function requireReady(host: Host): void {
-  const block = clusterJoinBlock({ status: host.status(), protocol: getHostLinkProtocol(host.id), ompVersion: getHostOmpVersion(host.id), supports: (operation) => host.supportsWorkspaceOp(operation) });
+  const block = clusterJoinBlock({ status: host.status(), ompVersion: getHostOmpVersion(host.id), supports: (operation) => host.supportsWorkspaceOp(operation) });
   if (block === null) return;
   if (block === "omp-old") throw new HostOpError(409, "host_omp_too_old", `Update omp on ${host.label} to ${MIN_SHARED_CREDENTIALS_OMP} or newer first`);
   if (block !== "upgrade") throw new HostOpError(409, "host_offline", `${host.label} is offline`);
@@ -164,18 +164,15 @@ export async function DELETE(request: Request, { params }: Context) {
     if (loadHosts().find((record) => record.id === id)?.shareCredentials !== true) abortBrokerRequests(id);
     notifyHostsChange();
     // After the save, so no apply follows it (spec K6). A host that cannot take it now (offline or timed out) gets it
-    // from the sync once it reports holding this server's configuration. A daemon below protocol 10 never applied one;
-    // one that held it before a downgrade reports it once it is updated, and the sync restores it then.
+    // from the sync once it reports holding this server's configuration.
     let restoreError: string | undefined;
-    if ((getHostLinkProtocol(id) ?? CLUSTER_CONFIG_SINCE_VERSION) >= CLUSTER_CONFIG_SINCE_VERSION) {
-      try {
-        const answer = await clusterConfigOp(id, { action: "restore" });
-        // Still holding a version that is not this server's: one this server cannot put back (another server's, or this
-        // server's recorded at an address the host still links to).
-        if (answer.state.version !== null && !answer.owned) restoreError = `${getHost(id)?.label ?? id} still runs a cluster configuration this server cannot put back`;
-      } catch (error) {
-        restoreError = error instanceof Error ? error.message : String(error);
-      }
+    try {
+      const answer = await clusterConfigOp(id, { action: "restore" });
+      // Still holding a version that is not this server's: one this server cannot put back (another server's, or this
+      // server's recorded at an address the host still links to).
+      if (answer.state.version !== null && !answer.owned) restoreError = `${getHost(id)?.label ?? id} still runs a cluster configuration this server cannot put back`;
+    } catch (error) {
+      restoreError = error instanceof Error ? error.message : String(error);
     }
     return Response.json({ pools, ...(restoreError === undefined ? {} : { restoreError }) }, { headers: noStore });
   } catch (error) {

@@ -58,7 +58,7 @@ test("this machine can be renamed but not revoked", async (t) => {
     return Response.json({});
   });
   render(createElement(HostsConfig));
-  const row = (fields) => ({ status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, ...fields });
+  const row = (fields) => ({ status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, workspaceOps: [], ...fields });
   const hosts = [row({ id: "local", label: "" }), row({ id: "h1", label: "Laptop", allowAgentStart: false })];
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
   const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
@@ -84,7 +84,7 @@ test("an offline this-machine row says to start the service, with the server's i
   globalThis.Worker = FakeWorker;
   mockHostRequests(t, async () => Response.json({}));
   render(createElement(HostsConfig));
-  const row = (fields) => ({ id: "local", label: "", status: "offline", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, serverPlatform: "darwin", daemonManaged: true, ...fields });
+  const row = (fields) => ({ id: "local", label: "", status: "offline", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, workspaceOps: [], serverPlatform: "darwin", daemonManaged: true, ...fields });
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
   const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
   const send = (hosts) => act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts }) } }));
@@ -118,7 +118,7 @@ test("the local name hint is the input's description, not part of its label", as
   globalThis.Worker = FakeWorker;
   mockHostRequests(t, async () => Response.json({}));
   render(createElement(HostsConfig));
-  const row = { id: "local", label: "", status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: 3, serverVersion: 3, serverPlatform: "linux", daemonManaged: true };
+  const row = { id: "local", label: "", status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: 3, serverVersion: 3, workspaceOps: [], serverPlatform: "linux", daemonManaged: true };
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
   const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
   act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts: [row] }) } }));
@@ -139,7 +139,7 @@ const updateInfo = (overrides = {}) => ({
 });
 const hostRow = (overrides = {}) => ({
   id: "local", label: "", status: "online", ompVersion: "1.0.0", platform: "linux",
-  hostVersion: 3, serverVersion: 3, lastSeenAt: null, ...overrides,
+  hostVersion: 3, serverVersion: 3, lastSeenAt: null, workspaceOps: [], ...overrides,
 });
 async function showHosts(hosts) {
   globalThis.Worker = FakeWorker;
