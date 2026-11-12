@@ -118,7 +118,8 @@ async function probeOmpVersion(): Promise<string | null> {
       const target = wrapWindowsScript(bin, ["--version"]);
       // Without an explicit env this probe would inherit the server's full
       // environment, including omp-web's own secrets, into the child.
-      execFile(target.file, target.args, { timeout: 10_000, windowsHide: true, env: createChildProcessEnvironment() }, (error, stdout) => {
+      // 30 s: a fresh ~120 MB runner binary's first start on Windows waits on the antivirus scan.
+      execFile(target.file, target.args, { timeout: 30_000, windowsHide: true, env: createChildProcessEnvironment() }, (error, stdout) => {
         if (error) reject(error);
         else resolve(stdout);
       });

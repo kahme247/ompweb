@@ -157,12 +157,12 @@ try {
       daemon = child;
       void readText(child.stdout, (text) => { log += text; });
       void readText(child.stderr, (text) => { log += text; });
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + 60_000;
       for (;;) {
         const { hosts } = await (await fetch(`${base}/api/hosts`)).json() as { hosts: { id: string; status: string }[] };
         if (hosts.find((host) => host.id === "local")?.status === "online") break;
         assert(child.exitCode === null, `ompweb host exited with ${child.exitCode}`);
-        assert(Date.now() < deadline, "this machine is not linked 30 s after `ompweb host` started");
+        assert(Date.now() < deadline, "this machine is not linked 60 s after `ompweb host` started");
         await Bun.sleep(200);
       }
     });
@@ -187,7 +187,7 @@ try {
         secondLauncher = child;
         void readText(child.stdout, (text) => { log += text; });
         void readText(child.stderr, (text) => { log += text; });
-        const deadline = Date.now() + 30_000;
+        const deadline = Date.now() + 60_000;
         for (;;) {
           assert(child.exitCode === null, `second server exited with ${child.exitCode}`);
           try {
