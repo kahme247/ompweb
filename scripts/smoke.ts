@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" }, binary: { type: "string" }, "second-server": { type: "boolean" } } });
+const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" }, binary: { type: "string" }, omp: { type: "string" }, "second-server": { type: "boolean" } } });
 const binary = values.binary && path.resolve(values.binary);
 const dir = binary ? path.dirname(binary) : path.resolve(values.package ?? path.join(import.meta.dir, ".."));
 const ompweb = binary ? [binary] : ["node", path.join(dir, "bin", "omp-web.js")];
@@ -88,6 +88,8 @@ const env: Record<string, string | undefined> = {
 };
 // OMP_WEB_OMP_BIN: an agent shell points it at its own omp; test this install's runner instead.
 for (const name of ["OMP_WEB_PASSWORD", "OMP_WEB_PASSWORD_HASH", "OMP_WEB_OMP_BIN"]) delete env[name];
+// --omp <path>: a packed install has no runner of its own until the per-platform runner packages are published.
+if (values.omp) env.OMP_WEB_OMP_BIN = path.resolve(values.omp);
 
 let log = "";
 let launcher: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
