@@ -1052,7 +1052,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         return;
       }
       if (restoreRetryRef.current < INITIAL_RESTORE_MAX_ATTEMPTS) {
-        if (restoreRetryRef.current === 0 && selectedSessionId) onRestorePending?.();
+        if (restoreRetryRef.current === 0) onRestorePending?.();
         restoreRetryRef.current += 1;
         if (restoreRetryTimerRef.current) {
           clearTimeout(restoreRetryTimerRef.current);

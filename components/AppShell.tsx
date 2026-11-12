@@ -1795,8 +1795,11 @@ export function AppShell({ appName }: { appName: string }) {
   // Only a URL that still names an unresolved session is a pending restore; any
   // other view (New Session, a project, a pooled composer) ends it.
   const restorePending = Boolean(initialSessionId) && !initialSessionRestored;
+  // A workspace URL that is still validating or was rejected must not leave the previous chat usable under it.
+  const workspaceUnresolved = Boolean(initialNavigation.requestedCwd || initialNavigation.poolId || initialNavigation.projectId)
+    && (initialCwdStatus === "validating" || initialCwdStatus === "error");
   // While a URL session restore is pending, the sidebar's project must not offer a new chat in its place.
-  const showChat = selectedSession !== null || (!restorePending && (effectiveNewSessionCwd !== null || effectivePoolProject !== null));
+  const showChat = !workspaceUnresolved && (selectedSession !== null || (!restorePending && (effectiveNewSessionCwd !== null || effectivePoolProject !== null)));
   const currentRate = generationSpeed?.current;
   const rate = currentRate ?? generationSpeed?.average;
   const speed = showChat ? formatGenerationSpeed(rate) : null;
