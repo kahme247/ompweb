@@ -1224,7 +1224,7 @@ export class RemoteRpcTransport implements RpcTransport {
   }
   /** Set for a child of a previous run the daemon listed in `hello` (the session it runs); null for children this server spawned. */
   readonly sessionId: string | null;
-  /** The session the child last named in a get_state answer, else `sessionId`: tags its link samples. */
+  /** The session the child last named in a `hello` or `session` frame, else `sessionId`: tags its link samples. */
   session: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
@@ -1411,7 +1411,7 @@ export class RemoteRpcTransport implements RpcTransport {
 
   deliverLine(line: string): void {
     if (this.closed) return;
-    if (line.includes('"get_state"')) this.noteSession(line);
+    if (line.includes('"t":"hello"') || line.includes('"t":"session"')) this.noteSession(line);
     if (this.orphaned) return;
     if (this.lineListeners.length > 0) return notify(this.lineListeners, line);
     const bytes = this.holdable(line);
@@ -1451,9 +1451,8 @@ export class RemoteRpcTransport implements RpcTransport {
     } catch {
       return;
     }
-    if (isRecord(frame) && frame.type === "response" && frame.command === "get_state" && frame.success === true && isRecord(frame.data)) {
-      const { sessionId } = frame.data;
-      if (typeof sessionId === "string" && isValidSessionId(sessionId)) this.session = sessionId;
+    if (isRecord(frame) && (frame.t === "hello" || frame.t === "session") && typeof frame.sessionId === "string" && isValidSessionId(frame.sessionId)) {
+      this.session = frame.sessionId;
     }
   }
 }
