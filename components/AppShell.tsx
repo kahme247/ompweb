@@ -1308,6 +1308,12 @@ export function AppShell({ appName }: { appName: string }) {
     if (isMobile && !isRestore) requestAnimationFrame(() => chatInputRef.current?.focus());
     if (session.id === selectedSession?.id) {
       if (isMobile && !isRestore) setSidebarOpen(false);
+      // Back/Forward may have left a workspace URL over this still-selected chat;
+      // returning to its own URL also cancels that workspace's validation.
+      if (!isRestore && initialNavigation.sessionId !== session.id) {
+        router.push(viewUrl({ sessionId: session.id, sidebarOpen: isMobile ? false : sidebarOpen }));
+        setInitialCwdStatus("idle");
+      }
       return;
     }
     setNewSessionCwd(null);
@@ -1327,7 +1333,7 @@ export function AppShell({ appName }: { appName: string }) {
     }
     if (!isRestore) router.push(viewUrl({ sessionId: session.id, sidebarOpen: isMobile ? false : sidebarOpen }));
     setInitialCwdStatus("idle");
-  }, [router, isMobile, selectedSession?.id, sidebarOpen, setSidebarOpen]);
+  }, [router, isMobile, selectedSession?.id, sidebarOpen, setSidebarOpen, initialNavigation.sessionId]);
 
   const handleNewSession = useCallback((creationId: string, cwd: string | null, hostId?: string, project?: ManagedProject, initialization?: string) => {
     setSettingsTab(null);
