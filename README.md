@@ -109,6 +109,7 @@ Open [http://127.0.0.1:30177](http://127.0.0.1:30177) in your browser.
 ompweb --port 8080                         # Custom port
 ompweb --hostname 0.0.0.0                  # Listen on network
 ompweb hash-password                       # Print the value for OMP_WEB_PASSWORD_HASH
+ompweb preflight                           # Start the session omp once (as a new session would) and wait for its hello; exit 1 says why it failed
 ompweb --no-open                           # Don't auto-open the browser
 ompweb --install-tray                      # Install Windows System Tray service & Desktop shortcuts
 ompweb --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts

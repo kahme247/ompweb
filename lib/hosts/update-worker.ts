@@ -335,6 +335,25 @@ async function binaryReportsVersion(binary: string, packageDir: string, version:
   const { stdout } = await exec(binary, ["--version"], { timeout: 10000, env: workerEnvironment({ OMP_WEB_PACKAGE_DIR: packageDir }), maxBuffer: 1024 * 1024 });
   return stdout.trim().split(/\s+/).some((token) => token.replace(/^v/, "") === version);
 }
+/** The candidate's `ompweb preflight` (lib/hosts/preflight.ts) in this host's environment: the session omp it resolves
+ * must start and say hello before the switch. A release without the command gets it only if it has no runner either. */
+async function preflightHostRelease(d: HostUpdateDescriptor, release: string): Promise<void> {
+  const binary = d.installMethod === "binary";
+  const entry = binary ? join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb") : join(release, "bin", "omp-web.js");
+  // Detected statically: an older ompweb takes `preflight` for a positional and starts the web server.
+  if (!(binary ? readFileSync(entry).includes("preflight ok: ") : existsSync(join(release, "lib", "hosts", "preflight.ts")))) {
+    const runner = binary || Object.keys(JSON.parse(readFileSync(join(release, "package.json"), "utf8")).optionalDependencies ?? {}).some((name) => name.startsWith("@kahme247/ompweb-omp-"));
+    if (runner) throw new Error("The new host release has no preflight command to check its omp with");
+    console.warn(`ompweb ${d.version} has no preflight command; its omp was not checked`);
+    return;
+  }
+  try {
+    await exec(binary ? entry : d.runtime, binary ? ["preflight"] : [entry, "preflight"], { cwd: release, timeout: 60000, env: workerEnvironment(), maxBuffer: 1024 * 1024, windowsHide: true });
+  } catch (error) {
+    const detail = String((error as { stderr?: unknown }).stderr ?? "").trim() || (error instanceof Error ? error.message : String(error));
+    throw new Error(`The new host release cannot start a session: ${detail.slice(-500)}`);
+  }
+}
 /** The installation on disk already holds `version`: what a restart-only update relies on. */
 export async function installedHostVersionMatches(method: HostUpdateDescriptor["installMethod"], installDir: string, version: string): Promise<boolean> {
   try {
@@ -530,6 +549,7 @@ export async function runHostUpdateWorker(path: string): Promise<number> {
       const sharingAfterStage = await sharedHostInstallReason(d.installDir, [process.pid, d.daemonPid]);
       if (sharingAfterStage) throw new Error(sharingAfterStage);
     }
+    await preflightHostRelease(d, release ?? d.installDir);
     // The daemon blocks new children for the entire persisted running operation.
     if (readHostUpdateState()?.operation.id !== d.id || readHostUpdateState()?.operation.state !== "running") throw new Error("Host update no longer owns the operation");
     validateDescriptor(path);
