@@ -361,8 +361,19 @@ function formElement(element: Element, ctx: FormCtx, key: string): ReactNode {
   const id = attr("id");
   if (id) props.id = `${ctx.prefix}-${id}`;
   if (tag === "label" && attr("for")) props.htmlFor = `${ctx.prefix}-${attr("for")}`;
-  // Each radio/checkbox option sits on its own row, its control spaced from its label.
-  if (tag === "label" && Array.from(element.querySelectorAll("input")).some(choiceType)) props.className = "extension-choice";
+  // Each radio/checkbox option sits on its own row, its control spaced from its label. The row is a
+  // flex container, so everything but the control goes into one text block: on their own, each text
+  // run and each <code> or <strong> would become a column of its own.
+  if (tag === "label" && Array.from(element.querySelectorAll("input")).some(choiceType)) {
+    const nodes = Array.from(element.childNodes);
+    const isControl = (index: number) => nodes[index].nodeType === 1 && (nodes[index] as Element).localName === "input" && choiceType(nodes[index] as Element) !== undefined;
+    return createElement(
+      "label",
+      { ...props, className: "extension-choice" },
+      ...children.filter((_, index) => isControl(index)),
+      createElement("span", { key: `${key}.text`, className: "extension-choice-text" }, ...children.filter((_, index) => !isControl(index))),
+    );
+  }
   if (tag === "input" || tag === "select" || tag === "textarea") {
     Object.assign(props, { name: attr("name"), required: element.hasAttribute("required") && !ctx.grouped.has(element), disabled: element.hasAttribute("disabled") });
   }

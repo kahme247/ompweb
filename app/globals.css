@@ -4910,6 +4910,7 @@ html.omp .extension-choice:has(textarea:focus-visible) { outline-color: var(--ac
 .extension-dialog-form fieldset + fieldset,
 .extension-dialog-form .extension-field + .extension-choice { margin-top: 10px; }
 .extension-choice > label { flex: 1; min-width: 0; cursor: pointer; }
+.extension-choice-text { flex: 1; min-width: 0; }
 .extension-dialog-form :user-invalid { border-color: var(--status-error); }
 .extension-dialog-button {
   min-height: 32px;
