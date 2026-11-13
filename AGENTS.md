@@ -1298,7 +1298,9 @@ during the wait.
   settled ids prevent late ACKs from resurrecting delivered entries. States:
   Sending (browser, locked while its first-leg command may be in flight),
   Waiting to send / Waiting for <host> (Delete), Delivering (locked),
-  Not sent (Delete). The delivery mode is a read-only label. Delete
+  Not sent (Retry, Delete). Retry (`retryHeldMessage`) holds a new entry with the same text, images, uploads and
+  mode, and removes the failed one (in the session it was in) only after that add commits; a `mayHaveBeenSent`
+  entry asks first. The delivery mode is a read-only label. Delete
   (`deleteHeldMessage`) awaits the IndexedDB delete commit for a browser-held
   entry; a server entry sends `outbox_remove`, refused with 409
   `outbox_dispatched` once delivering. A late commit consumes only the original

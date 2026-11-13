@@ -682,7 +682,7 @@
   "heldMessage.deleteConfirmBody": "要從寄件匣清單中移除此暫存訊息嗎？",
   "heldMessage.deleteConfirmMayHaveBeenSent": "此訊息可能已送達 omp，且 omp 仍可能會執行它。刪除僅會將其從此清單中移除，無法取消或復原 omp 已收到或仍可能收到的內容。請先檢查對話紀錄。確定仍要刪除嗎？",
   "heldMessage.retry": "重試",
-  "heldMessage.retryTitle": "重新傳送此訊息",
+  "heldMessage.retryTitle": "重試傳送此訊息",
   "heldMessage.retryConfirmMayHaveBeenSent": "此訊息可能已送達 omp，且 omp 仍可能會執行它。重新傳送可能導致 omp 執行兩次。請先檢查對話紀錄。確定仍要重新傳送嗎？",
   "errors.action_required": "需要執行操作",
   "errors.api_key_remove_unsupported": "omp-web 無法移除已儲存的 API 金鑰。請在終端機中執行 `omp` 並使用 /logout，或在 ~/.omp/agent/models.yml 中編輯供應商組態。",

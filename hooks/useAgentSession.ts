@@ -66,6 +66,7 @@ import {
 export type { SubagentInfo } from "@/lib/subagent-types";
 
 // Pure helpers extracted to sibling modules (extraction only — no logic changes).
+import type { HeldMessage } from "./useAgentSession-queue";
 import { EMPTY_QUEUE, EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, isQueuedWhileShellRunning, markOutboxUncertain, mergeHeldMessages, rememberLocalOutbox, rememberOutboxEntries, representOutboxIds } from "./useAgentSession-queue";
 import { readQueueSnapshot } from "@/lib/client-message-ids";
 import type { QueuedMessages, ServerOutbox } from "./useAgentSession-queue";
@@ -4386,10 +4387,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * may have it from then on, answered 409 outbox_dispatched). An uncertain bridge is a view of an id the server
    * settled, so only the browser's own copy of it (the worker still holds it if the server settled the id before the
    * worker saw its add receipt) leaves IndexedDB, and the row hides once that commits: a reload cannot bring it back. */
-  const deleteHeldMessage = useCallback(async (id: string) => {
-    const sid = sessionIdRef.current;
-    const held = heldMessagesRef.current.find((entry) => entry.id === id);
-    if (!sid || !held || held.state === "sending" || held.state === "delivering" || heldDeletionsRef.current.has(id)) return;
+  const removeHeldMessage = useCallback(async (sid: string, held: HeldMessage) => {
+    const { id } = held;
     heldDeletionsRef.current.add(id);
     try {
       if (serverOutboxRef.current.uncertain.has(id)) {
@@ -4405,21 +4404,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       heldDeletionsRef.current.delete(id);
     }
   }, [addNotice, markOutboxRepresented]);
+  const deleteHeldMessage = useCallback(async (id: string) => {
+    const sid = sessionIdRef.current;
+    const held = heldMessagesRef.current.find((entry) => entry.id === id);
+    if (!sid || !held || held.state === "sending" || held.state === "delivering" || heldDeletionsRef.current.has(id)) return;
+    await removeHeldMessage(sid, held);
+  }, [removeHeldMessage]);
 
   const heldRetriesRef = useRef(new Set<string>());
-  /** Retry of a failed held bubble: hold an identical new message, then delete the failed one. The new copy is held
-   * first, so a failed add leaves the original in place; a second click while it runs adds no third copy. */
+  /** Retry of a failed held bubble: hold a new message with the same text, images, files and mode, then delete the
+   * failed one in the session it was in, even if the chat switched meanwhile. The new copy is held first, so a failed
+   * add leaves the original in place; a second click while it runs adds no third copy. */
   const retryHeldMessage = useCallback(async (id: string) => {
     const sid = sessionIdRef.current;
     const held = heldMessagesRef.current.find((entry) => entry.id === id);
     if (!sid || !held || held.state !== "failed" || editInFlightRef.current || heldRetriesRef.current.has(id) || heldDeletionsRef.current.has(id)) return;
     heldRetriesRef.current.add(id);
     try {
-      if (await holdMessage(sid, held.mode, held.message, held.images, held.uploads, held.uploadProofs)) await deleteHeldMessage(id);
+      if (await holdMessage(sid, held.mode, held.message, held.images, held.uploads, held.uploadProofs)) await removeHeldMessage(sid, held);
     } finally {
       heldRetriesRef.current.delete(id);
     }
-  }, [deleteHeldMessage, holdMessage]);
+  }, [holdMessage, removeHeldMessage]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
