@@ -14,7 +14,8 @@ import type { HostSoftwareUpdate, HostUpdateCompatibility, HostUpdateInfo, HostU
 import { assertOwnedPath, ensureHostUpdateRoot, fetchHostUpdateBytes, finishHostUpdate, HOST_VERSION_PATTERN, hostReleaseName, hostUpdateRoot, installedHostVersionMatches, isHostUpdateProcessAlive, processStartIdentity, pruneHostUpdateArtifacts, readHostUpdateState, sharedHostInstallReason, verifyHostServiceInstall, writeHostUpdateJson, type HostUpdateDescriptor } from "./update-worker";
 
 const exec = promisify(execFile);
-const LEASE_MS = 15 * 60 * 1000;
+// Covers a 15 min release download (update-worker.ts DOWNLOAD_TIMEOUT_MS) plus preflight, stop and restart.
+const LEASE_MS = 30 * 60 * 1000;
 let safetyGuard: (() => string | null) | null = null;
 const protocolCache = new Map<string, { value: number | null; checkedAt: number }>();
 

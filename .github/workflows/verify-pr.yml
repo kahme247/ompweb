@@ -76,10 +76,14 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             npx bun scripts/build-binary.ts --target bun-windows-x64-baseline
             bin=release/ompweb-windows-x64/ompweb.exe
+            archive=release/ompweb-windows-x64.zip
           else
             npx bun scripts/build-binary.ts --target bun-linux-x64-baseline
             bin=release/ompweb-linux-x64/ompweb
+            archive=release/ompweb-linux-x64.tar.gz
           fi
+          # The archive a host downloads must pass the updater's own size limits and checks.
+          npx bun scripts/check-host-release-archive.ts "$archive"
           npm run smoke -- --binary "$bin"
           # What the host updater checks on a new release before it switches (lib/hosts/update-worker.ts): the marker
           # it finds the command by, then the command itself against the bundled ompweb-omp.
