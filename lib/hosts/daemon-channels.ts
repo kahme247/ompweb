@@ -51,8 +51,8 @@ type ChannelDeps = {
 const collision = () => new HostOpError(409, "session_running_elsewhere", "This session is already running on another link");
 const invalid = (message = "Invalid channel request") => new HostOpError(400, "invalid_request", message);
 /** omp's post-`ready` startup work (model refresh, plugin updates, hooks) can hold its first answers past 5 s.
- * One budget for the whole configure keeps `open` inside the hub's channelReadyMs + opTimeoutMs. */
-const STARTUP_COMMAND_MS = 30_000;
+ * One budget for the whole configure keeps `open` inside the hub's channelReadyMs + opTimeoutMs, with margin. */
+const STARTUP_COMMAND_MS = 25_000;
 /** A process start's launch, from what its opener asked: the wire never names the credentials server (it is the opening
  * link's own, and only when the hub asks), and a configuration version passes only in its one valid form. */
 function forStart(launch: SpawnRequest, link: DaemonLink, opener: SpawnRequest): SpawnRequest {
