@@ -31,23 +31,31 @@ function run(cmd: string[]): void {
 	if (exitCode !== 0) throw new Error(`${cmd.join(" ")} exited with ${exitCode}`);
 }
 
-/** Replaces `vendor/` with the release's zip contents; returns its `index.json` (npm name → tarball file). */
-async function fetchBuild({ repo, tag }: Pin): Promise<Record<string, string>> {
+/** Replaces `vendor/` with the release's zip contents once they hold every `required` package; returns its
+ * `index.json` (npm name → tarball file). A failed fetch or check leaves `vendor/` as it was. */
+async function fetchBuild({ repo, tag }: Pin, required: string[] = []): Promise<Record<string, string>> {
 	if (!TAG.test(tag)) throw new Error(`${tag} is not an integration release tag (v<version>-int.<stamp>.g<sha7>)`);
 	const url = `${process.env.OMP_BUILD_RELEASES ?? "https://github.com"}/${repo}/releases/download/${tag}/omp-packages-${tag.slice(1)}.zip`;
-	const response = await fetch(url);
+	// One retry: a dropped connection should not fail a release build.
+	let response = await fetch(url).catch(() => undefined);
+	if (!response?.ok) response = await fetch(url);
 	if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-	await fs.rm(vendorDir, { recursive: true, force: true });
-	await fs.mkdir(vendorDir);
-	const zip = path.join(vendorDir, "omp-packages.zip");
+	const staging = `${vendorDir}.new`;
+	await fs.rm(staging, { recursive: true, force: true });
+	await fs.mkdir(staging);
+	const zip = path.join(staging, "omp-packages.zip");
 	await Bun.write(zip, response);
 	// Windows' bundled tar is bsdtar, which reads zip.
-	run(process.platform === "win32" ? ["tar", "-xf", zip, "-C", vendorDir] : ["unzip", "-q", zip, "-d", vendorDir]);
+	run(process.platform === "win32" ? ["tar", "-xf", zip, "-C", staging] : ["unzip", "-q", zip, "-d", staging]);
 	await fs.rm(zip);
-	const index: Record<string, string> = await Bun.file(path.join(vendorDir, "index.json")).json();
+	const index: Record<string, string> = await Bun.file(path.join(staging, "index.json")).json();
 	for (const [name, file] of Object.entries(index)) {
 		if (!/^[\w.-]+\.tgz$/.test(file)) throw new Error(`index.json: bad file ${file} for ${name}`);
 	}
+	const missing = required.filter(name => !index[name]);
+	if (missing.length > 0) throw new Error(`${tag} has no package for ${missing.join(", ")}`);
+	await fs.rm(vendorDir, { recursive: true, force: true });
+	await fs.rename(staging, vendorDir);
 	console.log(`omp packages: ${repo} ${tag} (${Object.keys(index).length} tarballs)`);
 	return index;
 }
@@ -64,14 +72,13 @@ if (!tag) {
 	await fetchBuild(pin);
 } else {
 	const pin: Pin = { repo: "andrebrait/oh-my-pi", tag };
-	const index = await fetchBuild(pin);
 	const manifest = await Bun.file(manifestPath).json();
 	const direct = Object.keys(manifest.dependencies).filter(name => name.startsWith("@oh-my-pi/"));
-	const missing = [...direct, ...LEAVES].filter(name => !index[name]);
-	if (missing.length > 0) throw new Error(`${tag} has no package for ${missing.join(", ")}`);
+	const index = await fetchBuild(pin, [...direct, ...LEAVES]);
 	const file = (name: string): string => `file:./vendor/${index[name]}`;
 	for (const name of direct) manifest.dependencies[name] = file(name);
-	manifest.overrides = { ...manifest.overrides, ...Object.fromEntries(Object.keys(index).map(name => [name, file(name)])) };
+	// Replaced, not merged: a package the new release dropped must not keep pointing at a tarball that is gone.
+	manifest.overrides = Object.fromEntries(Object.keys(index).map(name => [name, file(name)]));
 	delete manifest.patchedDependencies;
 	await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 	await Bun.write(pinPath, `${JSON.stringify(pin, null, 2)}\n`);
