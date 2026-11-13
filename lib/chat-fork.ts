@@ -1,9 +1,9 @@
 /**
  * Fork targets for the message transcript.
  *
- * omp's `branch` RPC command — what the UI calls "fork" / "New session" —
+ * omp's `branch` command — what the UI calls "fork" / "New session" —
  * only accepts a **user** message entry. Verified against a live
- * `omp --mode rpc-ui`: branching at an assistant entry answers
+ * omp: branching at an assistant entry answers
  * `success:false, error:"Invalid entry ID for branching"`. The new session
  * holds the history *before* that user entry, and the command returns the
  * entry's prompt text so the client can offer it for editing and re-sending.

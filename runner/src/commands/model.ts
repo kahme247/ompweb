@@ -128,7 +128,7 @@ export const modelCommands: CommandTable = {
 	async abort_compaction({ session }) {
 		session.abortCompaction();
 	},
-	// No RPC handler in 18.19.0; mirrors argument-less `/rename`: generate, persist as a user title, return it.
+	// The runner's own command; mirrors argument-less `/rename`: generate, persist as a user title, return it.
 	async generate_title({ session }) {
 		const title = await session.renameTitle();
 		if (!title) return { title: null };

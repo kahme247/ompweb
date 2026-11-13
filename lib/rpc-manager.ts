@@ -218,7 +218,7 @@ function patchEstimatedTokensAfter(result: unknown): void {
 
 // ============================================================================
 // AgentSessionWrapper
-// Wraps one spawned `omp --mode rpc-ui` process with the interface the rest of
+// Wraps one session's ompweb-omp runner (its channel, runner/src/channel.ts) with the interface the rest of
 // the app expects (same command surface pi-web's in-process wrapper offered).
 // ============================================================================
 
@@ -928,7 +928,7 @@ export class AgentSessionWrapper {
     this.reportInterest();
     this._adopted = joined;
     this.hostToolsUnknown = true;
-    // Older omp rejects some of these, as at startup; a timeout or an exit fails the adoption.
+    // A refusal is tolerated, as at startup; a timeout or an exit fails the adoption.
     const optional = (command: { type: string; [key: string]: unknown }, timeoutMs = STARTUP_COMMAND_TIMEOUT_MS) => this.proc.sendCommand(command, timeoutMs).then(() => {}, (error) => {
       if (!(error instanceof RpcCommandError)) throw error;
     });

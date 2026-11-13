@@ -34,7 +34,7 @@ export const LINK_LIMITS = {
   pingMs: 15_000,
   offlineMs: 30_000,
   // One prompt's two echoes (message_start, message_end) must fit with no ack on a
-  // slow link: each is up to the 8 MiB command body as base64 rpc_chunk lines
+  // slow link: each can carry the 8 MiB command body's images as base64
   // (~10.7 MiB), and the rest is room for the streamed reply.
   channelBufferBytes: 32 * 1024 * 1024,
   flushMs: 16,
