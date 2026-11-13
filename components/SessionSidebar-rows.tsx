@@ -11,6 +11,7 @@ import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
 import { SessionSearchMatches, type SearchMatchTarget } from "./SessionSearchMatches";
 import { hasDraft, subscribeDrafts } from "@/lib/draft-store";
+import { sessionHref } from "@/lib/session-links";
 import {
   MAX_PROJECT_SESSIONS,
   formatRelativeTime,
@@ -741,7 +742,7 @@ const SessionItem = memo(function SessionItem({
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const contentButtonRef = useRef<HTMLButtonElement>(null);
+  const contentLinkRef = useRef<HTMLAnchorElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
   // A session's composer draft is keyed by its id (ChatWindow's `draftKey`).
@@ -827,7 +828,7 @@ const SessionItem = memo(function SessionItem({
  const closeConfirmation = useCallback(() => {
  setConfirmDelete(false);
  setActionMenuOpen(false);
- requestAnimationFrame(() => contentButtonRef.current?.focus());
+ requestAnimationFrame(() => contentLinkRef.current?.focus());
  }, []);
 
   return (
@@ -892,7 +893,22 @@ const SessionItem = memo(function SessionItem({
       ) : (
         <>
           {depth > 0 && <GitBranch size={11} strokeWidth={2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />}
-          <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete" && !deleting) { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
+          <a
+            ref={contentLinkRef}
+            href={sessionHref(session.id)}
+            className="session-item-button"
+            aria-current={isSelected ? "true" : undefined}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              const target = event.currentTarget.getAttribute("target");
+              if (target && target !== "_self") return;
+              event.preventDefault();
+              if (!confirmDelete) onClick();
+            }}
+            onKeyDown={(event) => { if (event.key === "Delete" && !deleting) { event.preventDefault(); setConfirmDelete(true); } }}
+            style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, textDecoration: "none" }}
+          >
             <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
               {title}
             </span>
@@ -906,7 +922,7 @@ const SessionItem = memo(function SessionItem({
                 <Pencil size={11} strokeWidth={2.2} aria-hidden="true" />
               </span>
             )}
-          </button>
+          </a>
           {session.worktreeBranch && <span title={t("sessionSidebar.worktreeTitle", { path: session.cwd })} style={{ display: "flex", alignItems: "center", gap: 3, maxWidth: 56, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 10, flexShrink: 1 }}><GitBranch size={10} strokeWidth={2.4} aria-hidden="true" /><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span></span>}
           {hasChildren && <button className="session-item-icon-button" onClick={(event) => { event.stopPropagation(); onToggleCollapse?.(); }} title={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-label={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-expanded={!collapsed} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, padding: 0, flexShrink: 0, border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}><ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" /></button>}
           <div style={{ display: "flex", alignItems: "center", gap: SIDEBAR_STATUS_GAP, flexShrink: 0 }}>

@@ -89,7 +89,6 @@ server/
 app/
   index.html          the SPA shell, the bundler entry; #root holds static copies of RouteLoadingFallback and (swapped in on /login by an inline script) LoginForm's first render, painted before the bundle runs
   client.tsx          browser entry: renders `LoginForm` on `/login`, else `AppShell` (a path check, no router)
-  boot.ts             runs first in client.tsx: installs the sidebar history bridge before AppShell registers popstate listeners
 app/api/
   sessions/route.ts               GET  list all sessions
   sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
@@ -142,6 +141,8 @@ app/api/
 lib/
   dynamic.tsx          `dynamic()` over `React.lazy` + `Suspense`
   navigation.ts        `useRouter`/`useSearchParams` over the History API
+  browser-history.ts   single native History API owner: view positions, traversal, reload bounds and root exit guard
+  session-links.ts     session URL builder and same-origin session-link classification
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
     plugins-cli.ts     `runOmpCli`, `listPlugins` (`omp plugin list --json` as `PluginEntry[]`), `parseJsonLoose`, `ANSI_RE`; loaded by the daemon too (relative imports only); used by `app/api/plugins/route.ts`, `cluster-config-server.ts` and `daemon-cluster-config.ts`
   hosts/               hosts and the local daemon (see "Remote hosts"); none of the daemon-loaded files may import `@/` (the daemon runs on Node through `jiti`)
@@ -215,7 +216,7 @@ lib/
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getToolNamesForPreset()
   types.ts             shared TypeScript types
   normalize.ts         normalizeToolCalls() — field name mismatch between file format and our types
-  navigation-history.ts  pure back/forward view-history stack + shortcut matcher (⌘[/⌘], Alt+←/→)
+  navigation-history.ts  platform and shortcut matching (⌘[/⌘], Alt+←/→)
   word-prediction.ts   pure ghost-text arithmetic (advance/accept) for composer word prediction
   worktree.ts          project/worktree resolution and git worktree operations
 
@@ -262,7 +263,8 @@ hooks/
   useIsMobile.ts           responsive breakpoint hook
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
   useTheme.ts              theme state (localStorage key "omp-theme"; top bar color → theme-color meta, "omp-theme-color" cookie and the manifest link's ?theme=, see lib/manifest-theme.ts)
-  useNavigationHistory.ts  in-app back/forward stack (record/peek/commit/drop) for visited chat views
+  useNavigationHistory.ts  native browser Back/Forward and owned-view bounds
+  useSidebarHistory.ts     document-exit draft protection; does not own sidebar state
   useWordPrediction.ts     debounced omp predict_word ghost text + feedback
   useBtw.ts                /btw records/active panel/history dialog fed by btw_* SSE frames
   useChatSearchHighlights.ts  find-in-page for the sidebar search: CSS Custom Highlight API paint + jump to a picked hit
@@ -1724,36 +1726,32 @@ during the wait.
 - The Models panel reads and writes `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback).
 - API-key status endpoints must never return the raw key.
 
-### Navigate back / forward (`lib/navigation-history.ts`, `hooks/useNavigationHistory.ts`)
-- Browser-style back/forward over visited chat views (sessions + the new-chat
-  composer), in-memory per page load. It is **omp-web's own stack**, never the
-  browser History API — the app only ever `router.replace`s `?session=`, and
-  the real history stack belongs to the mobile back-gesture / exit-guard
-  machinery (`useSidebarHistory` + the popstate bridge).
-- AppShell records views from one effect keyed on
-  `(selectedSession?.id, newSessionCwd)`: recording the entry the cursor
-  already sits on is a no-op, which is what makes back/forward
-  self-suppressing — `navigateInHistory` commits the step, the view lands, the
-  effect re-records the target, nothing is pushed. Any other view change
-  (sidebar/palette select, new chat, session created, fork, project-switch
-  close) pushes normally and truncates the forward branch, browser-style.
-- Applying a step: peek → resolve the session id via `/api/sessions` →
-  commit + `handleSelectSession`, or `handleNewSession` for new-chat entries.
-  A dead id (deleted session) drops that entry and tries the next one in the
-  same direction; a failed list fetch aborts without dropping. A view change
-  during the await (versioned ref) aborts the navigation so a slow fetch
-  never yanks the chat away.
-- Shortcuts live in `useGlobalKeyboardShortcuts`: ⌘[/⌘] (macOS standard),
-  Alt+←/Alt+→ (Windows/Linux standard; on macOS Alt+Arrow stays free — it is
-  word-wise caret movement), plus the mouse back/forward buttons
-  (`BrowserBack`/`BrowserForward`). The keystroke is always swallowed while a
-  handler is registered — an exhausted stack stops dead rather than falling
-  through to the browser's own back/forward, so the app is never backed out
-  of by accident — and shortcuts are skipped entirely while a
-  `[role="dialog"]` modal is open. The sidebar header buttons (before Archived
-  Sessions, wrapped in `.sidebar-nav-buttons`) disable on stack bounds, show
-  the platform shortcut in their tooltip, and hide below a 240px sidebar via
-  the `.sidebar-shell` container query (the keyboard shortcuts still work).
+### Session URLs and browser history (`lib/browser-history.ts`, `lib/navigation.ts`)
+- The browser owns session, new-chat and sidebar view history. `?session=ID`
+  selects a session; `?cwd=...&hostId=...` selects a new-chat workspace.
+  `sidebar=open|closed` restores explicit visibility, including on mobile.
+  AppShell pushes user view changes and replaces new-session promotion or
+  same-conversation identity moves. Sidebar-only traversal keeps the chat mounted.
+- Pooled new chats use `poolId`, `projectId` and `creationId` instead of a worker
+  path. Restore the logical project and the same creation ID; a worker cwd is
+  never a fallback. `rememberCreationInitialization` freezes the first native
+  initialization in tab-local sessionStorage so older sidebar entries and reloads
+  cannot replay that creation with changed model defaults. It is not URL data.
+- `lib/browser-history.ts` is the sole history owner. It preserves unrelated
+  `history.state`, stores positions (not view copies) in sessionStorage for
+  reloadable bounds, and keeps a non-view root sentinel for document-exit
+  confirmation. Canceled exits restore the accepted URL without truncating
+  forward history. `useSidebarHistory` supplies the draft guard and beforeunload
+  warning; it never intercepts sidebar/session navigation.
+- The sidebar resolves each requested URL session against its list, resetting
+  restore attempts on target changes. Async workspace validation cancels on
+  navigation. Identity moves replace the URL without remounting the composer.
+- Sidebar session titles are real anchors. `sessionLinkHref` recognizes internal
+  session URLs before Markdown file-link classification; ordinary clicks push
+  SPA history, while modified/middle clicks retain native browser behavior.
+- Header navigation buttons and keyboard shortcuts use the same native owner,
+  stop at owned-view bounds, and preserve the existing modal shortcut exclusion.
+  Native browser Back can leave the app at the root, subject to draft protection.
 
 ### Composer word prediction (`hooks/useWordPrediction.ts`, `components/GhostMirror.tsx`)
 - Ghost text comes from omp's `predict_word` RPC (engine = omp's
