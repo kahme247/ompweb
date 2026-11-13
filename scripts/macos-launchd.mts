@@ -15,7 +15,7 @@
 //   OMP_WEB_PASSWORD     Optional plaintext password, hashed before it is written
 //   OMP_WEB_PASSWORD_HASH  Password hash from `ompweb hash-password` (preferred)
 //   OMP_WEB_NO_OPEN      Set to 0 to auto-open the browser          default 1 (no auto-open)
-//   OMP_WEB_OMP_BIN      Path to omp binary if not on PATH          default auto-detected
+//   OMP_WEB_OMP_BIN      Override for ompweb's own omp (ompweb-omp)  default the bundled one
 //   PI_CODING_AGENT_DIR  Custom omp agent directory                 default ~/.omp/agent
 //
 // Example (loopback-only; require auth + trusted HTTPS proxy/VPN for remote access):
@@ -83,16 +83,14 @@ function install(pkgArg?: string): void {
   const siblingNpx = path.join(path.dirname(nodeBin), "npx");
   const npxBin = isExecutableFile(siblingNpx) ? siblingNpx : (which("npx") ?? fail("npx not found on PATH"));
 
-  // omp binary: explicit env var wins, otherwise auto-detect from the current PATH.
-  const ompBin = process.env.OMP_WEB_OMP_BIN ?? which("omp");
-  if (process.env.OMP_WEB_OMP_BIN) {
+  // Only an explicit override: ompweb runs its own omp (ompweb-omp). A stock omp on PATH cannot run its sessions.
+  const ompBin = process.env.OMP_WEB_OMP_BIN || null;
+  if (ompBin) {
     try {
-      fs.accessSync(process.env.OMP_WEB_OMP_BIN, fs.constants.X_OK);
+      fs.accessSync(ompBin, fs.constants.X_OK);
     } catch {
-      fail(`OMP_WEB_OMP_BIN=${process.env.OMP_WEB_OMP_BIN} is not executable`);
+      fail(`OMP_WEB_OMP_BIN=${ompBin} is not executable`);
     }
-  } else if (!ompBin) {
-    console.warn("warning: omp binary not found; live-agent features will be unavailable (set OMP_WEB_OMP_BIN)");
   }
 
   // Service parameters with defaults; the positional package spec wins over env.

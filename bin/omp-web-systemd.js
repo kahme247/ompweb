@@ -315,12 +315,9 @@ function install(options = {}) {
     fail(error instanceof Error ? error.message : String(error));
   }
 
-  const ompBin = process.env.OMP_WEB_OMP_BIN ?? which("omp");
-  if (process.env.OMP_WEB_OMP_BIN && !isExecutableFile(process.env.OMP_WEB_OMP_BIN)) {
-    fail(`OMP_WEB_OMP_BIN=${process.env.OMP_WEB_OMP_BIN} is not executable`);
-  } else if (!ompBin) {
-    console.warn("warning: omp binary not found; live-agent features will be unavailable (set OMP_WEB_OMP_BIN)");
-  }
+  // Only an explicit override: ompweb runs its own omp (ompweb-omp). A stock omp on PATH cannot run its sessions.
+  const ompBin = process.env.OMP_WEB_OMP_BIN || null;
+  if (ompBin && !isExecutableFile(ompBin)) fail(`OMP_WEB_OMP_BIN=${ompBin} is not executable`);
   // Note: the missing-interpreter check lives in runCli (before the Linux
   // gate) so it fails loudly on every platform; install() only reuses the
   // resolved ompBin for the unit + env file.
@@ -534,13 +531,12 @@ async function runCli(argv = process.argv.slice(2)) {
 
   // Validate the install inputs before the platform gate so misconfigured
   // launchers fail loudly on any platform (and stay testable on Windows).
-  // Missing `omp` only warns (live-agent features retry on demand), but a
-  // launcher script whose interpreter is nowhere on PATH would install a
-  // unit that can only fail later with exit 127 (issue #116) — fail now.
+  // An OMP_WEB_OMP_BIN launcher script whose interpreter is nowhere on PATH
+  // would install a unit that can only fail later with exit 127 (issue #116) — fail now.
   if (command === "install") {
-    const ompBin = process.env.OMP_WEB_OMP_BIN ?? which("omp");
-    if (process.env.OMP_WEB_OMP_BIN && !isExecutableFile(process.env.OMP_WEB_OMP_BIN)) {
-      fail(`OMP_WEB_OMP_BIN=${process.env.OMP_WEB_OMP_BIN} is not executable`);
+    const ompBin = process.env.OMP_WEB_OMP_BIN || null;
+    if (ompBin && !isExecutableFile(ompBin)) {
+      fail(`OMP_WEB_OMP_BIN=${ompBin} is not executable`);
     } else if (ompBin && readLauncherInterpreter(ompBin) && !launcherInterpreterDir(ompBin)) {
       fail(
         `omp at ${ompBin} is a launcher script whose interpreter ` +
