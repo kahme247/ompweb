@@ -80,7 +80,7 @@ An update is a message starting `GitHub update (omp-web): OWNER/REPO#N <URL>`, f
 - the kind (comment, review, inline review comment, check result, merged, closed);
 - the author's login, whether it is a bot, and its `authorAssociation` (OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE, ...);
 - for a review, its state (approved, changes requested, commented, dismissed) and how many inline comments it carries;
-- for an inline comment, the file path and line, and its thread id;
+- for an inline comment, its line and thread id (not the file path: a pull request's branch, a fork's included, names its files);
 - the event's id and URL, to pass to `github_read` (`ids`) or `github_comment` (`replyTo`).
 
 Pull requests:
