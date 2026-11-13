@@ -12,14 +12,14 @@ type SidebarEntry = {
 };
 type HistorySnapshot = { marker: SidebarEntry; state: Record<string, unknown>; href: string };
 
-export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, panelOpen = false, closePanel, url }: {
+export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, panelOpen, closePanel, url }: {
   active: boolean;
   ready: boolean;
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
-  /** A full-screen panel (the mobile right panel) that Back closes first. */
-  panelOpen?: boolean;
-  closePanel?: () => void;
+  /** A full-screen panel (the compact right panel) that Back closes first. */
+  panelOpen: boolean;
+  closePanel: () => void;
   url: string;
 }) {
   const [exitConfirmationOpen, setExitConfirmationOpen] = useState(false);
@@ -82,16 +82,17 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
           writeEntry("top", action.sidebarOpen);
         } else if (action === "leave") {
           leaveFromBase();
-        } else if ((latest.current.active && !latest.current.sidebarOpen) || hasUnsentDrafts()) {
+        } else if ((latest.current.active && !latest.current.sidebarOpen) || latest.current.panelOpen || hasUnsentDrafts()) {
           pending.current = { sidebarOpen: latest.current.sidebarOpen };
           window.history.forward();
         }
         return;
       }
       if (leaveAllowed.current) return;
-      if (marker.entry === "base" && latest.current.panelOpen && latest.current.closePanel) {
+      if (marker.entry === "base" && latest.current.panelOpen) {
         // The panel covers the whole screen: Back closes it and nothing else.
         latest.current.closePanel();
+        // `latest` still reports the panel open until the next render.
         if ((latest.current.active && !latest.current.sidebarOpen) || hasUnsentDrafts()) {
           pending.current = { sidebarOpen: latest.current.sidebarOpen };
           window.history.forward();

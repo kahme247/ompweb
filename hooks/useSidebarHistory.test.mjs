@@ -156,12 +156,14 @@ test("Back closes an open full-screen panel first and keeps the conversation and
   const world = browserHistory();
   const shell = await mount({ panel: true });
   try {
+    world.activate();
     world.window.history.back();
     await world.flush();
     assert.equal(shell.api.panelOpen, false);
     assert.equal(shell.api.sidebarOpen, false);
     assert.equal(world.departed, false);
-    world.window.history.back();
+    // The step is reused, not pushed again, so native Back still stays here.
+    world.nativeBack();
     await world.flush();
     assert.equal(shell.api.sidebarOpen, true);
     assert.equal(world.departed, false);
@@ -179,6 +181,20 @@ test("without a conversation, Back closes the panel instead of leaving; the next
     world.window.history.back();
     await world.flush();
     assert.equal(world.departed, true);
+  } finally { await shell.unmount(); }
+});
+
+test("a panel opened while a sidebar collapse traversal is pending still gets its Back step", async () => {
+  const world = browserHistory();
+  const shell = await mount();
+  try {
+    await act(() => shell.api.setSidebarOpen(true));
+    await act(() => shell.api.setPanelOpen(true));
+    await world.flush();
+    world.window.history.back();
+    await world.flush();
+    assert.equal(shell.api.panelOpen, false);
+    assert.equal(world.departed, false);
   } finally { await shell.unmount(); }
 });
 

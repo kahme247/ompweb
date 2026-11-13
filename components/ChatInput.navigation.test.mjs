@@ -30,7 +30,7 @@ function warnsOnExit() {
 function Guard() {
   // The actual history protocol is exercised in useSidebarHistory.test.mjs.
   // This mounts the same document guard with the real composer/draft store.
-  useSidebarHistory({ active: false, ready: false, sidebarOpen: true, setSidebarOpen() {}, url: "" });
+  useSidebarHistory({ active: false, ready: false, sidebarOpen: true, setSidebarOpen() {}, panelOpen: false, closePanel() {}, url: "" });
   return null;
 }
 
