@@ -13,21 +13,22 @@ const PLATFORM = `${process.platform === "win32" ? "windows" : process.platform}
 // A session omp that says hello as the runner does.
 const RUNNER = `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 18.99.0; exit 0; fi\necho '{"t":"hello","proto":1}'\nexec cat >/dev/null\n`;
 
-/** The new release as npm installs it. "old": no preflight command, no runner; "old-runner": no preflight command but
- * a runner dependency; "ok": this checkout's real preflight with a runner dependency that says hello; "no-runner": the
- * same without the runner installed. */
-function writeCandidate(dir, candidate) {
+/** The new release as npm installs it. "old": no preflight command; "ok": this checkout's real fetch-omp and preflight,
+ * its runner already fetched; "stub" / "fetch-fails": a `bin/omp-web.js` that logs `candidate <command>` and passes,
+ * or fails `fetch-omp` as an offline fetch does. */
+function writeCandidate(dir, candidate, log) {
   mkdirSync(dir);
   if (candidate === "old") return;
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@kahme247/ompweb", version: "0.6.0", optionalDependencies: { [`@kahme247/ompweb-omp-${PLATFORM}`]: "0.6.0" } }));
-  if (candidate === "old-runner") return;
-  symlinkSync(join(REPO, "bin"), join(dir, "bin"));
-  symlinkSync(join(REPO, "lib"), join(dir, "lib"));
-  if (candidate === "no-runner") return;
-  const runner = join(dir, "node_modules", "@kahme247", `ompweb-omp-${PLATFORM}`);
-  mkdirSync(runner, { recursive: true });
-  writeFileSync(join(runner, "package.json"), "{}");
-  writeFileSync(join(runner, "ompweb-omp"), RUNNER, { mode: 0o755 });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@kahme247/ompweb", version: "0.6.0" }));
+  if (candidate === "ok") {
+    symlinkSync(join(REPO, "bin"), join(dir, "bin"));
+    symlinkSync(join(REPO, "lib"), join(dir, "lib"));
+    return;
+  }
+  for (const file of ["bin/omp-web.js", "lib/hosts/preflight.ts", "lib/omp/runner-fetch.ts"]) mkdirSync(dirname(join(dir, file)), { recursive: true });
+  for (const file of ["lib/hosts/preflight.ts", "lib/omp/runner-fetch.ts"]) writeFileSync(join(dir, file), "");
+  const fail = candidate === "fetch-fails" ? `if (command === "fetch-omp") { console.error("fetch-omp failed: Could not fetch ompweb's omp from https://github.com/x: fetch failed"); process.exit(1); }\n` : "";
+  writeFileSync(join(dir, "bin", "omp-web.js"), `const command = process.argv[2];\nrequire("node:fs").appendFileSync(${JSON.stringify(log)}, "candidate " + command + "\\n");\n${fail}`);
 }
 
 // Runs the worker for a systemd unit with stub `systemctl` and `npm` on PATH, under the launcher's OMP_WEB_PACKAGE_DIR:
@@ -41,7 +42,12 @@ function runWorker(t, { npmExit = 0, startExit = 0, activeExit = 0, candidate = 
   mkdirSync(join(installed, "runner", "release"), { recursive: true });
   writeFileSync(join(installed, "runner", "release", `ompweb-omp-${PLATFORM}`), RUNNER, { mode: 0o755 });
   const template = join(dir, "candidate");
-  writeCandidate(template, candidate);
+  writeCandidate(template, candidate, log);
+  // Where the candidate's fetch-omp keeps this version's runner (lib/omp/omp-cli.ts fetchedOmpBin): already there.
+  if (candidate === "ok") {
+    mkdirSync(join(dir, "agent", "omp-web", "omp", "0.6.0"), { recursive: true });
+    writeFileSync(join(dir, "agent", "omp-web", "omp", "0.6.0", "ompweb-omp"), RUNNER, { mode: 0o755 });
+  }
   // The scratch install (`npm install --prefix <dir> …`) succeeds; the global one exits npmExit.
   writeFileSync(join(dir, "npm"), `#!/bin/sh\necho "npm $*" >> "${log}"\nif [ "$2" = --prefix ]; then mkdir -p "$3/node_modules/@kahme247" && ln -s "${template}" "$3/node_modules/@kahme247/ompweb"; exit 0; fi\nexit ${npmExit}\n`, { mode: 0o755 });
   writeFileSync(join(dir, "status.json"), JSON.stringify({ attemptId: ATTEMPT, state: "running" }), { mode: 0o600 });
@@ -106,20 +112,20 @@ test("a candidate whose own omp says hello is installed", { skip: process.platfo
   assert.equal(status.state, "succeeded");
 });
 
-test("a candidate missing its omp fails its preflight even though the running install has one, and never stops the running server", { skip: process.platform === "win32" }, (t) => {
-  const { calls, status, complete } = runWorker(t, { candidate: "no-runner" });
+test("the candidate fetches its omp before its preflight, both before anything stops", { skip: process.platform === "win32" }, (t) => {
+  const { calls, status } = runWorker(t, { candidate: "stub" });
+  assert.deepEqual(calls.slice(1, 4), ["candidate fetch-omp", "candidate preflight", "systemctl --user stop ompweb.service"]);
+  assert.equal(status.state, "succeeded");
+});
+
+test("a candidate that cannot fetch its omp never stops the running server", { skip: process.platform === "win32" }, (t) => {
+  const { calls, status, complete } = runWorker(t, { candidate: "fetch-fails" });
   assert.ok(!calls.includes("systemctl --user stop ompweb.service"), calls.join("\n"));
   assert.ok(!calls.some((call) => call.startsWith("npm install -g")), calls.join("\n"));
+  assert.ok(!calls.includes("candidate preflight"), calls.join("\n"));
   assert.equal(status.state, "failed");
-  assert.equal(status.error, "the new release cannot start a session: preflight failed: ompweb-omp: not found");
+  assert.equal(status.error, "the new release could not fetch its omp: fetch-omp failed: Could not fetch ompweb's omp from https://github.com/x: fetch failed");
   // What bin/omp-web.js watchUpdateCompletion accepts to disarm the launcher armed at commit.
   assert.equal(complete?.protocol, 1);
   assert.equal(complete?.attemptId, ATTEMPT);
-});
-
-test("a candidate with an omp but no preflight command is refused before anything stops", { skip: process.platform === "win32" }, (t) => {
-  const { calls, status } = runWorker(t, { candidate: "old-runner" });
-  assert.ok(!calls.includes("systemctl --user stop ompweb.service"), calls.join("\n"));
-  assert.equal(status.state, "failed");
-  assert.equal(status.error, "the new release has no preflight command to check its omp with");
 });

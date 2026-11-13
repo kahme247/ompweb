@@ -11,8 +11,9 @@ import type { HostUpdateOperation, HostUpdateTarget } from "./update-types";
 
 import { setTimeout as pause } from "node:timers/promises";
 const exec = promisify(execFile);
-// A release carries ompweb (~112 MB) plus its omp runner (~284 MB on linux-x64, ~172 MB gzipped): sized with headroom
-// for both. scripts/check-host-release-archive.ts holds every built archive to these in CI.
+// A prerelease archive carries ompweb (~112 MB) plus its omp runner (~284 MB on linux-x64, ~172 MB gzipped), and a
+// release's runner asset (lib/omp/runner-fetch.ts) is held to the member limit: sized with headroom for both.
+// scripts/check-host-release-archive.ts holds every built archive to these in CI.
 export const HOST_RELEASE_MAX_ARCHIVE = 512 * 1024 * 1024;
 export const HOST_RELEASE_MAX_EXPANDED = 1024 * 1024 * 1024;
 export const HOST_RELEASE_MAX_MEMBER = 512 * 1024 * 1024;
@@ -42,6 +43,8 @@ export interface HostUpdateDescriptor {
   managerPath?: string;
   restartOnly?: boolean;
   systemd: { unit: string; user: boolean } | null;
+  /** `owner/name` whose releases the binary comes from (lib/release-repo.ts; this file stays self-contained). */
+  releaseRepo: string;
 }
 
 export function hostUpdateRoot(): string {
@@ -291,19 +294,20 @@ export async function extractHostReleaseArchive(archive: string, root: string, s
 async function stageBinary(d: HostUpdateDescriptor, staging: string): Promise<string> {
   const name = hostReleaseName();
   const assetName = `${name}${process.platform === "win32" ? ".zip" : ".tar.gz"}`;
-  const metadata = JSON.parse((await fetchHostUpdateBytes(`https://api.github.com/repos/kahme247/ompweb/releases/tags/v${d.version}`, 2 * 1024 * 1024)).toString("utf8")) as { tag_name?: string; assets?: { name: string; digest?: string }[] };
+  const metadata = JSON.parse((await fetchHostUpdateBytes(`https://api.github.com/repos/${d.releaseRepo}/releases/tags/v${d.version}`, 2 * 1024 * 1024)).toString("utf8")) as { tag_name?: string; assets?: { name: string; digest?: string }[] };
   const asset = metadata.assets?.find((item) => item.name === assetName);
   if (metadata.tag_name !== `v${d.version}` || !asset?.digest || !/^sha256:[a-f0-9]{64}$/.test(asset.digest)) throw new Error("Official release asset digest is unavailable");
   const download = join(staging, assetName);
-  if (await downloadHostUpdateFile(`https://github.com/kahme247/ompweb/releases/download/v${d.version}/${assetName}`, download, HOST_RELEASE_MAX_ARCHIVE) !== asset.digest) throw new Error("Official release asset digest mismatch or unavailable");
+  if (await downloadHostUpdateFile(`https://github.com/${d.releaseRepo}/releases/download/v${d.version}/${assetName}`, download, HOST_RELEASE_MAX_ARCHIVE) !== asset.digest) throw new Error("Official release asset digest mismatch or unavailable");
   const release = join(staging, name);
   mkdirSync(release, { mode: 0o700 });
   try { await extractHostReleaseArchive(download, name, staging); } finally { rmSync(download, { force: true }); }
   const binary = join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb");
-  const runner = join(release, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp");
-  if (!existsSync(join(release, "dist", "index.html")) || !existsSync(runner)) throw new Error("Incomplete host binary release layout");
+  if (!existsSync(join(release, "dist", "index.html"))) throw new Error("Incomplete host binary release layout");
   chmodSync(binary, 0o755);
-  chmodSync(runner, 0o755);
+  // Releases from before the runner became its own asset (preflightHostRelease fetches it otherwise) carry it here.
+  const runner = join(release, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp");
+  if (existsSync(runner)) chmodSync(runner, 0o755);
   if (!(await binaryReportsVersion(binary, release, d.version))) throw new Error("Downloaded host binary reports a different version");
   return release;
 }
@@ -399,25 +403,33 @@ async function binaryReportsVersion(binary: string, packageDir: string, version:
 }
 /** PREFLIGHT_MARKER (lib/hosts/preflight.ts), encoded so this module, bundled into the same binary, does not embed it. */
 export const PREFLIGHT_MARKER_BASE64 = "b21wd2ViLXByZWZsaWdodC1zY3JhdGNoLQ==";
-/** The candidate's `ompweb preflight` (lib/hosts/preflight.ts) in this host's environment: the session omp it resolves
- * must start and say hello before the switch. A new release without the command gets it only if it has no runner
- * either; a restart-only update of an install that predates the command restarts what already runs. */
+/** The candidate's `ompweb fetch-omp` (lib/omp/runner-fetch.ts: its omp runner from its own release, unless it has
+ * one), then its `ompweb preflight` (lib/hosts/preflight.ts) in this host's environment: the session omp it resolves
+ * must start and say hello before the switch. A new binary release without the preflight command is refused (it
+ * would run a runner unchecked); a restart-only update of an install that predates the command restarts what already
+ * runs. */
 async function preflightHostRelease(d: HostUpdateDescriptor, release: string): Promise<void> {
   const binary = d.installMethod === "binary";
   const entry = binary ? join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb") : join(release, "bin", "omp-web.js");
   // Detected statically: an older ompweb takes `preflight` for a positional and starts the web server.
   if (!(binary ? readFileSync(entry).includes(Buffer.from(PREFLIGHT_MARKER_BASE64, "base64")) : existsSync(join(release, "lib", "hosts", "preflight.ts")))) {
-    const runner = binary || Object.keys(JSON.parse(readFileSync(join(release, "package.json"), "utf8")).optionalDependencies ?? {}).some((name) => name.startsWith("@kahme247/ompweb-omp-"));
-    if (runner && !d.restartOnly) throw new Error("The new host release has no preflight command to check its omp with");
+    if (binary && !d.restartOnly) throw new Error("The new host release has no preflight command to check its omp with");
     console.warn(`ompweb ${d.version} has no preflight command; its omp was not checked`);
     return;
   }
+  const command = (args: string[], timeout: number) => exec(binary ? entry : d.runtime, binary ? args : [entry, ...args], { cwd: release, timeout, env: workerEnvironment(), maxBuffer: 1024 * 1024, windowsHide: true });
+  const detail = (error: unknown) => (String((error as { stderr?: unknown }).stderr ?? "").trim() || (error instanceof Error ? error.message : String(error))).slice(-500);
+  // A binary release with the preflight command and no runner beside it has `fetch-omp`; every npm one that has
+  // runner-fetch.ts does (an npm package never carries the runner).
+  if (binary ? !existsSync(join(release, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp")) : existsSync(join(release, "lib", "omp", "runner-fetch.ts"))) {
+    try { await command(["fetch-omp"], DOWNLOAD_TIMEOUT_MS); }
+    catch (error) { throw new Error(`The new host release could not fetch its omp: ${detail(error)}`); }
+  }
   try {
     // 120 s: the preflight itself can take 30 s for the hello, 7 s to stop omp and 30 s for the version probe.
-    await exec(binary ? entry : d.runtime, binary ? ["preflight"] : [entry, "preflight"], { cwd: release, timeout: 120000, env: workerEnvironment(), maxBuffer: 1024 * 1024, windowsHide: true });
+    await command(["preflight"], 120000);
   } catch (error) {
-    const detail = String((error as { stderr?: unknown }).stderr ?? "").trim() || (error instanceof Error ? error.message : String(error));
-    throw new Error(`The new host release cannot start a session: ${detail.slice(-500)}`);
+    throw new Error(`The new host release cannot start a session: ${detail(error)}`);
   }
 }
 /** The installation on disk already holds `version`: what a restart-only update relies on. */
@@ -564,7 +576,7 @@ function validateDescriptor(path: string): HostUpdateDescriptor {
   const root = ensureHostUpdateRoot();
   assertOwnedPath(path);
   const d = JSON.parse(readFileSync(path, "utf8")) as HostUpdateDescriptor;
-  if (!/^[a-zA-Z0-9-]{1,80}$/.test(d.id) || resolve(path) !== join(root, d.id, "descriptor.json") || !HOST_VERSION_PATTERN.test(d.version) || !HOST_VERSION_PATTERN.test(d.fromVersion) || d.target !== "ompweb" || !["npm", "bun", "binary"].includes(d.installMethod) || !isAbsolute(d.installDir) || !isAbsolute(d.runtime) || !isAbsolute(d.cwd) || !Number.isSafeInteger(d.daemonPid) || d.daemonPid <= 1 || !Array.isArray(d.hostArgs) || d.hostArgs.some((arg) => arg !== "--allow-http")) throw new Error("Invalid host update descriptor");
+  if (!/^[a-zA-Z0-9-]{1,80}$/.test(d.id) || resolve(path) !== join(root, d.id, "descriptor.json") || !HOST_VERSION_PATTERN.test(d.version) || !HOST_VERSION_PATTERN.test(d.fromVersion) || d.target !== "ompweb" || !["npm", "bun", "binary"].includes(d.installMethod) || !isAbsolute(d.installDir) || !isAbsolute(d.runtime) || !isAbsolute(d.cwd) || !Number.isSafeInteger(d.daemonPid) || d.daemonPid <= 1 || !Array.isArray(d.hostArgs) || d.hostArgs.some((arg) => arg !== "--allow-http") || typeof d.releaseRepo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(d.releaseRepo)) throw new Error("Invalid host update descriptor");
   if (d.restartOnly !== undefined && typeof d.restartOnly !== "boolean") throw new Error("Invalid host restart-only descriptor");
   if (!d.systemd && (typeof d.daemonIdentity !== "string" || !d.daemonIdentity || d.daemonIdentity.length > 200)) throw new Error("Invalid host update descriptor: the daemon's process identity is missing");
   assertOwnedPath(dirname(path), true);

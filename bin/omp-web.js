@@ -44,6 +44,18 @@ if (process.argv[2] === "preflight") {
   );
   return;
 }
+// `ompweb fetch-omp` (lib/omp/runner-fetch.ts): fetch this version's omp runner if missing; updaters run it before preflight.
+if (process.argv[2] === "fetch-omp") {
+  process.env.OMP_WEB_PACKAGE_DIR ??= module.require("node:path").join(__dirname, "..");
+  module.require("jiti").createJiti(__filename).import("../lib/omp/runner-fetch.ts").then(
+    ({ runFetchOmp }) => runFetchOmp().then((code) => process.exit(code)),
+    (error) => {
+      console.error(`fetch-omp failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    },
+  );
+  return;
+}
 // `ompweb host` runs in this process: a supervisor's SIGTERM must reach the daemon, not a wrapper.
 if (process.argv[2] === "host") {
   process.argv.splice(2, 1);

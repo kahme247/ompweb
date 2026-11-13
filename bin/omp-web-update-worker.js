@@ -133,8 +133,9 @@ async function stopOriginalProcesses() {
   return { launchd, tray };
 }
 
-// The candidate's `ompweb preflight` (lib/hosts/preflight.ts), installed into a scratch prefix and run in this
-// environment before anything stops: a session omp that cannot start fails the update, not the running server.
+// The candidate's `ompweb fetch-omp` (lib/omp/runner-fetch.ts: its version's omp runner, into the per-version cache the
+// installed release then uses) and `ompweb preflight` (lib/hosts/preflight.ts), installed into a scratch prefix and run
+// in this environment before anything stops: a session omp that cannot start fails the update, not the running server.
 function preflightCandidate() {
   const prefix = fs.mkdtempSync(path.join(os.tmpdir(), "ompweb-candidate-"));
   try {
@@ -151,15 +152,20 @@ function preflightCandidate() {
     const release = path.join(prefix, "node_modules", "@kahme247", "ompweb");
     // Detected statically: an older ompweb takes `preflight` for a positional and starts a web server.
     if (!fs.existsSync(path.join(release, "lib", "hosts", "preflight.ts"))) {
-      const optional = Object.keys((readJson(path.join(release, "package.json")) || {}).optionalDependencies || {});
-      if (optional.some((name) => name.startsWith("@kahme247/ompweb-omp-"))) throw new Error("the new release has no preflight command to check its omp with");
       console.warn(`ompweb ${target} has no preflight command; its omp was not checked`);
       return;
     }
-    // OMP_WEB_PACKAGE_DIR: the launcher set it to the running install, whose omp this must not check. 120 s: the
-    // preflight itself can take 30 s for the hello, 7 s to stop omp and 30 s for the version probe.
-    const result = cp.spawnSync(process.execPath, [path.join(release, "bin", "omp-web.js"), "preflight"], { cwd: prefix, timeout: 120 * 1000, windowsHide: true, env: { ...process.env, OMP_WEB_PACKAGE_DIR: release }, encoding: "utf8" });
-    if (result.status !== 0) throw new Error(`the new release cannot start a session: ${((result.stderr || "").trim() || String(result.error || `exit ${result.status}`)).slice(-200)}`);
+    // OMP_WEB_PACKAGE_DIR: the launcher set it to the running install, whose omp this must not check.
+    const candidate = (command, timeout) => {
+      const result = cp.spawnSync(process.execPath, [path.join(release, "bin", "omp-web.js"), command], { cwd: prefix, timeout, windowsHide: true, env: { ...process.env, OMP_WEB_PACKAGE_DIR: release }, encoding: "utf8" });
+      return result.status === 0 ? null : ((result.stderr || "").trim() || String(result.error || `exit ${result.status}`)).slice(-300);
+    };
+    // 15 min, as the host updater allows the download.
+    const fetchFailure = fs.existsSync(path.join(release, "lib", "omp", "runner-fetch.ts")) ? candidate("fetch-omp", 15 * 60 * 1000) : null;
+    if (fetchFailure) throw new Error(`the new release could not fetch its omp: ${fetchFailure}`);
+    // 120 s: the preflight itself can take 30 s for the hello, 7 s to stop omp and 30 s for the version probe.
+    const preflightFailure = candidate("preflight", 120 * 1000);
+    if (preflightFailure) throw new Error(`the new release cannot start a session: ${preflightFailure}`);
   } finally {
     // Best effort: a locked file (Windows) must not fail an update the check passed.
     try { fs.rmSync(prefix, { recursive: true, force: true, maxRetries: 3 }); } catch {}

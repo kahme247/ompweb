@@ -1,11 +1,11 @@
 import packageJson from "../package.json";
+import { releaseRepo } from "./release-repo";
 import { isUpdateDisabled } from "./update-policy";
 import { isNewerVersion } from "./version-compare";
 import { homedir } from "os";
 import { join, normalize, sep } from "path";
 
 const NPM_PACKAGE = "@kahme247/ompweb";
-const RELEASES_URL = "https://github.com/kahme247/ompweb/releases/latest";
 const CHECK_TTL_MS = 60 * 60 * 1000;
 
 export interface NpmUpdateStatus {
@@ -25,7 +25,7 @@ export async function checkNpmUpdate(force = false): Promise<NpmUpdateStatus> {
   const currentVersion = packageJson.version;
   const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
   const installMethod = typeof Bun !== "undefined" && Bun.isStandaloneExecutable ? "binary" : detectInstallMethod(packageDir);
-  const updateCommand = installMethod === "binary" ? RELEASES_URL : installMethod === "bun" ? "bun add -g @kahme247/ompweb" : "npm install -g @kahme247/ompweb";
+  const updateCommand = installMethod === "binary" ? `https://github.com/${releaseRepo()}/releases/latest` : installMethod === "bun" ? "bun add -g @kahme247/ompweb" : "npm install -g @kahme247/ompweb";
 
   if (isUpdateDisabled()) {
     return { currentVersion, availableVersion: null, updateAvailable: false, installMethod, updateCommand, updatesDisabled: true };

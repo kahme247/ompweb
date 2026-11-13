@@ -9,6 +9,7 @@ import { checkNpmUpdate, detectInstallMethod } from "../npm-update";
 import { getOmpVersion } from "../omp/omp-cli";
 import { createChildProcessEnvironment } from "../project-command-env";
 import { isUpdateDisabled } from "../update-policy";
+import { releaseRepo } from "../release-repo";
 import { parseSystemdServiceCgroup } from "../self-update";
 import type { HostSoftwareUpdate, HostUpdateCompatibility, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
 import { assertOwnedPath, ensureHostUpdateRoot, fetchHostUpdateBytes, finishHostUpdate, HOST_VERSION_PATTERN, hostReleaseName, hostUpdateRoot, installedHostVersionMatches, isHostUpdateProcessAlive, processStartIdentity, pruneHostUpdateArtifacts, readHostUpdateState, sharedHostInstallReason, verifyHostServiceInstall, writeHostUpdateJson, type HostUpdateDescriptor } from "./update-worker";
@@ -59,7 +60,7 @@ async function candidateProtocol(version: string, force: boolean): Promise<numbe
   if (!force && cached && Date.now() - cached.checkedAt < (cached.value === null ? 30000 : 5 * 60 * 1000)) return cached.value;
   let value: number | null = null;
   try {
-    const source = (await fetchHostUpdateBytes(`https://raw.githubusercontent.com/kahme247/ompweb/v${version}/lib/hosts/link-protocol.ts`, 128 * 1024)).toString("utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const source = (await fetchHostUpdateBytes(`https://raw.githubusercontent.com/${releaseRepo()}/v${version}/lib/hosts/link-protocol.ts`, 128 * 1024)).toString("utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
     const declarations = [...source.matchAll(/^export const LINK_PROTOCOL_VERSION\s*=\s*([1-9]\d*)\s*;\s*$/gm)];
     if (declarations.length === 1 && [...source.matchAll(/export\s+const\s+LINK_PROTOCOL_VERSION\b/g)].length === 1) {
       const parsed = Number(declarations[0][1]);
@@ -154,7 +155,7 @@ function installSupport(method: "npm" | "bun" | "binary"): string | null {
     if (!info.isDirectory() || info.isSymbolicLink() || realpathSync(directory) !== directory || (process.getuid && info.uid !== process.getuid()) || (process.platform !== "win32" && (info.mode & 0o022))) throw new Error("Host install is not an owned, writable release directory");
     if (method === "binary") {
       hostReleaseName();
-      if (realpathSync(process.execPath) !== join(directory, process.platform === "win32" ? "ompweb.exe" : "ompweb") || !existsSync(join(directory, "dist", "index.html")) || !existsSync(join(directory, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp"))) throw new Error("Binary updates require a complete owned host release directory");
+      if (realpathSync(process.execPath) !== join(directory, process.platform === "win32" ? "ompweb.exe" : "ompweb") || !existsSync(join(directory, "dist", "index.html"))) throw new Error("Binary updates require a complete owned host release directory");
     } else if (basename(directory) !== "ompweb" || basename(dirname(directory)) !== "@kahme247" || basename(dirname(dirname(directory))) !== "node_modules") throw new Error("Host updates require an installed npm/bun package; source checkouts are manual-only");
     if (!safetyGuard) throw new Error("Host daemon restart safety is not configured");
     return safetyGuard();
@@ -208,7 +209,7 @@ export async function checkHostUpdates(compatibility: HostUpdateCompatibility, f
   const [npm, ompVersion] = await Promise.all([checkNpmUpdate(force).catch(() => null), getOmpVersion()]);
   const base: HostSoftwareUpdate = { currentVersion: null, availableVersion: null, updateAvailable: false, canUpdate: false, blockedReason: null, updateCommand: "" };
   const installMethod = typeof Bun !== "undefined" && Bun.isStandaloneExecutable ? "binary" : detectInstallMethod(installDirectory());
-  const ompweb: HostUpdateInfo["ompweb"] = { ...base, ...npm, currentVersion: packageJson.version, installMethod, protocolVersion: null, updateCommand: installMethod === "binary" ? "https://github.com/kahme247/ompweb/releases/latest" : installMethod === "bun" ? "bun add -g @kahme247/ompweb" : "npm install -g @kahme247/ompweb" };
+  const ompweb: HostUpdateInfo["ompweb"] = { ...base, ...npm, currentVersion: packageJson.version, installMethod, protocolVersion: null, updateCommand: installMethod === "binary" ? `https://github.com/${releaseRepo()}/releases/latest` : installMethod === "bun" ? "bun add -g @kahme247/ompweb" : "npm install -g @kahme247/ompweb" };
   // omp updates with ompweb (its runner ships inside each release): the row only reports the running version.
   const runtime: HostUpdateInfo["omp"] = { currentVersion: ompVersion?.replace(/^omp\//, "") ?? null };
   if (disabled) ompweb.blockedReason = disabled;
@@ -287,7 +288,7 @@ export async function startHostUpdate(target: HostUpdateTarget, version: string,
     const attempt = join(root, id);
     mkdirSync(attempt, { mode: 0o700 });
     const binary = method === "binary";
-    const descriptor: HostUpdateDescriptor = { id, target, version, fromVersion: packageJson.version, installMethod: method, installDir: installDirectory(), runtime: process.execPath, hostArgs: hostArguments(binary), cwd: process.cwd(), daemonPid: process.pid, daemonIdentity: plan.daemonIdentity, restartOnly: plan.restartOnly || undefined, systemd: plan.systemd };
+    const descriptor: HostUpdateDescriptor = { id, target, version, fromVersion: packageJson.version, installMethod: method, installDir: installDirectory(), runtime: process.execPath, hostArgs: hostArguments(binary), cwd: process.cwd(), daemonPid: process.pid, daemonIdentity: plan.daemonIdentity, releaseRepo: releaseRepo(), restartOnly: plan.restartOnly || undefined, systemd: plan.systemd };
     if (!binary && !descriptor.restartOnly) {
       const names = process.platform === "win32" ? method === "npm" ? ["npm.cmd", "npm.exe"] : ["bun.exe"] : [method];
       const manager = (process.env.PATH || "").split(delimiter).flatMap((directory) => names.map((name) => join(directory, name))).find((path) => existsSync(path));
