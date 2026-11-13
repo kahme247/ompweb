@@ -86,7 +86,7 @@ An update is a message starting `GitHub update (omp-web): OWNER/REPO#N <URL>`, f
 Pull requests:
 
 - new conversation comments, inline review comments and reviews;
-- CI: one event per head commit once every check run and commit status on it has reached a terminal state, giving counts by conclusion and the names of the failed, cancelled or timed-out checks (names capped at 100 characters, since a pull request from a fork controls its workflow files);
+- CI: one event per head commit once every check run and commit status on it has reached a terminal state, giving counts by conclusion; check names are not delivered, since a pull request from a fork controls its workflow files;
 - merged or closed: one final event, after which the watch ends.
 
 Issues:
