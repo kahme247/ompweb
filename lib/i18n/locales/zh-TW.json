@@ -1386,7 +1386,7 @@
   "hostUpdates.unsupported": "此主機守護行程不支援更新功能。請先手動升級。",
   "hostUpdates.confirmTitle": "更新 {host} 上的 {software}？",
   "hostUpdates.hostWarning": "請先關閉 {host} 上的所有對話並停止子代理。此更新會重新啟動主機守護行程；對話不會自動接續。要繼續嗎？",
-  "hostUpdates.ompWarning": "要更新 {host} 上的 omp 執行階段嗎？現有對話在重新啟動前仍會繼續使用舊版執行階段。對話不會自動重新啟動。",
+  "hostUpdates.ompWithOmpweb": "隨 ompweb 一起更新",
   "hostUpdates.updating": "正在將 {software} 更新至 {version}…",
   "hostUpdates.reconnecting": "正在等待更新狀態與主機重新連線…",
   "hostUpdates.succeeded": "更新已完成。",

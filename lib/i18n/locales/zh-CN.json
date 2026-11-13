@@ -1345,7 +1345,7 @@
   "hostUpdates.unsupported": "此主机守护进程不支持更新。请先手动升级。",
   "hostUpdates.confirmTitle": "更新 {host} 上的 {software}？",
   "hostUpdates.hostWarning": "请先关闭 {host} 上的所有会话并停止子智能体。此更新将重启主机守护进程，不会自动恢复会话。是否继续？",
-  "hostUpdates.ompWarning": "更新 {host} 上的 omp 运行时？现有会话在重启前仍使用旧运行时。不会自动重启任何会话。",
+  "hostUpdates.ompWithOmpweb": "随 ompweb 一起更新",
   "hostUpdates.updating": "正在将 {software} 更新到 {version}…",
   "hostUpdates.reconnecting": "正在等待更新状态和主机重新连接…",
   "hostUpdates.succeeded": "更新完成。",

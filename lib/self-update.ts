@@ -19,7 +19,6 @@ import { tmpdir } from "os";
 import { dirname, join, posix, resolve, win32 } from "path";
 import { promisify } from "util";
 import { checkNpmUpdate, detectInstallMethod } from "./npm-update";
-import { checkOmpUpdate } from "./omp/updates";
 import { DISABLE_AUTOUPDATE_ENV_VAR, isUpdateDisabled } from "./update-policy";
 
 const LEASE_MS = 30 * 60 * 1000;
@@ -56,36 +55,32 @@ export class SelfUpdateError extends Error {
   }
 }
 
-type Kind = "app" | "omp";
-
 function assertUpdatesEnabled(): void {
   if (!isUpdateDisabled()) return;
   throw new SelfUpdateError("updates_disabled", `Updates are disabled by ${DISABLE_AUTOUPDATE_ENV_VAR}`, 403);
 }
 
 export function resolveSelfUpdateTempRoot(
-  kind: Kind = "app",
   platform: NodeJS.Platform = process.platform,
   temporary = tmpdir(),
   uid = typeof process.getuid === "function" ? process.getuid() : undefined,
 ): string {
   const pathApi = platform === "win32" ? win32 : posix;
   const suffix = platform === "win32" ? "" : `-${uid ?? "user"}`;
-  const base = kind === "omp" ? "omp-self-update" : "ompweb-self-update";
-  return pathApi.join(temporary, `${base}${suffix}`);
+  return pathApi.join(temporary, `ompweb-self-update${suffix}`);
 }
 
-function rootDir(kind: Kind = "app"): string {
-  return resolveSelfUpdateTempRoot(kind);
+function rootDir(): string {
+  return resolveSelfUpdateTempRoot();
 }
-function leasePath(kind: Kind = "app"): string {
-  return join(rootDir(kind), "lease.json");
+function leasePath(): string {
+  return join(rootDir(), "lease.json");
 }
-function statusPath(kind: Kind = "app"): string {
-  return join(rootDir(kind), "status.json");
+function statusPath(): string {
+  return join(rootDir(), "status.json");
 }
-function markerPath(attemptId: string, marker: string, kind: Kind = "app"): string {
-  return join(rootDir(kind), `${attemptId}.${marker}`);
+function markerPath(attemptId: string, marker: string): string {
+  return join(rootDir(), `${attemptId}.${marker}`);
 }
 
 function isMissing(error: unknown): boolean {
@@ -137,8 +132,8 @@ function readStateJson<T>(path: string): T | null {
     return null;
   }
 }
-function ensureSecureRoot(kind: Kind, create: boolean): string | null {
-  const root = rootDir(kind);
+function ensureSecureRoot(create: boolean): string | null {
+  const root = rootDir();
   if (!existsSync(root)) {
     if (!create) return null;
     try {
@@ -155,8 +150,8 @@ function ensureSecureRoot(kind: Kind, create: boolean): string | null {
   }
   return root;
 }
-function attemptsDir(kind: Kind, create: boolean): string | null {
-  const root = ensureSecureRoot(kind, create);
+function attemptsDir(create: boolean): string | null {
+  const root = ensureSecureRoot(create);
   if (!root) return null;
   const attempts = join(root, "attempts");
   if (!existsSync(attempts)) {
@@ -214,8 +209,8 @@ function removeSecureEmptyDirectory(path: string): boolean {
     throw error;
   }
 }
-function removeAttemptDirectory(attemptId: string, kind: Kind): boolean {
-  const attempts = attemptsDir(kind, false);
+function removeAttemptDirectory(attemptId: string): boolean {
+  const attempts = attemptsDir(false);
   if (!attempts) return true;
   const dir = join(attempts, attemptId);
   try {
@@ -231,35 +226,35 @@ function removeAttemptDirectory(attemptId: string, kind: Kind): boolean {
   if (entries.includes("worker.js") && !removeSecureFile(join(dir, "worker.js"))) return false;
   return removeSecureEmptyDirectory(dir);
 }
-function removeAttemptArtifacts(attemptId: string, kind: Kind, includeCompletionAck = true): boolean {
+function removeAttemptArtifacts(attemptId: string, includeCompletionAck = true): boolean {
   if (!/^[0-9a-f-]{36}$/i.test(attemptId)) return false;
-  if (!removeAttemptDirectory(attemptId, kind)) return false;
+  if (!removeAttemptDirectory(attemptId)) return false;
   const suffixes = ["ready", "go", "abort.json", "armed.json", "restart-request.json", "restart-ack.json", "complete.json"];
   if (includeCompletionAck) suffixes.push("complete-ack.json");
   for (const s of suffixes) {
-    if (!removeSecureFile(markerPath(attemptId, s, kind))) return false;
+    if (!removeSecureFile(markerPath(attemptId, s))) return false;
   }
   return true;
 }
-function pruneEmptyRoot(kind: Kind): void {
-  const attempts = attemptsDir(kind, false);
+function pruneEmptyRoot(): void {
+  const attempts = attemptsDir(false);
   if (attempts) removeSecureEmptyDirectory(attempts);
-  const root = ensureSecureRoot(kind, false);
+  const root = ensureSecureRoot(false);
   if (root) removeSecureEmptyDirectory(root);
 }
-export function cleanupStaleSelfUpdate(now = Date.now(), kind: Kind = "app"): void {
-  if (!ensureSecureRoot(kind, false)) return;
-  const status = readStateJson<StoredStatus>(statusPath(kind));
-  const lease = readStateJson<{ attemptId?: unknown; expiresAt?: unknown }>(leasePath(kind));
+export function cleanupStaleSelfUpdate(now = Date.now()): void {
+  if (!ensureSecureRoot(false)) return;
+  const status = readStateJson<StoredStatus>(statusPath());
+  const lease = readStateJson<{ attemptId?: unknown; expiresAt?: unknown }>(leasePath());
   if (lease && !isActiveLease(lease, now)) {
-    removeSecureFile(leasePath(kind));
+    removeSecureFile(leasePath());
   }
   if (!status || typeof status.attemptId !== "string") {
-    pruneEmptyRoot(kind);
+    pruneEmptyRoot();
     return;
   }
   const timestamp = Date.parse(status.finishedAt ?? status.preparedAt);
-  const currentLease = readStateJson<{ attemptId?: unknown; expiresAt?: unknown }>(leasePath(kind));
+  const currentLease = readStateJson<{ attemptId?: unknown; expiresAt?: unknown }>(leasePath());
   const leaseStillActive = isActiveLease(currentLease, now);
   if (
     Number.isFinite(timestamp) &&
@@ -268,35 +263,35 @@ export function cleanupStaleSelfUpdate(now = Date.now(), kind: Kind = "app"): vo
     (isTerminalStatus(status) || !currentLease) &&
     !isProcessAlive(status.workerPid) &&
     !isProcessAlive(status.managerPid) &&
-    removeAttemptArtifacts(status.attemptId, kind)
+    removeAttemptArtifacts(status.attemptId)
   ) {
-    removeSecureFile(statusPath(kind));
+    removeSecureFile(statusPath());
   }
-  pruneEmptyRoot(kind);
+  pruneEmptyRoot();
 }
 
 const WORKER_LOST_ERROR = "The update worker stopped before the update finished";
 
-function isWorkerLost(status: StoredStatus, kind: Kind): boolean {
+function isWorkerLost(status: StoredStatus): boolean {
   if (status.state !== "running") return false;
   // The worker never outlives its lease, and a reused pid cannot keep an expired one alive.
-  if (!isActiveLease(readStateJson<{ expiresAt?: unknown }>(leasePath(kind)))) return true;
+  if (!isActiveLease(readStateJson<{ expiresAt?: unknown }>(leasePath()))) return true;
   return status.workerPid !== undefined && !isProcessAlive(status.workerPid);
 }
 
-export function getSelfUpdateStatus(kind: Kind = "app"): SelfUpdateStatus | null {
-  const s = readStateJson<StoredStatus>(statusPath(kind));
+export function getSelfUpdateStatus(): SelfUpdateStatus | null {
+  const s = readStateJson<StoredStatus>(statusPath());
   if (!s) return null;
   // minimal validation
   if (typeof s.attemptId !== "string" || typeof s.state !== "string") return null;
-  if (!isWorkerLost(s, kind)) return s;
+  if (!isWorkerLost(s)) return s;
   // Re-read: the worker may have written its result just before it exited.
-  const latest = readStateJson<StoredStatus>(statusPath(kind));
+  const latest = readStateJson<StoredStatus>(statusPath());
   if (latest?.attemptId !== s.attemptId || latest.state !== "running") return latest;
   const failed: StoredStatus = { ...latest, state: "failed", error: WORKER_LOST_ERROR, finishedAt: new Date().toISOString(), cleanupReady: true };
   // A read must not fail over the write; the next poll retries it.
   try {
-    atomicWrite(statusPath(kind), JSON.stringify(failed));
+    atomicWrite(statusPath(), JSON.stringify(failed));
   } catch {}
   return failed;
 }
@@ -365,41 +360,30 @@ function detectManager(packageDir: string): { manager: "npm" | "bun"; managerPat
   return { manager, managerPath, prefix: [] };
 }
 
-export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResult> {
+export async function prepareSelfUpdate(): Promise<PrepareResult> {
   assertUpdatesEnabled();
   // The compiled binary has no npm install to replace and no runtime for the worker: its updates run from a terminal.
   if (Bun.isStandaloneExecutable) {
     throw new SelfUpdateError("self_update_unsupported", "In-app updates are not available in the ompweb binary: update from a terminal", 409);
   }
-  cleanupStaleSelfUpdate(Date.now(), kind);
-  ensureSecureRoot(kind, true);
-  const leaseFile = leasePath(kind);
-  const statusFile = statusPath(kind);
+  cleanupStaleSelfUpdate(Date.now());
+  ensureSecureRoot(true);
+  const leaseFile = leasePath();
+  const statusFile = statusPath();
   const existingLease = readStateJson<{ attemptId?: string; expiresAt?: number }>(leaseFile);
   if (isActiveLease(existingLease)) {
     throw new SelfUpdateError("update_in_progress", "Another update is already in progress", 409);
   }
-  let currentVersion: string;
-  let targetVersion: string;
-  if (kind === "omp") {
-    const ompStatus = await checkOmpUpdate(true);
-    if (!ompStatus.updateAvailable || !ompStatus.availableVersion) {
-      throw new SelfUpdateError("no_update_available", "No OMP update available", 409);
-    }
-    currentVersion = ompStatus.currentVersion ?? "unknown";
-    targetVersion = ompStatus.availableVersion;
-  } else {
-    const npmStatus = await checkNpmUpdate(true);
-    if (!npmStatus.updateAvailable || !npmStatus.availableVersion) {
-      throw new SelfUpdateError("no_update_available", "No update available", 409);
-    }
-    currentVersion = npmStatus.currentVersion;
-    targetVersion = npmStatus.availableVersion;
+  const npmStatus = await checkNpmUpdate(true);
+  if (!npmStatus.updateAvailable || !npmStatus.availableVersion) {
+    throw new SelfUpdateError("no_update_available", "No update available", 409);
   }
+  const currentVersion = npmStatus.currentVersion;
+  const targetVersion = npmStatus.availableVersion;
   const attemptId = randomUUID();
   const preparedAt = new Date().toISOString();
   // write lease
-  const lease = { attemptId, kind, expiresAt: Date.now() + LEASE_MS, preparedAt };
+  const lease = { attemptId, expiresAt: Date.now() + LEASE_MS, preparedAt };
   atomicWrite(leaseFile, JSON.stringify(lease));
   const stored: StoredStatus = {
     attemptId,
@@ -410,7 +394,7 @@ export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResu
   };
   atomicWrite(statusFile, JSON.stringify(stored));
   // copy worker
-  const attempts = attemptsDir(kind, true)!;
+  const attempts = attemptsDir(true)!;
   const attemptDir = join(attempts, attemptId);
   mkdirSync(attemptDir, { mode: 0o700, recursive: true });
   secureDirectory(attemptDir);
@@ -423,57 +407,57 @@ export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResu
     } catch {}
   }
   // write ready marker
-  atomicWrite(markerPath(attemptId, "ready", kind), JSON.stringify({ attemptId, preparedAt }));
+  atomicWrite(markerPath(attemptId, "ready"), JSON.stringify({ attemptId, preparedAt }));
   return { attemptId, targetVersion };
 }
 
-export function validateCommitSelfUpdate(attemptId: string, kind: Kind = "app"): "ready" | "replay" {
+export function validateCommitSelfUpdate(attemptId: string): "ready" | "replay" {
   assertUpdatesEnabled();
-  const status = readStateJson<StoredStatus>(statusPath(kind));
+  const status = readStateJson<StoredStatus>(statusPath());
   if (!status || status.attemptId !== attemptId) throw new SelfUpdateError("attempt_not_found", "Update attempt not found", 404);
   if (status.state === "running") return "replay";
   if (status.state !== "prepared") throw new SelfUpdateError("invalid_state", "Update attempt is not prepared", 409);
-  const lease = readStateJson<{ attemptId?: string; expiresAt?: unknown }>(leasePath(kind));
+  const lease = readStateJson<{ attemptId?: string; expiresAt?: unknown }>(leasePath());
   if (!lease || lease.attemptId !== attemptId) throw new SelfUpdateError("lease_mismatch", "Lease mismatch", 409);
   if (!isActiveLease(lease)) throw new SelfUpdateError("lease_expired", "Update attempt expired; prepare it again", 409);
-  if (!existsSync(markerPath(attemptId, "ready", kind))) throw new SelfUpdateError("not_ready", "Update attempt not ready", 409);
+  if (!existsSync(markerPath(attemptId, "ready"))) throw new SelfUpdateError("not_ready", "Update attempt not ready", 409);
   return "ready";
 }
-export function markSelfUpdateStopping(attemptId: string, kind: Kind = "app"): void {
-  const status = readStateJson<StoredStatus>(statusPath(kind));
+export function markSelfUpdateStopping(attemptId: string): void {
+  const status = readStateJson<StoredStatus>(statusPath());
   if (!status || status.attemptId !== attemptId) return;
   // The worker gets a full lease from here: a running attempt past it counts as lost.
-  const lease = readStateJson<Record<string, unknown>>(leasePath(kind));
+  const lease = readStateJson<Record<string, unknown>>(leasePath());
   // Never take over another attempt's lease.
   if (lease?.attemptId === attemptId) {
-    atomicWrite(leasePath(kind), JSON.stringify({ ...lease, expiresAt: Date.now() + LEASE_MS }));
+    atomicWrite(leasePath(), JSON.stringify({ ...lease, expiresAt: Date.now() + LEASE_MS }));
   }
   const next: StoredStatus = { ...status, state: "running", stage: "stopping", startedAt: new Date().toISOString() };
-  atomicWrite(statusPath(kind), JSON.stringify(next));
+  atomicWrite(statusPath(), JSON.stringify(next));
 }
 
-export async function armSelfUpdateLauncher(attemptId: string, kind: Kind = "app"): Promise<void> {
-  const armed = markerPath(attemptId, "armed.json", kind);
+export async function armSelfUpdateLauncher(attemptId: string): Promise<void> {
+  const armed = markerPath(attemptId, "armed.json");
   atomicWrite(armed, JSON.stringify({ attemptId, armedAt: new Date().toISOString(), protocol: 1 }));
   // settle
   await new Promise<void>((r) => setTimeout(r, 500));
 }
 
-export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): Promise<{ accepted: true; attemptId: string }> {
+export async function commitSelfUpdate(attemptId: string): Promise<{ accepted: true; attemptId: string }> {
   assertUpdatesEnabled();
-  const status = readStateJson<StoredStatus>(statusPath(kind));
+  const status = readStateJson<StoredStatus>(statusPath());
   if (!status || status.attemptId !== attemptId) throw new SelfUpdateError("attempt_not_found", "Update attempt not found", 404);
   // write go marker
-  atomicWrite(markerPath(attemptId, "go", kind), JSON.stringify({ attemptId, committedAt: new Date().toISOString(), protocol: 1 }));
+  atomicWrite(markerPath(attemptId, "go"), JSON.stringify({ attemptId, committedAt: new Date().toISOString(), protocol: 1 }));
   // update status to running if not already
   if (status.state === "prepared") {
     const next: StoredStatus = { ...status, state: "running", stage: "preparing", startedAt: new Date().toISOString() };
-    atomicWrite(statusPath(kind), JSON.stringify(next));
+    atomicWrite(statusPath(), JSON.stringify(next));
   }
   // spawn worker detached
-  const attempts = attemptsDir(kind, false);
+  const attempts = attemptsDir(false);
   const workerPath = attempts ? join(attempts, attemptId, "worker.js") : null;
-  const root = rootDir(kind);
+  const root = rootDir();
   const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
   const { manager, managerPath, prefix } = detectManager(packageDir);
   const fromVersion = status.fromVersion;
@@ -507,11 +491,9 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
     JSON.stringify(descriptor),
     "--manager-prefix",
     JSON.stringify(prefix),
-    "--kind",
-    kind,
   ];
   try {
-    const systemd = kind === "app" ? await detectSystemdService(launcherPid) : null;
+    const systemd = await detectSystemdService(launcherPid);
     if (systemd) args.push("--systemd-unit", systemd.unit, "--systemd-user", systemd.user ? "1" : "0");
     const workerArgs = workerPath ? [workerPath, ...args] : args;
     // Windows locks a running bun.exe, and npm replaces the package's: the worker runs on the launcher's Node.
@@ -542,58 +524,58 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
     });
     // A failed launch arrives as an event, after this function returned.
     child.once("error", (error) => {
-      const current = readStateJson<StoredStatus>(statusPath(kind));
+      const current = readStateJson<StoredStatus>(statusPath());
       if (current?.attemptId !== attemptId || current.state !== "running") return;
       try {
-        atomicWrite(statusPath(kind), JSON.stringify({ ...current, state: "failed", error: error.message.slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true }));
+        atomicWrite(statusPath(), JSON.stringify({ ...current, state: "failed", error: error.message.slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true }));
       } catch {}
     });
     child.unref();
     // record worker pid
-    const updated: StoredStatus = { ...readStateJson<StoredStatus>(statusPath(kind))!, workerPid: child.pid };
+    const updated: StoredStatus = { ...readStateJson<StoredStatus>(statusPath())!, workerPid: child.pid };
     try {
-      atomicWrite(statusPath(kind), JSON.stringify(updated));
+      atomicWrite(statusPath(), JSON.stringify(updated));
     } catch {}
   } catch (error) {
     const failed: StoredStatus = { ...status, state: "failed", error: error instanceof Error ? error.message.slice(0, 240) : String(error), finishedAt: new Date().toISOString(), cleanupReady: true };
     try {
-      atomicWrite(statusPath(kind), JSON.stringify(failed));
+      atomicWrite(statusPath(), JSON.stringify(failed));
     } catch {}
     throw new SelfUpdateError("spawn_failed", "Failed to spawn update worker", 500);
   }
   return { accepted: true, attemptId };
 }
 
-export async function abortPreparedSelfUpdate(attemptId: string, reason: string, kind: Kind = "app"): Promise<void> {
+export async function abortPreparedSelfUpdate(attemptId: string, reason: string): Promise<void> {
   try {
-    atomicWrite(markerPath(attemptId, "abort.json", kind), JSON.stringify({ attemptId, reason, protocol: 1 }));
+    atomicWrite(markerPath(attemptId, "abort.json"), JSON.stringify({ attemptId, reason, protocol: 1 }));
   } catch {}
-  const status = readStateJson<StoredStatus>(statusPath(kind));
+  const status = readStateJson<StoredStatus>(statusPath());
   if (status && status.attemptId === attemptId && status.state === "prepared") {
     const next: StoredStatus = { ...status, state: "failed", error: reason.slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true };
     try {
-      atomicWrite(statusPath(kind), JSON.stringify(next));
+      atomicWrite(statusPath(), JSON.stringify(next));
     } catch {}
   }
 }
 
-export function acknowledgeSelfUpdate(attemptId: string, kind: Kind = "app"): { acknowledged: true; attemptId: string } {
-  if (!ensureSecureRoot(kind, false)) throw new SelfUpdateError("attempt_not_terminal", "The update attempt is not ready for cleanup", 409);
-  const status = readStateJson<StoredStatus>(statusPath(kind));
+export function acknowledgeSelfUpdate(attemptId: string): { acknowledged: true; attemptId: string } {
+  if (!ensureSecureRoot(false)) throw new SelfUpdateError("attempt_not_terminal", "The update attempt is not ready for cleanup", 409);
+  const status = readStateJson<StoredStatus>(statusPath());
   if (status?.attemptId !== attemptId || (status.state !== "succeeded" && status.state !== "failed")) {
     throw new SelfUpdateError("attempt_not_terminal", "The update attempt is not ready for cleanup", 409);
   }
-  const lease = readStateJson<{ attemptId?: unknown; expiresAt?: unknown }>(leasePath(kind));
+  const lease = readStateJson<{ attemptId?: unknown; expiresAt?: unknown }>(leasePath());
   if (isProcessAlive(status.workerPid) || isProcessAlive(status.managerPid) || (lease && (lease as { attemptId?: string }).attemptId !== attemptId)) {
     throw new SelfUpdateError("cleanup_not_ready", "The update is still finishing cleanup", 409);
   }
   // remove artifacts
-  removeAttemptArtifacts(attemptId, kind);
+  removeAttemptArtifacts(attemptId);
   // release lease
   if (lease && (lease as { attemptId?: string }).attemptId === attemptId) {
-    removeSecureFile(leasePath(kind));
+    removeSecureFile(leasePath());
   }
-  removeSecureFile(statusPath(kind));
-  pruneEmptyRoot(kind);
+  removeSecureFile(statusPath());
+  pruneEmptyRoot();
   return { acknowledged: true, attemptId };
 }

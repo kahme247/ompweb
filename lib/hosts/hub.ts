@@ -1577,13 +1577,14 @@ function updateOperation(value: unknown): value is HostUpdateOperation {
 export async function getHostSoftwareUpdates(id: string, force = false): Promise<HostUpdateInfo> {
   requireUpdateHost(id);
   const result = await request(id, "checkUpdates", { compatibility: updateCompatibility(), force });
-  if (!isRecord(result) || !softwareUpdate(result.ompweb) || !softwareUpdate(result.omp)
+  if (!isRecord(result) || !softwareUpdate(result.ompweb) || !isRecord(result.omp) || !nullableString(result.omp.currentVersion)
     || !["npm", "bun", "binary"].includes(String(result.ompweb.installMethod))
     || !(result.ompweb.protocolVersion === null || (Number.isSafeInteger(result.ompweb.protocolVersion) && Number(result.ompweb.protocolVersion) > 0))
     || !(result.operation === null || updateOperation(result.operation))) {
     throw new HostOpError(502, "host_bad_result", "The host returned an invalid update status");
   }
-  const info = result as unknown as HostUpdateInfo;
+  // A daemon from before omp updated with ompweb reports a full update status for omp: keep only its version.
+  const info = { ...result, omp: { currentVersion: result.omp.currentVersion } } as unknown as HostUpdateInfo;
   const protocol = info.ompweb.protocolVersion;
   if (info.ompweb.updateAvailable && (protocol === null || protocol < MIN_LINK_PROTOCOL_VERSION || protocol > LINK_PROTOCOL_VERSION)) {
     return { ...info, ompweb: { ...info.ompweb, canUpdate: false, blockedReason: protocol === null
