@@ -508,6 +508,8 @@ export class AgentSessionWrapper {
   private _adopted = false;
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools = new Map<string, { event: UnsequencedAgentEvent; crossSessionId?: string }>();
+  /** Server-side agent tool calls in flight (answerServerAgentTool); host_tool_cancel aborts them. */
+  private serverToolCalls = new Map<string, AbortController>();
   /** Own host calls no tab has seen yet (see parkHostTool), with their deadlines. */
   private parkedHostTools = new Map<string, ReturnType<typeof setTimeout>>();
   /** Listeners omp-web attaches itself (waitForTurnEnd), not tabs: a parked host call waits for a tab. */
@@ -1413,6 +1415,7 @@ export class AgentSessionWrapper {
       }
       case "host_tool_cancel": {
         const targetId = typeof event.targetId === "string" ? event.targetId : "";
+        this.serverToolCalls.get(targetId)?.abort();
         if (targetId && this.cancelPendingHostTool(targetId)) {
           notifyRunningChange();
           return;
@@ -1954,6 +1957,8 @@ export class AgentSessionWrapper {
         result: { content: [{ type: "text", text }] },
       });
     };
+    const cancel = new AbortController();
+    this.serverToolCalls.set(id, cancel);
     try {
       const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
       const context: AgentToolContext = {
@@ -1964,6 +1969,7 @@ export class AgentSessionWrapper {
         enabled: loadWebServerSettings().agentToolsEnabled,
         guard: getAgentToolGuard(),
         confirm: (title) => this.confirmFromServer(title),
+        signal: cancel.signal,
       };
       if (this.replaying && toolName === "new_session" && (
         args.shareWorkspace === true || args.host != null || !poolProjectBindings(loadPools()).get(this.host.id)?.size
@@ -1979,6 +1985,8 @@ export class AgentSessionWrapper {
       } else {
         sendResult(error instanceof Error ? error.message : String(error), true);
       }
+    } finally {
+      this.serverToolCalls.delete(id);
     }
   }
 
