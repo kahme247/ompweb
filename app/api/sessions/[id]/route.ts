@@ -5,6 +5,7 @@ import { invalidateSessionCaches } from "@/lib/session-reader";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { clearExitedRpcSession, getLiveRpcSessionIds, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
 import { forgetSessionReplacementMappings } from "@/lib/message-outbox";
+import { removeSessionWatches } from "@/lib/github/watch-store";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
@@ -143,6 +144,11 @@ export async function DELETE(
     }
     invalidateHostSessionList(resolved.host.id);
     clearExitedRpcSession(id);
+    try {
+      removeSessionWatches(id);
+    } catch {
+      // The delete succeeded; a watch left behind ends at the outbox's 404 for this session.
+    }
     return Response.json({ ok: true, ...result.value });
   } catch (error) {
     return sessionsErrorResponse(error);
