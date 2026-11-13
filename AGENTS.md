@@ -180,7 +180,7 @@ lib/
     gh.ts              the server's `gh` runner: `GhRunner`, `checkGh` (60 s login cache), target parsing; env from `createChildProcessEnvironment`
     api.ts             GitHub data over `gh api`: metadata snapshots; `readItem` is the one path that returns GitHub text
     events.ts          pure diff of a snapshot against a watch's cursor; words metadata-only updates
-    watch-store.ts     `<agent dir>/omp-web/github-watches.sqlite` (WAL): watches, cursors, pending updates, posted comment ids, read grants
+    watch-store.ts     `<agent dir>/omp-web/github-watches.sqlite` (WAL): watches, cursors, pending updates, posted comment ids, read grants; `removeSessionWatches`/`renameSession` do nothing when the file does not exist (a session delete never creates, or on Windows holds open, a store)
     watcher.ts         60 s poller: pending row, then a `prompt` outbox add, then the cursor on acceptance
     tools.ts           the five tools (`GITHUB_TOOL_NAMES`, `GITHUB_REPLAY_SAFE_TOOLS`), run after agent-tools' enabled and rate checks
   provider-accounts.ts distinct omp accounts per provider from `omp usage` reports (Models → provider detail)
