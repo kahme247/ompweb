@@ -6,7 +6,6 @@ import type {
   AgentMessage,
   CustomMessage,
   ExtensionStatusItem,
-  ExtensionUiRequest,
   ExtensionWidgetItem,
   SessionTreeNode,
 } from "@/lib/types";
@@ -202,8 +201,6 @@ export type AgentStateResponse = {
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
   queuedMessages?: QueuedMessages;
-  /** Untrusted until parsed by parseSkillDiagnosticsSnapshot. */
-  skillDiagnostics?: unknown;
   todoPhases?: TodoPhase[];
 };
 
@@ -218,14 +215,6 @@ export function toThinkingModelMeta(model: { provider?: string; id?: string; nam
   if (!model?.provider || !model.id) return null;
   return { provider: model.provider, modelId: model.id, name: model.name, reasoning: model.reasoning, thinking: model.thinking };
 }
-
-export type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" | "ask" }>;
-export type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
-// omp's rpc-ui frames add open_url (OAuth) and cancel on top of lib/types' union.
-export type IncomingExtensionUiRequest =
-  | ExtensionUiRequest
-  | { type: "extension_ui_request"; id: string; method: "open_url"; url: string; launchUrl?: string; instructions?: string }
-  | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string };
 
 export type AgentPhase =
   | { kind: "waiting_model" }
@@ -276,10 +265,10 @@ export const EXTERNAL_RUN_POLL_MS = 2_000;
 // or the run was interrupted between a tool call and its result). Stop polling;
 // the cheap heuristic below re-arms the poll if the transcript grows again.
 export const EXTERNAL_RUN_STALE_MS = 60_000;
-// A cold `omp --mode rpc-ui` spawn (extension + skill + LSP discovery) can take
+// A cold ompweb-omp start (extension + skill + LSP discovery) can take
 // far longer than a few seconds, and the SSE route may only answer once the
 // child is ready. Give up only after the child would have timed out anyway
-// (rpc-process waitReady is 120s server-side) rather than dropping the prompt.
+// (rpc-process waitReady, server-side) rather than dropping the prompt.
 export const EVENT_STREAM_CONNECT_TIMEOUT_MS = 60_000;
 // Tell the user something is happening if the stream is still connecting.
 export const EVENT_STREAM_SLOW_CONNECT_MS = 4_000;

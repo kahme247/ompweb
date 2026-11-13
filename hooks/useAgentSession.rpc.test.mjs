@@ -391,7 +391,6 @@ const { ChatWindow } = await import("@/components/ChatWindow");
 const { SessionSidebar } = await import("@/components/SessionSidebar");
 const { AppShell } = await import("@/components/AppShell");
 const { FileExplorer } = await import("@/components/FileExplorer");
-const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await import("@/lib/omp/session-edit-extension.mjs");
 // Edit only opens a confirm dialog; the edit starts from its confirm button.
 async function confirmEdit(view, button) {
   await act(async () => { fireEvent.click(button); });
@@ -1268,8 +1267,8 @@ test("an answered dialog handoff cannot clear the next unanswered request", asyn
   resetWorld();
   primeSession("dialog-handoff", [userMsg("u0", "q")]);
   const { w, es } = await startRun("dialog-handoff", "ask me");
-  const first = { type: "extension_ui_request", id: "first", method: "editor", title: "First question" };
-  const next = { ...first, id: "next", title: "Next question" };
+  const first = { type: "ui_request", id: 1, method: "editor", args: ["First question"] };
+  const next = { ...first, id: 2, args: ["Next question"] };
   await act(() => es.emit(first));
   await settle(300);
   assert.equal(w.latest.extensionDialog?.id, first.id, "unanswered requests have no clear timer");
@@ -1277,11 +1276,11 @@ test("an answered dialog handoff cannot clear the next unanswered request", asyn
   let release;
   const acknowledgement = new Promise((resolve) => { release = resolve; });
   world.holds.push({
-    match: (method, _url, body) => method === "POST" && body?.type === "extension_ui_response",
+    match: (method, _url, body) => method === "POST" && body?.type === "ui_response",
     produce: () => acknowledgement,
   });
   let response;
-  await act(async () => { response = w.latest.respondToExtensionUi(first, { value: "My answer" }); });
+  await act(async () => { response = w.latest.respondToExtensionUi(first, "My answer"); });
   await act(() => es.emit(next));
   await act(async () => {
     release({ value: { success: true, data: {} } });
@@ -1297,26 +1296,70 @@ for (const failure of ["HTTP rejection", "connection failure"]) {
     const sid = `answer-failure-${failure}`;
     primeSession(sid, [userMsg("u0", "q")]);
     const { w, es } = await startRun(sid, "ask");
-    const request = { type: "extension_ui_request", id: "retry-answer", method: "editor", title: "Answer" };
+    const request = { type: "ui_request", id: 5, method: "editor", args: ["Answer"] };
     await act(() => es.emit(request));
     world.holds.push({
-      match: (method, _url, body) => method === "POST" && body?.type === "extension_ui_response",
+      match: (method, _url, body) => method === "POST" && body?.type === "ui_response",
       produce: async () => {
         if (failure === "connection failure") throw new Error("connection lost");
         return { status: 500, value: { error: "answer delivery failed" } };
       },
     });
-    await act(async () => { await w.latest.respondToExtensionUi(request, { value: "my retained answer" }); });
+    await act(async () => { await w.latest.respondToExtensionUi(request, "my retained answer"); });
     await settle(300);
     assert.equal(w.latest.extensionDialog?.id, request.id, "failure must not unmount and erase the answer");
     assert.equal(w.latest.notices.at(-1)?.type, "error");
     await act(() => es.emit({ ...request }));
     assert.equal(w.latest.extensionDialog?.id, request.id);
-    await act(async () => { await w.latest.respondToExtensionUi(request, { value: "my retained answer" }); });
+    await act(async () => { await w.latest.respondToExtensionUi(request, "my retained answer"); });
     await settle(300);
     assert.equal(w.latest.extensionDialog, null, "a successful retry closes the answered question");
   });
 }
+
+test("dialog answers go out as ui_response with omp's value; a cancel carries none", async () => {
+  resetWorld();
+  primeSession("ui-answers", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("ui-answers", "ask");
+  const confirm = { type: "ui_request", id: 8, method: "confirm", args: ["Keep going?", ""] };
+  await act(() => es.emit(confirm));
+  await act(async () => { await w.latest.respondToExtensionUi(confirm, true); });
+  await act(async () => { await w.latest.respondToExtensionUi(confirm, undefined); });
+  const sent = world.calls.filter((c) => c.body?.type === "ui_response").map((c) => c.body);
+  assert.deepEqual(sent.map(({ type, id, value }) => ({ type, id, value })), [
+    { type: "ui_response", id: 8, value: true },
+    { type: "ui_response", id: 8, value: undefined },
+  ]);
+  assert.equal("value" in JSON.parse(JSON.stringify(sent[1])), false, "a cancel sends no value");
+});
+
+test("ui_end closes another tab's dialog; presentation ui frames drive notices, status, widgets and custom UI", async () => {
+  resetWorld();
+  primeSession("ui-frames", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("ui-frames", "ask");
+  await act(() => es.emit({ type: "ui_request", id: 9, method: "select", args: ["Which?", ["A", "B"]] }));
+  assert.equal(w.latest.extensionDialog?.id, 9);
+  await act(() => es.emit({ type: "ui_end", id: 9 }));
+  assert.equal(w.latest.extensionDialog, null);
+
+  await act(() => {
+    es.emit({ type: "ui", method: "notify", message: "Heads up", notifyType: "warning" });
+    es.emit({ type: "ui", method: "setStatus", statusKey: "lint", statusText: "3 issues" });
+    es.emit({ type: "ui", method: "setWidget", widgetKey: "todo", widgetLines: ["one"] });
+    es.emit({ type: "ui", method: "custom", id: 4, lines: ["hello"] });
+  });
+  assert.equal(w.latest.notices.at(-1)?.message, "Heads up");
+  assert.equal(w.latest.notices.at(-1)?.type, "warning");
+  assert.deepEqual(w.latest.extensionStatuses, [{ key: "lint", text: "3 issues" }]);
+  assert.deepEqual(w.latest.extensionWidgets, [{ key: "todo", lines: ["one"], placement: "aboveEditor" }]);
+  assert.deepEqual(w.latest.extensionCustomUi?.lines, ["hello"]);
+
+  await act(async () => { await w.latest.sendExtensionCustomInput(w.latest.extensionCustomUi, "x"); });
+  const input = world.calls.find((c) => c.body?.type === "ui_input")?.body;
+  assert.deepEqual({ id: input?.id, data: input?.data }, { id: 4, data: "x" });
+  await act(() => es.emit({ type: "ui", method: "custom", id: 4, lines: [], closed: true }));
+  assert.equal(w.latest.extensionCustomUi, null);
+});
 
 test("a stale local queue action reports that its target is unavailable", async () => {
   resetWorld();
@@ -3671,7 +3714,7 @@ test("busy foreground catch-up restores missing middle messages without overwrit
   await act(async () => {
     visibilityState = "visible"; document.dispatchEvent(new Event("visibilitychange"));
     await sleep(20);
-    es.emit({ type: "extension_ui_request", id: "question", method: "confirm", title: "Keep going?" });
+    es.emit({ type: "ui_request", id: "question", method: "confirm", args: ["Keep going?", ""] });
     es.emit({ type: "message_update", message: assistantMsg("current", "newer tokens") });
     release();
   });
@@ -4152,35 +4195,27 @@ async function attachEditableWrapper(t, native, { holdHistory = false } = {}) {
   const historyFrames = [];
   const identityChanges = [];
   const ready = { type: "ready", protocolVersion: 2 };
-  let protocolNegotiated = false;
+  let readied = false;
   const emitNative = (frame) => { for (const listener of [...listeners]) listener(frame); };
   const wrapper = new AgentSessionWrapper({
     isAlive: true,
-    async waitReady() { return ready; },
-    async negotiateProtocol(frame) {
-      assert.equal(frame, ready, "the wrapper must negotiate the announced ready frame");
-      protocolNegotiated = true;
-    },
+    async waitReady() { readied = true; return ready; },
     onFrame(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     async sendCommand(command) {
-      assert.equal(protocolNegotiated, true, "commands must wait for readiness and protocol negotiation");
+      assert.equal(readied, true, "commands must wait for readiness");
       if (command.type === "get_state") return {
         sessionId: native.sessionId, sessionFile: native.filePath,
         isStreaming: world.agents.get(native.sessionId)?.state?.isStreaming ?? false,
         isCompacting: false, isSettled: true, hasPendingAsyncWork: false, queuedMessageCount: 0,
       };
-      if (command.type === "get_available_commands") return { commands: [{ name: SESSION_EDIT_COMMAND, source: "extension" }] };
-      if (command.type === "prompt" && command.message.startsWith(`/${SESSION_EDIT_COMMAND} `)) {
-        const request = JSON.parse(command.message.slice(SESSION_EDIT_COMMAND.length + 2));
-        const response = await native.command({ type: "edit_message", entryId: request.entryId });
+      if (command.type === "edit_message") {
+        const response = await native.command(command);
         const value = await response.json();
         if (native.editOutcome === "persistence-error") {
           emitNative({ type: "notice", source: "session-persistence", level: "error", message: value.error });
         }
-        emitNative({ type: "extension_ui_request", method: "notify", message: SESSION_EDIT_RESPONSE_PREFIX + JSON.stringify({
-          requestId: request.requestId, ...(response.ok ? value.data : { error: value.error }),
-        }) });
-        return { agentInvoked: false };
+        if (!response.ok) throw new Error(value.error);
+        return value.data;
       }
       if (command.type === "prompt") { await native.command(command); return { agentInvoked: true }; }
       return {};
@@ -6043,12 +6078,12 @@ test("the answering tab keeps its dialog mounted during a synchronized cancel ha
   primeSession("s1", [userMsg("u0", "q")]);
   const { w, es } = await startStreamingRun("s1");
   await act(async () => {
-    es.emit({ type: "extension_ui_request", id: "question", method: "confirm", title: "Keep going?" });
+    es.emit({ type: "ui_request", id: "question", method: "confirm", args: ["Keep going?", ""] });
   });
   assert.equal(w.latest.extensionDialog?.id, "question");
   await act(async () => {
-    const response = w.latest.respondToExtensionUi(w.latest.extensionDialog, { confirmed: true });
-    es.emit({ type: "extension_ui_request", id: "cancel:question", method: "cancel", targetId: "question" });
+    const response = w.latest.respondToExtensionUi(w.latest.extensionDialog, true);
+    es.emit({ type: "ui_end", id: "question" });
     await response;
   });
   assert.equal(w.latest.extensionDialog?.id, "question", "the local hand-off window must survive its own synchronized cancel");
@@ -6178,275 +6213,6 @@ test("overlapping Stops share one atomic withdrawal; an image-only entry does no
   assert.equal(world.calls.filter((c) => c.body?.type === "abort_and_restore_queue").length, 1);
   assert.equal(getDraft("abort-atomic-twice")?.value, "words");
   clearDraft("abort-atomic-twice");
-});
-
-function skillDiagnosticsSnapshot(showStartupDiagnostics, name = "review") {
-  return {
-    cwd: "/workspace",
-    showStartupDiagnostics,
-    diagnostics: [{
-      name,
-      reason: "source-order",
-      skills: [
-        { name, filePath: `/workspace/.agents/skills/${name}/SKILL.md`, source: "project" },
-        { name, filePath: `/home/me/.agents/skills/${name}/SKILL.md`, source: "user", pluginName: "shared" },
-      ],
-      duplicates: [{
-        skill: { name, filePath: `/mirror/.agents/skills/${name}/SKILL.md`, source: "custom" },
-        retained: { name, filePath: `/workspace/.agents/skills/${name}/SKILL.md`, source: "project" },
-      }],
-    }],
-  };
-}
-
-test("skill diagnostics hydrate from state and follow defensive live updates", async () => {
-  resetWorld();
-  primeSession("skill-state", [userMsg("u0", "q")]);
-  const initial = skillDiagnosticsSnapshot(true);
-  world.agents.set("skill-state", {
-    running: true,
-    state: {
-      skillDiagnostics: {
-        ...initial,
-        diagnostics: [{
-          ...initial.diagnostics[0],
-          skills: initial.diagnostics[0].skills.map((skill) => ({ ...skill, body: "private" })),
-          privateDiagnostic: true,
-        }],
-        privateSnapshot: true,
-      },
-    },
-  });
-
-  const w = await mountSession("skill-state");
-  assert.deepEqual(w.latest.skillDiagnostics, initial, "get_state hydration recovers a startup frame emitted before SSE attached");
-
-  const updated = skillDiagnosticsSnapshot(false, "deploy");
-  await act(() => lastEs().emit({
-    type: "skill_diagnostics_update",
-    data: { ...updated, containRoot: "/private" },
-  }));
-  assert.deepEqual(w.latest.skillDiagnostics, updated);
-
-  await act(() => lastEs().emit({
-    type: "skill_diagnostics_update",
-    data: { cwd: "/workspace", showStartupDiagnostics: true, diagnostics: "none" },
-  }));
-  assert.equal(w.latest.skillDiagnostics, null, "malformed data is unsupported, not a fabricated clean result");
-
-  const recovered = skillDiagnosticsSnapshot(true, "recovered");
-  world.agents.set("skill-state", { running: true, state: { skillDiagnostics: recovered } });
-  await act(async () => {
-    lastEs().open();
-    await sleep(30);
-  });
-  assert.deepEqual(w.latest.skillDiagnostics, recovered, "stream attachment reconciles an update emitted before SSE attached");
-});
-
-/** Start the startup-diagnostics setter with its POST held. `respond` answers the held POST; `saving` is the hook's promise. */
-async function startHeldSkillSetter(w, sid, enabled) {
-  let respond;
-  world.holds.push({
-    match: (method, url, body) => method === "POST" && url.includes(`/api/agent/${sid}`) && body?.type === "set_skill_startup_diagnostics",
-    produce: () => new Promise((resolve) => { respond = (data) => resolve({ value: { success: true, data } }); }),
-  });
-  let saving;
-  await act(async () => {
-    saving = w.latest.setSkillStartupDiagnostics(enabled);
-    await sleep(20);
-  });
-  // The test awaits `saving` itself; this only keeps a failed assertion from leaving an unhandled rejection behind.
-  saving.catch(() => {});
-  return { saving, respond: (data) => respond(data) };
-}
-
-test("the startup diagnostics setter publishes OMP's effective snapshot and rejects unsupported replies", async () => {
-  resetWorld();
-  primeSession("skill-actions", [userMsg("u0", "q")]);
-  const on = skillDiagnosticsSnapshot(true);
-  const off = skillDiagnosticsSnapshot(false);
-  world.agents.set("skill-actions", { running: false, state: { skillDiagnostics: on } });
-  const w = await mountSession("skill-actions");
-  assert.deepEqual(w.latest.skillDiagnostics, on);
-
-  world.holds.push({
-    match: (method, url, body) => method === "POST" && url.includes("/api/agent/skill-actions") && body?.type === "set_skill_startup_diagnostics",
-    produce: async () => ({ value: { success: true, data: off } }),
-  });
-  let disabled;
-  await act(async () => {
-    disabled = await w.latest.setSkillStartupDiagnostics(false);
-  });
-  assert.deepEqual(disabled, off);
-  assert.deepEqual(w.latest.skillDiagnostics, off, "the effective snapshot replaces the previous one");
-
-  world.holds.push({
-    match: (method, url, body) => method === "POST" && url.includes("/api/agent/skill-actions") && body?.type === "set_skill_startup_diagnostics",
-    produce: async () => ({ value: { success: true, data: off } }),
-  });
-  let overridden;
-  await act(async () => {
-    overridden = await w.latest.setSkillStartupDiagnostics(true);
-  });
-  assert.deepEqual(overridden, off, "an override that keeps the setting off is returned as the effective value, not the requested one");
-  assert.deepEqual(w.latest.skillDiagnostics, off);
-
-  world.holds.push({
-    match: (method, url, body) => method === "POST" && url.includes("/api/agent/skill-actions") && body?.type === "set_skill_startup_diagnostics",
-    produce: async () => ({ value: { success: true, data: { cwd: "/workspace", showStartupDiagnostics: false, diagnostics: null } } }),
-  });
-  await assert.rejects(() => w.latest.setSkillStartupDiagnostics(false), /skill diagnostics/i);
-  assert.deepEqual(w.latest.skillDiagnostics, off, "a malformed response cannot erase the last supported snapshot");
-  await assert.rejects(() => w.latest.setSkillStartupDiagnostics("false"), /boolean/i);
-});
-
-test("the startup diagnostics setter does not start an empty chat and rejects stale session responses", async () => {
-  resetWorld();
-  const empty = await mountSession(null);
-  const callsBefore = world.calls.length;
-  await assert.rejects(() => empty.latest.setSkillStartupDiagnostics(false), /active session/i);
-  assert.equal(world.calls.length, callsBefore, "no active session means no lazy child-start request");
-
-  primeSession("old-skills", [userMsg("u0", "old")]);
-  const old = await mountSession("old-skills");
-  const held = await startHeldSkillSetter(old, "old-skills", false);
-  old.unmount();
-
-  primeSession("current-skills", [userMsg("u0", "current")]);
-  const current = await mountSession("current-skills");
-  held.respond(skillDiagnosticsSnapshot(false, "stale"));
-  await assert.rejects(held.saving, /stale/i);
-  assert.equal(current.latest.skillDiagnostics, null, "the previous chat cannot update the selected chat");
-});
-
-test("a saved setting whose own update frame beats the HTTP response resolves to the saved snapshot", async () => {
-  resetWorld();
-  primeSession("skill-own-frame", [userMsg("u0", "q")]);
-  const enabled = skillDiagnosticsSnapshot(true, "own-frame");
-  world.agents.set("skill-own-frame", { running: true, state: { skillDiagnostics: enabled } });
-  const w = await mountSession("skill-own-frame");
-  assert.deepEqual(w.latest.skillDiagnostics, enabled);
-
-  const { saving, respond } = await startHeldSkillSetter(w, "skill-own-frame", false);
-  const saved = skillDiagnosticsSnapshot(false, "own-frame");
-  try {
-    // OMP emits the update frame before it answers the command.
-    await act(() => lastEs().emit({ type: "skill_diagnostics_update", data: saved }));
-    assert.deepEqual(w.latest.skillDiagnostics, saved);
-  } finally {
-    respond(saved);
-  }
-  let result;
-  await act(async () => {
-    result = await saving;
-  });
-  assert.deepEqual(result, saved, "the control reports the saved setting instead of a stale failure");
-  assert.deepEqual(w.latest.skillDiagnostics, saved);
-});
-
-test("a setter response overtaken by a newer update returns the current snapshot without rolling it back", async () => {
-  resetWorld();
-  primeSession("skill-newer-frame", [userMsg("u0", "q")]);
-  world.agents.set("skill-newer-frame", { running: true, state: { skillDiagnostics: skillDiagnosticsSnapshot(true, "before") } });
-  const w = await mountSession("skill-newer-frame");
-
-  const { saving, respond } = await startHeldSkillSetter(w, "skill-newer-frame", false);
-  const newer = skillDiagnosticsSnapshot(false, "after-reload");
-  try {
-    await act(() => lastEs().emit({ type: "skill_diagnostics_update", data: newer }));
-  } finally {
-    respond(skillDiagnosticsSnapshot(false, "answered-before-reload"));
-  }
-  let result;
-  await act(async () => {
-    result = await saving;
-  });
-  assert.deepEqual(result, newer);
-  assert.deepEqual(w.latest.skillDiagnostics, newer, "the older response never replaces a newer update");
-});
-
-test("a state snapshot requested before a newer skill update cannot overwrite it when it resolves late", async () => {
-  resetWorld();
-  primeSession("skill-order", [userMsg("u0", "q")]);
-  world.agents.set("skill-order", { running: true, state: { skillDiagnostics: skillDiagnosticsSnapshot(true, "startup") } });
-  const w = await mountSession("skill-order");
-
-  let release;
-  world.holds.push({
-    match: (method, url) => method === "GET" && url === "/api/agent/skill-order",
-    produce: () => new Promise((resolve) => {
-      release = () => resolve({ value: { running: true, state: { skillDiagnostics: skillDiagnosticsSnapshot(true, "stale-state") } } });
-    }),
-  });
-  const newer = skillDiagnosticsSnapshot(false, "newer-update");
-  try {
-    await act(async () => {
-      lastEs().open(); // stream attachment requests an authoritative state snapshot
-      await sleep(20);
-    });
-    assert.ok(release, "precondition: the snapshot request is still in flight");
-    await act(() => lastEs().emit({ type: "skill_diagnostics_update", data: newer }));
-    assert.deepEqual(w.latest.skillDiagnostics, newer);
-  } finally {
-    release?.();
-  }
-  await act(async () => {
-    await sleep(30);
-  });
-  assert.deepEqual(w.latest.skillDiagnostics, newer, "the late older snapshot is dropped");
-});
-
-test("a fresh chat hydrates and follows skill diagnostics after slash discovery creates its runtime", async () => {
-  resetWorld();
-  const startup = skillDiagnosticsSnapshot(true, "fresh-startup");
-  world.holds.push({
-    match: (method, url) => method === "POST" && url === "/api/agent/new",
-    produce: async () => ({ value: { sessionId: "fresh-skills" } }),
-  });
-  world.agents.set("fresh-skills", { running: true, state: { skillDiagnostics: startup } });
-  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
-  assert.equal(w.latest.skillDiagnostics, null, "an empty new-chat page has no runtime or diagnostics");
-  assert.deepEqual(world.esInstances, [], "mounting an empty new chat must not attach a stream");
-
-  await act(async () => { await w.latest.loadSlashCommands(); });
-  const es = lastEs();
-  assert.deepEqual(es?.channel, { kind: "session", sessionId: "fresh-skills" }, "the created runtime must be observed before its first prompt");
-  await act(async () => {
-    es.open();
-    await sleep(30);
-  });
-  assert.deepEqual(w.latest.skillDiagnostics, startup, "the startup frame emitted before attachment is recovered from state");
-
-  const updated = skillDiagnosticsSnapshot(false, "fresh-updated");
-  await act(() => es.emit({ type: "skill_diagnostics_update", data: updated }));
-  assert.deepEqual(w.latest.skillDiagnostics, updated, "live diagnostics follow the created runtime");
-  assert.equal(callsTo("POST", "/api/agent/fresh-skills").some((call) => call.body?.type === "prompt"), false, "discovery never starts a model run");
-  w.unmount();
-});
-
-test("a fresh chat runtime created after unmount cannot attach or apply skill diagnostics", async () => {
-  resetWorld();
-  let release;
-  world.holds.push({
-    match: (method, url) => method === "POST" && url === "/api/agent/new",
-    produce: () => new Promise((resolve) => { release = () => resolve({ value: { sessionId: "stale-fresh" } }); }),
-  });
-  world.agents.set("stale-fresh", { running: true, state: { skillDiagnostics: skillDiagnosticsSnapshot(true, "stale-fresh") } });
-  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
-  let discovery;
-  await act(async () => {
-    discovery = w.latest.loadSlashCommands();
-    await sleep(20);
-    w.unmount();
-  });
-  await act(async () => {
-    release();
-    await discovery;
-    await sleep(30);
-  });
-  assert.deepEqual(world.esInstances, [], "a stale create must not leak an event stream");
-  assert.equal(callsTo("GET", "/api/agent/stale-fresh").length, 0, "a stale create must not request diagnostics for a switched chat");
-  assert.equal(w.latest.skillDiagnostics, null);
 });
 
 test("a fresh chat's first prompt attaches one event stream instead of an observer plus its own", async () => {

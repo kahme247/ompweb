@@ -27,7 +27,6 @@ const target = arg("--target");
 const from = arg("--from");
 const launcherPid = Number(arg("--launcher-pid"));
 const serverPid = Number(arg("--server-pid"));
-const kind = arg("--kind") || "app";
 // Set when the server runs as this systemd unit; systemd stops and starts it.
 const systemdUnit = arg("--systemd-unit");
 const systemctlScope = arg("--systemd-user") === "1" ? ["--user"] : [];
@@ -65,6 +64,11 @@ function updateStatus(patch) {
   fs.renameSync(tmp, statusFile());
 }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// The launcher (bin/omp-web.js watchUpdateCompletion) was armed at commit: an attempt that ends without a restart must
+// disarm it, or it takes the running server's next exit for this update's restart and waits forever.
+function disarmLauncher() {
+  try { atomicWrite(markerFile("complete.json"), { protocol: 1, attemptId, state: "failed", completedAt: new Date().toISOString() }); } catch {}
+}
 function isLaunchdActive() {
   try {
     const plist = path.join(os.homedir(), "Library", "LaunchAgents", "com.kahme247.ompweb.plist");
@@ -129,21 +133,47 @@ async function stopOriginalProcesses() {
   return { launchd, tray };
 }
 
+// The candidate's `ompweb fetch-omp` (lib/omp/runner-fetch.ts: its version's omp runner, into the per-version cache the
+// installed release then uses) and `ompweb preflight` (lib/hosts/preflight.ts), installed into a scratch prefix and run
+// in this environment before anything stops: a session omp that cannot start fails the update, not the running server.
+function preflightCandidate() {
+  const prefix = fs.mkdtempSync(path.join(os.tmpdir(), "ompweb-candidate-"));
+  try {
+    fs.writeFileSync(path.join(prefix, "package.json"), '{"private":true}');
+    const pkg = `@kahme247/ompweb@${target}`;
+    // shell: true (Windows) joins arguments unquoted.
+    const where = process.platform === "win32" ? `"${prefix}"` : prefix;
+    const args = manager === "bun" ? ["add", "--cwd", where, "--production", "--exact", pkg] : ["install", "--prefix", where, "--omit=dev", "--no-audit", "--no-fund", pkg];
+    const install = cp.spawnSync(manager === "bun" ? (managerPath || "bun") : (managerPath || "npm"), args, { timeout: 5 * 60 * 1000, windowsHide: true, env: process.env, shell: process.platform === "win32" });
+    if (install.status !== 0) {
+      const detail = install.stderr ? install.stderr.toString().trim().slice(-300) : String(install.error || "");
+      throw new Error(`candidate install failed (exit ${install.status})${detail ? `: ${detail}` : ""}`);
+    }
+    const release = path.join(prefix, "node_modules", "@kahme247", "ompweb");
+    // Detected statically: an older ompweb takes `preflight` for a positional and starts a web server.
+    if (!fs.existsSync(path.join(release, "lib", "hosts", "preflight.ts"))) {
+      console.warn(`ompweb ${target} has no preflight command; its omp was not checked`);
+      return;
+    }
+    // OMP_WEB_PACKAGE_DIR: the launcher set it to the running install, whose omp this must not check.
+    const candidate = (command, timeout) => {
+      const result = cp.spawnSync(process.execPath, [path.join(release, "bin", "omp-web.js"), command], { cwd: prefix, timeout, windowsHide: true, env: { ...process.env, OMP_WEB_PACKAGE_DIR: release }, encoding: "utf8" });
+      return result.status === 0 ? null : ((result.stderr || "").trim() || String(result.error || `exit ${result.status}`)).slice(-300);
+    };
+    // 15 min, as the host updater allows the download.
+    const fetchFailure = fs.existsSync(path.join(release, "lib", "omp", "runner-fetch.ts")) ? candidate("fetch-omp", 15 * 60 * 1000) : null;
+    if (fetchFailure) throw new Error(`the new release could not fetch its omp: ${fetchFailure}`);
+    // 120 s: the preflight itself can take 30 s for the hello, 7 s to stop omp and 30 s for the version probe.
+    const preflightFailure = candidate("preflight", 120 * 1000);
+    if (preflightFailure) throw new Error(`the new release cannot start a session: ${preflightFailure}`);
+  } finally {
+    // Best effort: a locked file (Windows) must not fail an update the check passed.
+    try { fs.rmSync(prefix, { recursive: true, force: true, maxRetries: 3 }); } catch {}
+  }
+}
+
 async function runManagerGate() {
   updateStatus({ stage: "installing" });
-  if (kind === "omp") {
-    // Run omp update
-    const bin = process.env.OMP_WEB_OMP_BIN || "omp";
-    // Try resolve via packageDir/../?
-    await new Promise((resolve) => {
-      const child = cp.spawn(bin, ["update"], { timeout: 5 * 60 * 1000, windowsHide: true, env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" } });
-      child.on("close", () => resolve());
-      child.on("error", () => resolve());
-      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} resolve(); }, 5 * 60 * 1000 + 1000);
-    });
-    return;
-  }
-  // App update via npm/bun
   const cmd = manager === "bun" ? (managerPath || "bun") : (managerPath || "npm");
   const args = manager === "bun" ? ["add", "-g", `@kahme247/ompweb@${target}`] : ["install", "-g", `@kahme247/ompweb@${target}`];
   if (Array.isArray(managerPrefix) && managerPrefix.length) args.unshift(...managerPrefix);
@@ -219,6 +249,7 @@ async function main() {
   // Check abort
   if (fs.existsSync(abortFile())) {
     updateStatus({ state: "failed", error: (readJson(abortFile()) || {}).reason || "aborted", finishedAt: new Date().toISOString(), cleanupReady: true });
+    disarmLauncher();
     process.exit(0);
   }
   // Check go marker exists (commit signal)
@@ -234,7 +265,8 @@ async function main() {
 
   let svcInfo = { launchd: false, tray: false };
   try {
-    if (kind !== "omp") svcInfo = await stopOriginalProcesses();
+    preflightCandidate();
+    svcInfo = await stopOriginalProcesses();
     await runManagerGate();
     try {
       const pkgPath = path.join(packageDir, "package.json");
@@ -245,7 +277,7 @@ async function main() {
         }
       }
     } catch {}
-    if (kind !== "omp") await restartServices(svcInfo);
+    await restartServices(svcInfo);
     await sleep(500);
     updateStatus({ state: "succeeded", stage: "finalizing", finishedAt: new Date().toISOString(), cleanupReady: true });
     // write complete marker
@@ -257,10 +289,12 @@ async function main() {
       try { systemctl("start"); } catch { msg = `${systemdUnit} is still stopped: ${msg}`; }
     }
     updateStatus({ state: "failed", error: msg.slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true });
+    disarmLauncher();
   }
 }
 
 main().catch((e) => {
   try { updateStatus({ state: "failed", error: String(e).slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true }); } catch {}
+  disarmLauncher();
   process.exit(1);
 });

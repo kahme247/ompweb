@@ -32,6 +32,30 @@ if (process.argv[2] === "hash-password" || process.argv[2] === "hash_password") 
 }
 
 function startLauncher() {
+// `ompweb preflight` (lib/hosts/preflight.ts): what an updater runs on a candidate release; it prints "preflight ok: <omp> <version>".
+if (process.argv[2] === "preflight") {
+  process.env.OMP_WEB_PACKAGE_DIR ??= module.require("node:path").join(__dirname, "..");
+  module.require("jiti").createJiti(__filename).import("../lib/hosts/preflight.ts").then(
+    ({ runPreflight }) => runPreflight().then((code) => process.exit(code)),
+    (error) => {
+      console.error(`preflight failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    },
+  );
+  return;
+}
+// `ompweb fetch-omp` (lib/omp/runner-fetch.ts): fetch this version's omp runner if missing; updaters run it before preflight.
+if (process.argv[2] === "fetch-omp") {
+  process.env.OMP_WEB_PACKAGE_DIR ??= module.require("node:path").join(__dirname, "..");
+  module.require("jiti").createJiti(__filename).import("../lib/omp/runner-fetch.ts").then(
+    ({ runFetchOmp }) => runFetchOmp().then((code) => process.exit(code)),
+    (error) => {
+      console.error(`fetch-omp failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    },
+  );
+  return;
+}
 // `ompweb host` runs in this process: a supervisor's SIGTERM must reach the daemon, not a wrapper.
 if (process.argv[2] === "host") {
   process.argv.splice(2, 1);

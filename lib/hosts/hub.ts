@@ -2,7 +2,7 @@
 // host` daemons on /api/hosts/link and exposes each linked machine as a
 // `RemoteHost`. Everything a daemon sends is untrusted input.
 // No `next/*` or `@/` imports.
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
 import { readBodyWithinLimit } from "../bounded-form-data";
 import type { RpcTransport } from "../omp/rpc-transport";
@@ -14,7 +14,6 @@ import type { HostCapacity } from "./capacity";
 import type { ArchivedSessionInfo, SessionInfo } from "../types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
 import {
-  CLUSTER_CONFIG_SINCE_VERSION,
   CREATION_ID_RE,
   decodeConfigState,
   decodeBlobFrame,
@@ -32,9 +31,7 @@ import {
   PartJoiner,
   SeqWindow,
   SESSION_OP_PARAMS,
-  SHARED_CREDENTIALS_SINCE_VERSION,
   type DownMessage,
-  UPLOADS_SINCE_VERSION,
   type HelloChannel,
   type HostOpName,
   type UnknownMessage,
@@ -44,7 +41,6 @@ import {
   type Unsequenced,
   UnknownMessageLog,
   type UpMessage,
-  withSeq,
 } from "./link-protocol";
 import { clusterOf, isClusterMember, sharesCredentials } from "./cluster";
 import { ClusterConfigError } from "./cluster-config";
@@ -104,15 +100,13 @@ interface PendingOp {
 }
 
 /** A downlink line sent (or to resend) and not acked yet. `key`: the `sender` key it went out under; `bytes`: its
- * UTF-8 size; `part`: a `part` line; `whole`: on the last part of a line, that line as queued, which a v4 daemon gets
- * instead (partsToWhole); `sample`: on the line that completes a message, its link sample. */
+ * UTF-8 size; `part`: a `part` line; `sample`: on the line that completes a message, its link sample. */
 interface Sent {
   seq: number;
   line: string;
   key: string;
   bytes: number;
   part: boolean;
-  whole: string | null;
   sample: DownSample | null;
 }
 
@@ -285,7 +279,7 @@ function linkFor(id: string): Link {
       notifier: true,
       socket: null,
       downSeq: 0,
-      sender: new LinkSender(true),
+      sender: new LinkSender(),
       outbox: new Outbox(),
       outboxBytes: 0,
       sentSeq: 0,
@@ -355,8 +349,7 @@ function released(link: Link, items: Sent[]): void {
 function flush(link: Link): void {
   const ws = link.socket;
   if (!ws || link.awaitingDrain || hub().frozen) return;
-  // A v4 daemon acks only inside its next uplink frame, which may be a pong 15 s away: it gets no window.
-  const limit = link.sender.parts ? LINK_LIMITS.unackedBytes : Infinity;
+  const limit = LINK_LIMITS.unackedBytes;
   const write = (item: Sent): boolean => {
     const sent = ws.send(item.line);
     if (sent !== 0) {
@@ -380,25 +373,11 @@ function flush(link: Link): void {
       return;
     }
     const queued = unit.item as DownLine;
-    const whole = unit.part && unit.done ? queued.line : null;
     // One sample per message: a split one carries it on its last part.
-    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, whole, sample: unit.done ? { ...queued.sample, bytes: unit.messageBytes } : null };
+    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, sample: unit.done ? { ...queued.sample, bytes: unit.messageBytes } : null };
     link.outbox.push(item);
     link.outboxBytes += item.bytes;
     if (!write(item)) return;
-  }
-}
-
-/** A v4 daemon gets no `part`: the parts of a line that went out whole in parts go again as that line, under its last
- * part's seq; the parts of a line still going out are dropped, and the sender sends it whole from the start. */
-function partsToWhole(link: Link): void {
-  for (const item of link.outbox.drop(() => true)) {
-    link.outboxBytes -= item.bytes;
-    if (item.part && item.whole === null) continue;
-    const line = item.part && item.whole !== null ? withSeq(item.whole, item.seq) : item.line;
-    const bytes = Buffer.byteLength(line);
-    link.outbox.push({ ...item, line, bytes, part: false, whole: null });
-    link.outboxBytes += bytes;
   }
 }
 
@@ -739,21 +718,15 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   link.downSeq = Math.max(link.downSeq, hello.ack);
   released(link, link.outbox.ack(hello.ack));
   link.unknownLog.reset();
-  // The version this link speaks: from 5 on, lines over pieceBytes go in parts.
   link.hostVersion = hello.v;
-  link.shared = hello.v >= 7 && hello.link !== undefined;
-  link.notifier = !link.shared || hello.link?.notifier === true;
-  link.sender.parts = hello.v >= 5;
-  if (!link.sender.parts) partsToWhole(link);
+  link.shared = true;
+  link.notifier = hello.link?.notifier === true;
   enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id }));
   // Resend what the daemon has not applied, in order and paced, before anything new.
   link.sentSeq = hello.ack;
   link.unacked = 0;
   link.awaitingDrain = false;
   flush(link);
-  if (hello.v < 7) reattach(link, hello.channels);
-  // Joining sends host ops, so publish link readiness before starting adoption.
-
   link.ompVersion = hello.ompVersion;
   link.ompwebVersion = hello.ompwebVersion ?? null;
   link.workspaceOps = new Set(hello.workspaceOps ?? []);
@@ -766,7 +739,7 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   link.pingTimer = setInterval(() => enqueue(link, encodeLine({ type: "ping" })), linkTimings.pingMs);
   link.pingTimer.unref?.();
   setStatus(link, hello.ompVersion === null ? "omp-missing" : "online");
-  if (hello.v >= 7) reattach(link, hello.channels);
+  reattach(link, hello.channels);
   notify(hub().helloListeners, link.id, hello.channels);
 }
 
@@ -780,7 +753,7 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     } catch {
       return ws.close(LINK_CLOSE.policy, "Malformed result frame");
     }
-    // A large result comes in pieces, in order (a v4 daemon sends one). Pieces for an op no longer waiting are dropped;
+    // A large result comes in pieces, in order. Pieces for an op no longer waiting are dropped;
     // past blobBytes none are kept, so its `res` then fails host_blob_missing.
     const pending = link.pending.get(result.id);
     if (pending) {
@@ -793,8 +766,8 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
         if (result.bytes.byteLength > 0) pending.timer.refresh();
       }
     }
-    // A v5 daemon counts its frames in flight by these answers, binary ones included.
-    if ((link.hostVersion ?? 0) >= 5) enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));
+    // The daemon counts its frames in flight by these answers, binary ones included.
+    enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));
     return;
   }
   if (Buffer.byteLength(data) > LINK_LIMITS.uplinkBytes) return ws.close(LINK_CLOSE.tooBig, "Uplink frame too large");
@@ -829,9 +802,6 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
   flush(link);
 }
 
-/** SIGKILL an orphan this long after its SIGTERM, as the daemon does when it stops. */
-const ORPHAN_KILL_GRACE_MS = 5_000;
-
 /**
  * Spec Rules → Reattach. Listed channels this server has a transport for carry
  * on unchanged. A spawned child the daemon no longer lists died while the link
@@ -842,7 +812,7 @@ const ORPHAN_KILL_GRACE_MS = 5_000;
  */
 function reattach(link: Link, listed: HelloChannel[], refreshExisting = true): void {
   // Hello and channels_changed both carry the host's full listing.
-  if ((link.hostVersion ?? 0) >= 7) link.listedSessions = new Set(listed.flatMap(({ sessionId }) => sessionId ? [sessionId] : []));
+  link.listedSessions = new Set(listed.flatMap(({ sessionId }) => sessionId ? [sessionId] : []));
   const live = new Set(listed.map(({ ch }) => ch));
   for (const [ch, transport] of refreshExisting ? link.channels : []) {
     // A spawn still in flight is not listed yet.
@@ -852,20 +822,18 @@ function reattach(link: Link, listed: HelloChannel[], refreshExisting = true): v
     transport.deliverExit(null, null);
   }
   for (const hello of listed) {
-    const { ch, sessionId, cwd, pending } = hello;
+    const { ch, sessionId, cwd } = hello;
     const existing = link.channels.get(ch);
     if (existing) {
       existing.spawned = true;
       existing.creationHello = hello.creationId ? hello : undefined;
-      if (existing.hostOwnedLifecycle) {
-        const identityChanged = sessionId !== null && existing.session !== sessionId;
-        if (sessionId) existing.session = sessionId;
-        if (refreshExisting || identityChanged) existing.deliverResync();
-      }
+      const identityChanged = sessionId !== null && existing.session !== sessionId;
+      if (sessionId) existing.session = sessionId;
+      if (refreshExisting || identityChanged) existing.deliverResync();
       continue;
     }
     if ([...link.pending.values()].some(op => op.op === "open" && op.sessionId === sessionId)) continue;
-    const child = new RemoteRpcTransport(link.id, ch, sessionId, link.shared);
+    const child = new RemoteRpcTransport(link.id, ch, sessionId);
     child.spawned = true;
     child.creationHello = hello.creationId ? hello : undefined;
     link.channels.set(ch, child);
@@ -874,34 +842,21 @@ function reattach(link: Link, listed: HelloChannel[], refreshExisting = true): v
       try { owned = pooledStartForChild(link.id, hello); }
       catch { continue; } // An unreadable journal cannot prove this creation is an orphan.
     }
-    if (link.shared) {
-      if (!sessionId && !owned) { child.close(); continue; }
-      child.adoption = (async () => {
-        try {
-          const spawned = await link.host.spawnRpc({ cwd, recordedCwd: cwd, sessionFile: "", advisor: false,
-            ...(hello.creationId ? { creationId: hello.creationId } : {}) }, sessionId, { expectedChannel: ch });
-          if (spawned.transport !== child) throw new Error("Host changed a listed channel while joining");
-          return await adopt(link, child, sessionId ?? owned?.sessionId ?? "", spawned.cwd,
-            [...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])], spawned, owned?.creationId);
-        } catch (error) {
-          if (!owned) child.close();
-          console.warn(`[omp-web] could not join session ${sessionId} on ${labelOf(link.id)}: ${error instanceof Error ? error.message : String(error)}`);
-          return false;
-        }
-      })();
-    } else if (owned) {
-      child.adoption = adopt(link, child, sessionId ?? owned.sessionId ?? "", cwd, pending ?? [], undefined, owned.creationId);
-    } else if (sessionId && pending) child.adoption = adopt(link, child, sessionId, cwd, pending);
-    else killOrphan(child);
+    if (!sessionId && !owned) { child.close(); continue; }
+    child.adoption = (async () => {
+      try {
+        const spawned = await link.host.spawnRpc({ cwd, recordedCwd: cwd, sessionFile: "", advisor: false,
+          ...(hello.creationId ? { creationId: hello.creationId } : {}) }, sessionId, { expectedChannel: ch });
+        if (spawned.transport !== child) throw new Error("Host changed a listed channel while joining");
+        return await adopt(link, child, sessionId ?? owned?.sessionId ?? "", spawned.cwd,
+          [...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])], spawned, owned?.creationId);
+      } catch (error) {
+        if (!owned) child.close();
+        console.warn(`[omp-web] could not join session ${sessionId} on ${labelOf(link.id)}: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
+    })();
   }
-}
-
-function killOrphan(orphan: RemoteRpcTransport): void {
-  orphan.orphaned = true;
-  orphan.killTree(false);
-  const escalate = setTimeout(() => orphan.killTree(true), ORPHAN_KILL_GRACE_MS);
-  escalate.unref?.();
-  orphan.onExit(() => clearTimeout(escalate));
 }
 
 /** Spec "Adopting live children": a session wrapper takes the child over, by
@@ -921,14 +876,8 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
       console.warn(`[omp-web] retained creation ${creationId} on ${labelOf(link.id)} for owner reconciliation: ${reason}`);
       return false;
     }
-    if (child.hostOwnedLifecycle) {
-      child.close();
-      console.warn(`[omp-web] left the shared omp child of session ${sessionId} on ${labelOf(link.id)} running: this server could not adopt it (${reason})`);
-    } else if (hub().frozen) {
-      console.warn(`[omp-web] left the omp child of session ${sessionId} on ${labelOf(link.id)} to the next server: this one stopped while adopting it (${reason})`);
-    } else {
-      console.warn(`[omp-web] killing the omp child of session ${sessionId} on ${labelOf(link.id)}: it could not be adopted (${reason})`);
-    }
+    child.close();
+    console.warn(`[omp-web] left the shared omp child of session ${sessionId} on ${labelOf(link.id)} running: this server could not adopt it (${reason})`);
     return false;
   }
 }
@@ -953,11 +902,11 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
   if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
   if (message.type === "capacity") {
-    if ((link.hostVersion ?? 0) >= 8) link.capacity = { sample: message.sample, receivedAt: performance.now() };
+    link.capacity = { sample: message.sample, receivedAt: performance.now() };
     return;
   }
   if (message.type === "config_state") {
-    if ((link.hostVersion ?? 0) >= CLUSTER_CONFIG_SINCE_VERSION) noteConfigState(link, message.state, message.owned);
+    noteConfigState(link, message.state, message.owned);
     return;
   }
   if (message.type === "unknown") {
@@ -989,7 +938,7 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
       link.notifier = message.on;
       return;
     case "channels_changed":
-      if ((link.hostVersion ?? 0) >= 7) reattach(link, message.channels, false);
+      reattach(link, message.channels, false);
       return;
     case "sessions_changed":
       void import("./session-index").then(({ invalidateHostSessionList }) => {
@@ -1175,9 +1124,6 @@ function remoteSessionOps(hostId: string): SessionOps {
       if (op === "readMedia" && !MEDIA_HASH_RE.test(String(args[0]))) {
         return { ok: false, status: 400, code: "invalid_hash", error: "Invalid media hash" };
       }
-      if (op === "preparePoolProject" && (linkFor(hostId).hostVersion ?? 0) < 8) {
-        throw new HostOpError(426, "host_upgrade_required", `${labelOf(hostId)} needs a newer ompweb to prepare pooled projects`);
-      }
       if (ORPHAN_SENSITIVE_OPS[op]) await orphanExit(hostId, String(args[0]));
       const result = await request(hostId, op, Object.fromEntries(params.map((name, i) => [name, args[i]])),
         op === "preparePoolProject" ? POOL_PREPARE_TIMEOUT_MS : linkTimings.opTimeoutMs);
@@ -1213,29 +1159,26 @@ function remoteWorkspaceOps(hostId: string): WorkspaceOps {
 
 /** An omp child on a linked host. Output that arrives before `RpcProcess`
  * subscribes is held for the first listener, as the local transport does, up
- * to channelBufferBytes: overflow closes shared membership or kills a legacy child. */
+ * to channelBufferBytes: overflow closes this server's membership. */
 export class RemoteRpcTransport implements RpcTransport {
   readonly hostId: string;
   readonly ch: string;
-  readonly hostOwnedLifecycle: boolean;
+  /** Every linked daemon owns its children's lifecycle (RpcTransport reads this). */
+  readonly hostOwnedLifecycle = true;
   /** RpcTransport.id: the channel id, for log correlation. */
   get id(): string {
     return this.ch;
   }
   /** Set for a child of a previous run the daemon listed in `hello` (the session it runs); null for children this server spawned. */
   readonly sessionId: string | null;
-  /** The session the child last named in a get_state answer, else `sessionId`: tags its link samples. */
+  /** The session the child last named in a `hello` or `session` frame, else `sessionId`: tags its link samples. */
   session: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
   /** A later start owns this creation proxy too: its allocating attempt may no longer discard it. */
   reusedForCreation = false;
-  /** The daemon's ready said this child excludes shell output from context, as of the last open that named it; false until one does. */
-  supportsBashExcludeFromContext = false;
   /** The daemon stopped listing this child: it died while the link was down. Set before the synthesized exit. */
   lost = false;
-  /** Killed: a child of a previous run of this server that it could not adopt. Its output has no reader and is dropped. */
-  orphaned = false;
   /** A listed child being taken over (see reattach): resolves true once adopted, false once killed instead. */
   adoption: Promise<boolean> | null = null;
   /** A retained creation hello is also the authority for retrying adoption after journal recovery. */
@@ -1257,12 +1200,11 @@ export class RemoteRpcTransport implements RpcTransport {
   private opening: OpenChannelRequest | null = null;
   private refreshing = false;
 
-  constructor(hostId: string, ch: string, sessionId: string | null = null, hostOwnedLifecycle = false) {
+  constructor(hostId: string, ch: string, sessionId: string | null = null) {
     this.hostId = hostId;
     this.ch = ch;
     this.sessionId = sessionId;
     this.session = sessionId;
-    this.hostOwnedLifecycle = hostOwnedLifecycle;
   }
 
   write(line: string, callback: (error?: Error | null) => void): void {
@@ -1303,10 +1245,9 @@ export class RemoteRpcTransport implements RpcTransport {
     this.resyncListeners.push(listener);
   }
 
-  /** The link has no stdin EOF: closing input terminates the child. */
+  /** The link has no stdin EOF: closing input leaves the shared channel (the host owns the child). */
   endInput(): void {
-    if (this.hostOwnedLifecycle) this.close();
-    else this.killTree(false);
+    this.close();
   }
 
   killTree(force: boolean): void {
@@ -1315,14 +1256,14 @@ export class RemoteRpcTransport implements RpcTransport {
   }
 
   setInterest(on: boolean): void {
-    if (!this.hostOwnedLifecycle || this.closed || this.exitInfo || this.interested === on) return;
+    if (this.closed || this.exitInfo || this.interested === on) return;
     this.interested = on;
     this.sendInterest();
   }
 
   /** `takeOver`: only the command that asked its open for a preparation lease inherits it, never an unrelated one. */
   setPreparing(on: boolean, takeOver = false): void {
-    if (!this.hostOwnedLifecycle || this.closed || this.exitInfo) return;
+    if (this.closed || this.exitInfo) return;
     const wasPreparing = this.preparing > 0;
     this.preparing = Math.max(0, this.preparing + (on ? 1 : -1));
     if (on && takeOver && this.preparationHandoff) {
@@ -1334,7 +1275,7 @@ export class RemoteRpcTransport implements RpcTransport {
 
   /** Acquire (rejects 409 `session_busy` while another web app edits) or release the host's history-edit lease. */
   async setEditing(on: boolean): Promise<void> {
-    if (!this.hostOwnedLifecycle || this.closed || this.exitInfo) return;
+    if (this.closed || this.exitInfo) return;
     await request(this.hostId, "editLease", { ch: this.ch, on });
   }
 
@@ -1367,6 +1308,11 @@ export class RemoteRpcTransport implements RpcTransport {
     if (this.interested || this.preparing > 0) this.sendInterest();
   }
 
+  /** A wrapper reads this child's lines (else they are held for the one adopting it). */
+  get listening(): boolean {
+    return this.lineListeners.length > 0;
+  }
+
   replayOpen(pending: string[], streaming: string | null): void {
     if (this.lineListeners.length === 0) return;
     notify(this.resyncListeners);
@@ -1383,7 +1329,6 @@ export class RemoteRpcTransport implements RpcTransport {
       await request(this.hostId, "open", { ...this.opening, sessionId }, linkTimings.opTimeoutMs, (value) => {
         if (!isOpenResult(value) || value.ch !== this.ch || value.pending === null) throw new Error("Host could not reconcile the shared channel");
         this.refreshing = false;
-        this.supportsBashExcludeFromContext = value.supportsBashExcludeFromContext === true;
         if (this.interested || this.preparing > 0) this.sendInterest();
         notify(this.resyncListeners);
         for (const line of value.pending) this.deliverLine(line);
@@ -1403,16 +1348,14 @@ export class RemoteRpcTransport implements RpcTransport {
     if (!this.overflowed && this.heldLineBytes + this.heldStderrBytes + bytes <= LINK_LIMITS.channelBufferBytes) return bytes;
     if (!this.overflowed) {
       this.overflowed = true;
-      if (this.hostOwnedLifecycle) this.close();
-      else this.killTree(true);
+      this.close();
     }
     return null;
   }
 
   deliverLine(line: string): void {
     if (this.closed) return;
-    if (line.includes('"get_state"')) this.noteSession(line);
-    if (this.orphaned) return;
+    if (line.includes('"t":"hello"') || line.includes('"t":"session"')) this.noteSession(line);
     if (this.lineListeners.length > 0) return notify(this.lineListeners, line);
     const bytes = this.holdable(line);
     if (bytes === null) return;
@@ -1421,7 +1364,6 @@ export class RemoteRpcTransport implements RpcTransport {
   }
 
   deliverStderr(chunk: string): void {
-    if (this.orphaned) return;
     if (this.stderrListeners.length > 0) return notify(this.stderrListeners, chunk);
     const bytes = this.holdable(chunk);
     if (bytes === null) return;
@@ -1431,7 +1373,7 @@ export class RemoteRpcTransport implements RpcTransport {
 
   deliverResync(): void {
     notify(this.resyncListeners);
-    if (this.hostOwnedLifecycle) void this.resync();
+    void this.resync();
   }
 
   /** Set when the host stopped the child on purpose (see the `exit` message's `reason`). */
@@ -1451,9 +1393,8 @@ export class RemoteRpcTransport implements RpcTransport {
     } catch {
       return;
     }
-    if (isRecord(frame) && frame.type === "response" && frame.command === "get_state" && frame.success === true && isRecord(frame.data)) {
-      const { sessionId } = frame.data;
-      if (typeof sessionId === "string" && isValidSessionId(sessionId)) this.session = sessionId;
+    if (isRecord(frame) && (frame.t === "hello" || frame.t === "session") && typeof frame.sessionId === "string" && isValidSessionId(frame.sessionId)) {
+      this.session = frame.sessionId;
     }
   }
 }
@@ -1468,14 +1409,13 @@ function isSpawnResult(value: unknown): value is { cwd: string; fellBack: boolea
 
 function isOpenResult(value: unknown): value is OpenChannelResult {
   if (!isRecord(value)) return false;
-  const { ch, joined, pending, streaming, advisorSpawned, supportsBashExcludeFromContext } = value;
+  const { ch, joined, pending, streaming, advisorSpawned } = value;
   return isSpawnResult(value)
     && typeof ch === "string" && ch.length > 0
     && typeof joined === "boolean"
     && typeof advisorSpawned === "boolean"
     && (pending === null || (Array.isArray(pending) && pending.every((line) => typeof line === "string")))
-    && (streaming === null || typeof streaming === "string")
-    && (supportsBashExcludeFromContext === undefined || typeof supportsBashExcludeFromContext === "boolean");
+    && (streaming === null || typeof streaming === "string");
 }
 
 /** Legacy hosts retain their single-server lifecycle and notification behaviour. */
@@ -1528,9 +1468,6 @@ export class RemoteHost implements Host {
       if (typeof creationId !== "string" || !CREATION_ID_RE.test(creationId)) {
         throw new HostOpError(400, "invalid_request", "Invalid creation identity");
       }
-      if ((link.hostVersion ?? 0) < 8) {
-        throw new HostOpError(426, "host_upgrade_required", `${this.label} needs a newer ompweb to use creation identity`);
-      }
     }
     // A pure join (expectedChannel) starts nothing, so it is neither refused nor flagged. An unreadable registry or pool
     // file refuses the start: a host that may be sharing must never run a session with its own stored logins.
@@ -1556,7 +1493,6 @@ export class RemoteHost implements Host {
       let pools = readPools();
       // A member runs only on the master's configuration, which its daemon applies before omp starts (spec K4).
       if (isClusterMember(pools, this.id)) {
-        if ((link.hostVersion ?? 0) < CLUSTER_CONFIG_SINCE_VERSION) throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to use it in the cluster`);
         try {
           configVersion = await masterConfigVersion();
         } catch (error) {
@@ -1568,57 +1504,28 @@ export class RemoteHost implements Host {
       }
       sharing = sharesCredentials(record, pools);
     }
-    if (sharing && (!link.shared || (link.hostVersion ?? 0) < SHARED_CREDENTIALS_SINCE_VERSION)) {
-      throw new HostOpError(426, "host_upgrade_required", `Update ompweb on ${this.label} to share credentials with it`);
-    }
-    if (link.shared) {
-      const launch = { ...spawnRequest, ...(sharing ? { shareCredentials: true as const } : {}), ...(configVersion === undefined ? {} : { configVersion }) };
-      const opening: OpenChannelRequest = { sessionId, launch, ...options };
-      // An open may wait for a cold child's `ready`, which sends nothing meanwhile.
-      return await request(this.id, "open", opening, LINK_LIMITS.channelReadyMs + linkTimings.opTimeoutMs, (value) => {
-        if (!isOpenResult(value) || (options?.expectedChannel !== undefined && value.ch !== options.expectedChannel)) {
-          throw new HostOpError(502, "host_bad_result", `${this.label} sent an invalid open result`);
-        }
-        if (value.pending === null) {
-          void request(this.id, "close", { ch: value.ch }).catch(() => {});
-          throw new HostOpError(502, "host_pending_overflow", "The shared channel's pending requests could not be restored");
-        }
-        const transport = link.channels.get(value.ch) ?? new RemoteRpcTransport(this.id, value.ch, sessionId, true);
-        if (creationId !== undefined && link.channels.has(value.ch)) transport.reusedForCreation = true;
-        transport.spawned = true;
-        transport.supportsBashExcludeFromContext = value.supportsBashExcludeFromContext === true;
-        transport.noteOpen(opening);
-        link.channels.set(value.ch, transport);
-        link.autoApprove = value.autoApproveExtension;
-        transport.replayOpen(value.pending, value.streaming);
-        return { transport, cwd: value.cwd, fellBack: value.fellBack, launchAdvisor: value.launchAdvisor, advisorSpawned: value.advisorSpawned, joined: value.joined, pending: value.pending, streaming: value.streaming };
-      }) as SpawnResult;
-    }
-    const ch = creationId === undefined ? randomUUID()
-      : `creation-${createHash("sha256").update("ompweb:creation:").update(creationId).digest("hex")}`;
-    const existing = link.channels.get(ch);
-    const transport = existing ?? new RemoteRpcTransport(this.id, ch);
-    if (existing && creationId !== undefined) transport.reusedForCreation = true;
-    // Registered first: the child's output can overtake the spawn result.
-    link.channels.set(ch, transport);
-    try {
-      const result = await request(this.id, "spawn", { ch, ...spawnRequest });
-      if (!isSpawnResult(result)) throw new HostOpError(502, "host_bad_result", `${this.label} sent an invalid spawn result`);
-      transport.spawned = true;
-      link.autoApprove = result.autoApproveExtension;
-      return { transport, cwd: result.cwd, fellBack: result.fellBack, launchAdvisor: result.launchAdvisor };
-    } catch (error) {
-      if (creationId === undefined) {
-        link.channels.delete(ch);
-        // The daemon may have started it after we gave up: never leave it unread.
-        transport.killTree(true);
-      } else if (!existing && !transport.reusedForCreation && error instanceof HostOpError && error.status >= 400 && error.status < 500 && error.status !== 408
-        && link.channels.get(ch) === transport) {
-        link.channels.delete(ch);
+    const launch = { ...spawnRequest, ...(sharing ? { shareCredentials: true as const } : {}), ...(configVersion === undefined ? {} : { configVersion }) };
+    const opening: OpenChannelRequest = { sessionId, launch, ...options };
+    // An open may wait for a cold child's `ready`, which sends nothing meanwhile.
+    return await request(this.id, "open", opening, LINK_LIMITS.channelReadyMs + linkTimings.opTimeoutMs, (value) => {
+      if (!isOpenResult(value) || (options?.expectedChannel !== undefined && value.ch !== options.expectedChannel)) {
+        throw new HostOpError(502, "host_bad_result", `${this.label} sent an invalid open result`);
       }
-      // Stable creations may already own a child: uncertain delivery stays attached for reconciliation.
-      throw error;
-    }
+      if (value.pending === null) {
+        void request(this.id, "close", { ch: value.ch }).catch(() => {});
+        throw new HostOpError(502, "host_pending_overflow", "The shared channel's pending requests could not be restored");
+      }
+      const transport = link.channels.get(value.ch) ?? new RemoteRpcTransport(this.id, value.ch, sessionId);
+      if (creationId !== undefined && link.channels.has(value.ch)) transport.reusedForCreation = true;
+      transport.spawned = true;
+      transport.noteOpen(opening);
+      link.channels.set(value.ch, transport);
+      link.autoApprove = value.autoApproveExtension;
+      // An adopting wrapper already gets every line of a continuous member, held here: the snapshot would repeat them out of order.
+      const streaming = value.continuous === true && !transport.listening ? null : value.streaming;
+      transport.replayOpen(value.pending, value.streaming);
+      return { transport, cwd: value.cwd, fellBack: value.fellBack, launchAdvisor: value.launchAdvisor, advisorSpawned: value.advisorSpawned, joined: value.joined, pending: value.pending, streaming };
+    }) as SpawnResult;
   }
 
   async sessionFileExists(path: string): Promise<boolean> {
@@ -1668,13 +1575,14 @@ function updateOperation(value: unknown): value is HostUpdateOperation {
 export async function getHostSoftwareUpdates(id: string, force = false): Promise<HostUpdateInfo> {
   requireUpdateHost(id);
   const result = await request(id, "checkUpdates", { compatibility: updateCompatibility(), force });
-  if (!isRecord(result) || !softwareUpdate(result.ompweb) || !softwareUpdate(result.omp)
+  if (!isRecord(result) || !softwareUpdate(result.ompweb) || !isRecord(result.omp) || !nullableString(result.omp.currentVersion)
     || !["npm", "bun", "binary"].includes(String(result.ompweb.installMethod))
     || !(result.ompweb.protocolVersion === null || (Number.isSafeInteger(result.ompweb.protocolVersion) && Number(result.ompweb.protocolVersion) > 0))
     || !(result.operation === null || updateOperation(result.operation))) {
     throw new HostOpError(502, "host_bad_result", "The host returned an invalid update status");
   }
-  const info = result as unknown as HostUpdateInfo;
+  // A daemon from before omp updated with ompweb reports a full update status for omp: keep only its version.
+  const info = { ...result, omp: { currentVersion: result.omp.currentVersion } } as unknown as HostUpdateInfo;
   const protocol = info.ompweb.protocolVersion;
   if (info.ompweb.updateAvailable && (protocol === null || protocol < MIN_LINK_PROTOCOL_VERSION || protocol > LINK_PROTOCOL_VERSION)) {
     return { ...info, ompweb: { ...info.ompweb, canUpdate: false, blockedReason: protocol === null
@@ -1796,7 +1704,7 @@ export async function clusterConfigOp(hostId: string, args: { action: "apply"; v
  * One round of startClusterConfigSync. A linked host outside the cluster that still holds this server's configuration
  * (its leave's restore failed or could not be sent), or has not said whether it does since its link came up (that report
  * may have been dropped), gets `restore`: its answer says, and a host that does not hold it changes nothing. Each online
- * v10 member that is not current gets `apply`, which for the version it already holds costs nothing but a fresh report.
+ * member that is not current gets `apply`, which for the version it already holds costs nothing but a fresh report.
  * Never while one of its ops is unanswered.
  */
 export async function syncClusterConfig(): Promise<void> {
@@ -1807,7 +1715,7 @@ export async function syncClusterConfig(): Promise<void> {
       return null; // who is a member is unknown: nobody gets either op
     }
   };
-  const ready = (link: Link) => (link.hostVersion ?? 0) >= CLUSTER_CONFIG_SINCE_VERSION && link.configOps === 0;
+  const ready = (link: Link) => link.configOps === 0;
   const before = members();
   if (!before) return;
   // Read and sent with no await between: a host that joins meanwhile gets its apply after this restore. A host without omp
@@ -1909,7 +1817,7 @@ export function getHostLinkProtocol(hostId: string): number | null {
 }
 
 /** Whether placement may use this host: `local` and hosts outside the cluster always; a cluster member only once it
- * reports this server's current configuration (`clusterConfig.current`), so a v9 link or no report yet is not. */
+ * reports this server's current configuration (`clusterConfig.current`), so one with no report yet is not. */
 export function isHostConfigCurrent(hostId: string): boolean {
   if (hostId === LOCAL_HOST_ID || !isClusterMember(loadPools(), hostId)) return true;
   const link = hub().links.get(hostId);
@@ -1957,7 +1865,6 @@ export async function reconcilePooledChild(hostId: string, creationId: string): 
   if (!owned) return false;
   child.adoption ??= (async () => {
     const sessionId = hello.sessionId ?? owned.sessionId ?? "";
-    if (!link.shared) return adopt(link, child, sessionId, hello.cwd, hello.pending ?? [], undefined, creationId);
     const spawned = await link.host.spawnRpc({ cwd: hello.cwd, recordedCwd: hello.cwd, sessionFile: "", advisor: false, creationId },
       hello.sessionId, { expectedChannel: hello.ch });
     return adopt(link, child, sessionId, spawned.cwd, [...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])], spawned, creationId);
@@ -1965,12 +1872,12 @@ export async function reconcilePooledChild(hostId: string, creationId: string): 
   return child.adoption;
 }
 
-/** Whether a v7 host still runs a child of `sessionId`, joined by this server or not (a failed join leaves it running). */
+/** Whether a host still runs a child of `sessionId`, joined by this server or not (a failed join leaves it running). */
 export function hostListsChild(sessionId: string): boolean {
   for (const link of hub().links.values()) {
-    // A link kept across `bun --hot` from older code lacks the set: a v7 host's listing is unknown, so stay retryable.
+    // A link kept across `bun --hot` from older code lacks the set: its listing is unknown, so stay retryable.
     const listed: Set<string> | undefined = link.listedSessions;
-    if (isLinkUp(link.status) && (listed ? listed.has(sessionId) : (link.hostVersion ?? 0) >= 7)) return true;
+    if (isLinkUp(link.status) && (listed ? listed.has(sessionId) : true)) return true;
   }
   return false;
 }
@@ -2005,15 +1912,8 @@ export async function orphanExit(hostId: string, sessionId: string): Promise<voi
 /** An attach may copy 2 GiB (to another device): far longer than an op's usual deadline. */
 const UPLOAD_ATTACH_TIMEOUT_MS = 10 * 60_000;
 
-/** An upload op on `hostId`'s daemon; a daemon older than v6 fails 426 (an offline one 503). */
+/** An upload op on `hostId`'s daemon (an offline one fails 503). */
 export function hostUploadOp(hostId: string, op: "uploadStart" | "uploadAbort" | "uploadAttach", args: Record<string, unknown>): Promise<unknown> {
-  const link = linkFor(hostId);
-  if (link.socket && isLinkUp(link.status) && (link.hostVersion ?? 0) < UPLOADS_SINCE_VERSION) {
-    // This machine's binary may be new already: an upgrade keeps a daemon running while its link version is in range.
-    return Promise.reject(hostId === LOCAL_HOST_ID
-      ? new HostOpError(426, "host_restart_required", "Restart the ompweb host service on this machine to attach files")
-      : new HostOpError(426, "host_upgrade_required", `Update ompweb on ${labelOf(hostId)} to attach files`));
-  }
   return request(hostId, op, args, op === "uploadAttach" ? UPLOAD_ATTACH_TIMEOUT_MS : linkTimings.opTimeoutMs);
 }
 

@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { createInterface } from "readline";
 import type { Readable } from "stream";
 import { sanitizeProjectCommandEnvironment } from "../project-command-env";
-import { resolveOmpBin, wrapWindowsScript } from "./omp-cli";
+import { OMP_NOT_FOUND, resolveOmpBin, wrapWindowsScript } from "./omp-cli";
 
 /**
  * Shared `omp auth-broker serve` child: omp's own credentials behind its
@@ -86,7 +86,7 @@ export function disposeAuthBroker(): void {
 
 async function startBroker(state: AuthBrokerState, isCurrent: () => boolean): Promise<Broker> {
   const bin = resolveOmpBin();
-  if (!bin) throw new AuthBrokerUnavailableError("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.", "binary_missing");
+  if (!bin) throw new AuthBrokerUnavailableError(OMP_NOT_FOUND, "binary_missing");
   // Same environment rules as the auth gateway: no named profile, no project env leaks.
   const env = sanitizeProjectCommandEnvironment({ ...process.env });
   delete env.OMP_PROFILE;

@@ -2,7 +2,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { homedir } from "os";
 import { createInterface } from "readline";
 import { sanitizeProjectCommandEnvironment } from "../project-command-env";
-import { resolveOmpBin, wrapWindowsScript } from "./omp-cli";
+import { OMP_NOT_FOUND, resolveOmpBin, wrapWindowsScript } from "./omp-cli";
 
 /**
  * Shared `omp auth-gateway stdio` child: omp's own credentials (OAuth
@@ -67,7 +67,7 @@ export function disposeAuthGateway(): void {
 
 function startGateway(state: AuthGatewayState): Gateway {
   const bin = resolveOmpBin();
-  if (!bin) throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
+  if (!bin) throw new Error(OMP_NOT_FOUND);
   // Same environment rules as RpcProcess: no named profile, no project env leaks.
   const env = sanitizeProjectCommandEnvironment({ ...process.env });
   delete env.OMP_PROFILE;

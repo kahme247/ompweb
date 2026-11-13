@@ -12,4 +12,6 @@ export default tseslint.config(
       "react-hooks/set-state-in-effect": "off",
     },
   },
+  // The runner drops fields from omp's wire objects by destructuring them out of a rest spread.
+  { files: ["runner/**/*.ts"], rules: { "@typescript-eslint/no-unused-vars": ["error", { ignoreRestSiblings: true }] } },
 );

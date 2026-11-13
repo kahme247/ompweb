@@ -304,7 +304,7 @@ const link = {
   diagnosing: false,
   /** Dials in a row refused while plain HTTP to the same URL worked: FALLBACK_REFUSALS of them mean a proxy. */
   refusals: 0,
-  sender: new LinkSender<UpItem>(true),
+  sender: new LinkSender<UpItem>(),
   outbox: new Outbox<Sent>(),
   upSeq: 0,
   /** Highest outbox seq written to the current socket. */
@@ -660,7 +660,7 @@ function shutLink(): void {
 
 /** A new link: both directions start over. */
 function resetLink(): void {
-  link.sender = new LinkSender(true);
+  link.sender = new LinkSender();
   link.outbox = new Outbox();
   link.upSeq = 0;
   link.sentSeq = 0;

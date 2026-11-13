@@ -26,14 +26,12 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 
 ## Requirements
 
-- [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
+- Nothing else for omp: ompweb runs its own [omp](https://github.com/can1357/oh-my-pi) build, `ompweb-omp`, which reads your `~/.omp` settings, auth and sessions. Every install (npm, npx or the single binary) downloads the `ompweb-omp` of its exact version from that version's [GitHub release](https://github.com/kahme247/ompweb/releases) the first time it starts, checks its SHA-256 and keeps it (beside the single binary, otherwise in `~/.omp/agent/omp-web/omp/<version>/`); `ompweb fetch-omp` does the same on demand. Sessions start once it is there. It exists for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and windows-x64; on any other platform (Linux on musl, Windows on Arm, FreeBSD) ompweb cannot start sessions. A machine that cannot reach GitHub needs `OMP_WEB_OMP_BIN` pointing at a copy of that release's `ompweb-omp-<os>-<arch>`
 - Node.js `>= 24`. The server runs on [Bun](https://bun.sh), which installs automatically as a dependency of the npm package (a Bun on your `PATH` is used if the bundled one is missing)
 
-The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
+The **Steer**, **Delete** and **Edit** actions on a queued message are commands of the `ompweb-omp` channel (`promote_queued_message`, `remove_queued_message`). Deletion is confirmed by omp before the chip disappears; editing recalls text only after cancellation succeeds. A message that is no longer pending leaves the queue unchanged and displays a notice; ompweb does not send a duplicate steering message.
 
-Queue **Delete** and **Edit** additionally require `remove_queued_message`. Deletion is confirmed by OMP before the chip disappears; editing recalls text only after cancellation succeeds. Unsupported runtimes or messages that are no longer pending leave the queue unchanged and display a notice.
-
-The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events, omp 18.4.4 or later), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs. Older omp runtimes show no queue panel, and Stop cannot take queued messages back.
+The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs.
 
 ## App installation behind authentication
 
@@ -54,20 +52,6 @@ manifest exception or Access bypass rule is needed. This does not add offline
 support. Local Chromium verification covered cookie-gated metadata with HTTP
 icon URLs blocked (zero installability errors). The owner also confirmed that
 installation on a physical phone works as expected behind Cloudflare Access.
-
-Skill startup notices require an OMP runtime with `get_skill_diagnostics`,
-`set_skill_startup_diagnostics`, and `skill_diagnostics_update`. Conflicts and
-redundant installations appear above the composer when its OMP session starts;
-an empty new-chat page does not start OMP just for diagnostics. **Details** shows
-the resolved default, variants, identical copies, backing paths, sources, and
-selection reason. The **×** button dismisses the notice for that session until
-the diagnostic report changes. **Turn off** and **Settings →
-Interface & Behavior → Skill startup notices** use OMP's persisted
-`skills.showStartupDiagnostics` preference, not a separate browser setting.
-**Settings → Extensions & Tools → Skills → View skill diagnostics** remains
-available for a selected running session when notices are off. Inspection does
-not resume stopped sessions. Missing support or no running session is unavailable,
-not a clean result.
 
 ## Notifications
 
@@ -92,8 +76,8 @@ session you are viewing. Clicking a notification opens its session.
 - Desktop browsers show notifications through the operating system's
   notification center. Push delivery needs the browser process running.
 
-Completion notifications use omp's `prompt_result` and `session_settled` RPC
-frames (omp 18.3.1 or later).
+Completion notifications use the `ompweb-omp` channel's `prompt_result` and
+`session_settled` frames.
 
 ## Quick Start
 
@@ -125,6 +109,8 @@ Open [http://127.0.0.1:30177](http://127.0.0.1:30177) in your browser.
 ompweb --port 8080                         # Custom port
 ompweb --hostname 0.0.0.0                  # Listen on network
 ompweb hash-password                       # Print the value for OMP_WEB_PASSWORD_HASH
+ompweb fetch-omp                           # Download this version's ompweb-omp from its GitHub release (SHA-256-checked) if it is missing
+ompweb preflight                           # Start the session omp once (as a new session would) and wait for its hello; exit 1 says why it failed
 ompweb --no-open                           # Don't auto-open the browser
 ompweb --install-tray                      # Install Windows System Tray service & Desktop shortcuts
 ompweb --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts
@@ -454,7 +440,8 @@ Each [release](https://github.com/kahme247/ompweb/releases/latest) also ships
 ompweb as one compiled program with the files it serves beside it:
 `ompweb-linux-x64.tar.gz`, `ompweb-linux-arm64.tar.gz`, `ompweb-darwin-x64.tar.gz`,
 `ompweb-darwin-arm64.tar.gz` and `ompweb-windows-x64.zip`. It needs no Node, npm
-or Bun; only omp must be installed. The x64 builds use Bun's baseline runtime, so
+or Bun, and no omp: on its first start it downloads its own omp build, `ompweb-omp`, from the same release
+(SHA-256-checked) and keeps it beside itself (prerelease archives already carry it). The x64 builds use Bun's baseline runtime, so
 they also run on CPUs without AVX2. Each archive carries the licenses of what it
 bundles in `licenses/`. Every commit on `main` that passes CI is also published as a
 [prerelease](https://github.com/kahme247/ompweb/releases) named after the time it was
@@ -466,7 +453,7 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
 ~/.local/share/ompweb-linux-x64/ompweb host          # the local daemon, in a second terminal
 ```
 
-- **Keep `ompweb` in its directory.** It serves `dist/`, `public/` and the other
+- **Keep `ompweb` in its directory.** It runs the `ompweb-omp` beside it and serves `dist/`, `public/` and the other
   files from the directory it is in (a symlink to it on your `PATH` works), or
   from `OMP_WEB_PACKAGE_DIR` when that is set.
 - **macOS** quarantines downloads: run `xattr -dr com.apple.quarantine ompweb-darwin-arm64`
@@ -480,8 +467,7 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
   `ompweb host`, replace the directory with the new release, and start both again;
   **Settings → System** links the release page when a new version is out.
   Your sessions and settings live in `~/.omp`, not in that directory.
-- **As systemd user services**, write the two units yourself (adjust the paths;
-  add omp's directory to `PATH`, or set `OMP_WEB_OMP_BIN`):
+- **As systemd user services**, write the two units yourself (adjust the paths):
 
 ```ini
 # ~/.config/systemd/user/ompweb.service
@@ -669,9 +655,9 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 ## Run sessions on another machine
 
 One ompweb can start and watch omp sessions on other machines. Each machine keeps
-its own `omp` install, `~/.omp/agent` directory, sessions, and credentials (unless you
+its own ompweb (with its `ompweb-omp`), `~/.omp/agent` directory, sessions, and credentials (unless you
 [share the server's provider logins](#use-the-servers-provider-logins-on-a-host));
-ompweb only routes. The remote machine needs `omp` and either Node 24 (for `npx`) or
+ompweb only routes. The remote machine needs either Node 24 (for `npx`) or
 the [single binary](#single-binary), and must be able to reach the ompweb server over
 HTTP(S). It dials out, so it can sit behind NAT.
 
@@ -695,15 +681,14 @@ HTTP(S). It dials out, so it can sit behind NAT.
    The host shows **online** in Settings → Hosts, the sidebar gets a group for it,
    and the new-session screen gets a host picker.
 
-**Settings → Hosts** also shows each machine's ompweb daemon and OMP runtime
-versions, available updates and update actions, including **This machine**.
+**Settings → Hosts** also shows each machine's ompweb daemon and omp versions,
+available updates and update actions, including **This machine**.
 Checks and installations run on the selected host, not on the web server. A host
 update whose link protocol is incompatible with the current web app stays visible
 but is blocked with a reason; update the web server first. An unverifiable target
-protocol is blocked too. OMP updates are independent of the link protocol.
+protocol is blocked too. omp is part of each ompweb release and updates with it.
 Before updating a daemon, close its session processes: the updater refuses to
-interrupt sessions or subagents. Updating OMP leaves existing processes on their
-loaded version until they restart. **Settings → System** keeps the web server's
+interrupt sessions or subagents. **Settings → System** keeps the web server's
 own application update and service settings.
 Hosts need a daemon build that supports these update operations; older builds
 show an unsupported message and need one manual update first. If the daemon
@@ -826,7 +811,7 @@ update, stop the service, replace the release directory, and start it again. Aft
 revoking a host, stop and remove its service: it otherwise keeps retrying.
 
 **Linux (systemd user service).** Create `~/.config/systemd/user/ompweb-host.service`
-(adjust the release path, and add omp's directory to `PATH` or set `OMP_WEB_OMP_BIN`):
+(adjust the release path):
 
 ```ini
 [Unit]
@@ -952,7 +937,7 @@ Stop it with `Stop-ScheduledTask ompweb-host`, then end the running host with
 | `OMP_WEB_NO_OPEN` | Set to `1` to prevent auto-opening browser | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
 | `OMP_WEB_NAME` | Name shown in browser tabs and installed-app names. `url`, `host` or `domain` (any case) uses the hostname the browser connected to, without port; localhost and IP addresses keep `omp web`. Any other value is used as-is. Restart after changing | `omp web` |
-| `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
+| `OMP_WEB_OMP_BIN` | Path to an `ompweb-omp` build to use instead of the downloaded one: a copy of the release's `ompweb-omp-<os>-<arch>` on a machine that cannot reach GitHub, or `runner/release/ompweb-omp-<os>-<arch>` from a source checkout. A stock `omp` does not work: it does not speak ompweb's channel. The service installers write it into the service environment only when you set it | _the downloaded `ompweb-omp`_ |
 | `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL. Leave unset to transcribe with `OMP_WEB_STT_MODEL` through omp's own credentials | _None_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
@@ -1075,10 +1060,13 @@ addresses you list in `set_real_ip_from`:
 git clone https://github.com/kahme247/ompweb.git
 cd ompweb
 npm install
+npx bun runner/scripts/use-omp-build.ts && (cd runner && npx bun install --frozen-lockfile)
+npx bun runner/scripts/build-binary.ts   # ompweb's omp build for this machine: runner/release/ompweb-omp-<os>-<arch>
 npm run dev
 ```
 
-The dev server runs at [http://127.0.0.1:30178](http://127.0.0.1:30178).
+The dev server runs at [http://127.0.0.1:30178](http://127.0.0.1:30178). It finds the runner in
+`runner/release/` by itself; `npm test` and `npm run build:binary` need the runner set up too.
 
 A dev server does not take over the local daemon: only the production web
 server writes the daemon's `host.json`, so "This machine" shows offline in dev

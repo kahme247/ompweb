@@ -3,7 +3,7 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { ArrowDown, ChevronDown, ChevronUp, Paperclip, Square } from "lucide-react";
-import type { AgentMessage, AssistantMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import type { AgentMessage, AssistantMessage, SessionInfo, SessionTreeNode, ToolResultMessage, UiCustomFrame } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { collectToolResults, isGroupAnchor, planTranscriptRows, type TranscriptRow } from "@/lib/chat-transcript-plan";
 import { isReplyBlock } from "@/lib/message-display";
@@ -16,7 +16,6 @@ import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
-import { SkillDiagnosticsNotice } from "./SkillDiagnostics";
 import { BtwHistoryDialog, type BtwPanelProps } from "./BtwPanel";
 import OmpWebLogo from "./OmpWebLogo";
 import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
@@ -455,7 +454,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages, advisorActive, advisorEnabled, handleAdvisorChange,
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
-    skillDiagnostics, setSkillStartupDiagnostics,
     isAutoModelSelection,
     agentPhase, activeGoal, activePlan,
     liveToolResults,
@@ -1000,7 +998,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     return null;
   }, [bashRunning, pendingBash, isCompacting, agentRunning, streamState.streamingMessage, pendingToolHeaders.length, agentPhase, activeSubagentCount, currentTodoPhase, t, tn]);
 
-  const askOpen = extensionDialog?.method === "ask";
+  // omp's ask tool uses formDialog whenever the UI has one; askDialog is its per-question fallback.
+  // Like omp's TUI, which swaps its editor for the ask, nothing is sent while either is open:
+  // a steer would interrupt the ask ("Ask interrupted by message").
+  const askOpen = extensionDialog?.method === "askDialog" || extensionDialog?.method === "formDialog";
   const hiddenComposerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // A hidden composer that keeps focus keeps the phone keyboard up: the
@@ -1218,7 +1219,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
             {newSessionWorkspace}
             {hostBanner}
             <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
-            <SkillDiagnosticsNotice snapshot={skillDiagnostics} onDisable={() => setSkillStartupDiagnostics(false)} />
             <ComposerPanels todoPhases={[]} subagents={[]} onSelectSubagent={setSelectedSubagent} btw={btwPanel} />
             {/* ChatInput insets itself by CHAT_COLUMN_PADDING; cancel this column's
                 padding so the composer matches its in-session width. */}
@@ -1432,7 +1432,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
                 />
               </div>
             )}
-            <SkillDiagnosticsNotice snapshot={skillDiagnostics} onDisable={() => setSkillStartupDiagnostics(false)} />
             <ComposerPanels
               todoPhases={todoPhases}
               subagents={subagents}
@@ -1635,8 +1634,6 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
   );
 }
 
-type ExtensionCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
-
 function renderAnsiLine(line: string, keyPrefix: string): ReactNode[] {
   return parseAnsiLine(line).map((segment, index) => (
     Object.keys(segment.style).length > 0
@@ -1649,8 +1646,8 @@ function ExtensionCustomPanel({
   request,
   onInput,
 }: {
-  request: ExtensionCustomRequest;
-  onInput: (request: ExtensionCustomRequest, data: string) => void;
+  request: UiCustomFrame;
+  onInput: (request: UiCustomFrame, data: string) => void;
 }) {
   const { t } = useI18n();
   const inputRef = useRef<HTMLTextAreaElement>(null);

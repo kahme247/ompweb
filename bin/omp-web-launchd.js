@@ -107,15 +107,14 @@ function install(pkgArg) {
   const siblingNpx = path.join(path.dirname(nodeBin), "npx");
   const npxBin = isExecutableFile(siblingNpx) ? siblingNpx : (which("npx") ?? fail("npx not found on PATH"));
 
-  const ompBin = process.env.OMP_WEB_OMP_BIN ?? which("omp");
-  if (process.env.OMP_WEB_OMP_BIN) {
+  // Only an explicit override: ompweb runs its own omp (ompweb-omp). A stock omp on PATH cannot run its sessions.
+  const ompBin = process.env.OMP_WEB_OMP_BIN || null;
+  if (ompBin) {
     try {
-      fs.accessSync(process.env.OMP_WEB_OMP_BIN, fs.constants.X_OK);
+      fs.accessSync(ompBin, fs.constants.X_OK);
     } catch {
-      fail(`OMP_WEB_OMP_BIN=${process.env.OMP_WEB_OMP_BIN} is not executable`);
+      fail(`OMP_WEB_OMP_BIN=${ompBin} is not executable`);
     }
-  } else if (!ompBin) {
-    console.warn("warning: omp binary not found; live-agent features will be unavailable (set OMP_WEB_OMP_BIN)");
   }
 
   const pkg = pkgArg ?? process.env.OMP_WEB_PKG ?? "@kahme247/ompweb@latest";

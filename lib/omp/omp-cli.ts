@@ -1,13 +1,14 @@
 import { execFile } from "child_process";
 import { existsSync, realpathSync, statSync } from "fs";
-import { homedir } from "os";
-import { delimiter, join } from "path";
+import { dirname, join } from "path";
+import packageJson from "../../package.json";
 import { createChildProcessEnvironment } from "../project-command-env";
+import { getAgentDir } from "./paths";
 
 /**
- * Locating and probing the user's installed `omp` CLI. omp-web never embeds
- * the (Bun-only) @oh-my-pi SDK — every live-agent capability goes through the
- * omp binary, so its absence is a first-class, user-visible state.
+ * Locating and probing ompweb's own omp build (`ompweb-omp`, built from runner/). omp-web never
+ * embeds the (Bun-only) @oh-my-pi SDK — every live-agent capability goes through that binary, so
+ * its absence is a first-class, user-visible state.
  */
 
 let cachedBin: string | null = null;
@@ -16,7 +17,9 @@ let cachedVersion: { fingerprint: string; value: string; expiresAt: number } | n
 let versionMiss: { fingerprint: string | null; retryAt: number } | null = null;
 let versionProbe: Promise<string | null> | null = null;
 
-const BIN_NAME = process.platform === "win32" ? "omp.exe" : "omp";
+const BIN_NAME = process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp";
+/** This platform's runner: `runner/release/<name>` in a source checkout and the asset of that name on each release. */
+export const OMP_RUNNER_ASSET = `ompweb-omp-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}${process.platform === "win32" ? ".exe" : ""}`;
 // .cmd/.bat launchers (e.g. OMP_WEB_OMP_BIN pointing at a wrapper script) cannot
 // be spawned directly by Node — spawning them requires a shell. Route them
 // through `cmd.exe /c`; every other platform and binary passes through.
@@ -35,33 +38,35 @@ const MISS_TTL_MS = 30_000;
 // Launchers can stay unchanged while their underlying package is updated.
 const VERSION_TTL_MS = 5 * 60_000;
 
+/** Where this install keeps the runner it fetches from its own release (lib/omp/runner-fetch.ts): beside a compiled
+ * ompweb, else in a per-version cache under the agent dir (an npm install's package dir may not be writable). */
+export function fetchedOmpBin(): string {
+  return typeof Bun !== "undefined" && Bun.isStandaloneExecutable
+    ? join(dirname(process.execPath), BIN_NAME)
+    : join(getAgentDir(), "omp-web", "omp", packageJson.version, BIN_NAME);
+}
+
+/** A source checkout builds its runner (`bun runner/scripts/build-binary.ts`) instead of fetching one. */
+export function sourceCheckoutOmpBin(): string | null {
+  const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
+  return existsSync(join(packageDir, "runner", "package.json")) ? join(packageDir, "runner", "release", OMP_RUNNER_ASSET) : null;
+}
+
 function probeOmpBin(): string | null {
   const override = process.env.OMP_WEB_OMP_BIN;
   if (override) return existsSync(override) ? override : null;
-  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-    if (!dir) continue;
-    const candidate = join(dir, BIN_NAME);
-    if (existsSync(candidate)) return candidate;
-  }
-  // GUI-launched processes often miss homebrew/bun dirs in PATH; probe the
-  // usual install locations before giving up.
-  const fallbackDirs = [
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    join(homedir(), ".bun", "bin"),
-    join(homedir(), ".local", "bin"),
-  ];
-  for (const dir of fallbackDirs) {
-    const candidate = join(dir, BIN_NAME);
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
+  const path = sourceCheckoutOmpBin() ?? fetchedOmpBin();
+  return existsSync(path) ? path : null;
 }
 
-/** Resolve the omp binary: OMP_WEB_OMP_BIN override, then PATH lookup. Returns
- * null when omp is not installed. A hit is cached for the process lifetime; a
- * miss is re-probed after MISS_TTL_MS. */
-export function resolveOmpBin(): string | null {
+/** What every caller that needs omp reports when resolveOmpBin finds none. */
+export const OMP_NOT_FOUND = "ompweb's omp binary (ompweb-omp) not found. Reinstall ompweb or set OMP_WEB_OMP_BIN.";
+
+/** Resolve ompweb's omp binary: OMP_WEB_OMP_BIN override, else the source checkout's build or the fetched runner
+ * (see probeOmpBin). Returns null when none exists. A hit is cached while the file exists; a miss is re-probed after
+ * MISS_TTL_MS, or at once with `fresh` (after a fetch). */
+export function resolveOmpBin(fresh = false): string | null {
+  if (fresh) binMissAt = 0;
   // A global Bun/npm update can replace or remove its launcher while this
   // server process is still alive. Never keep returning a stale cache entry.
   if (cachedBin && existsSync(cachedBin)) return cachedBin;
@@ -116,7 +121,8 @@ async function probeOmpVersion(): Promise<string | null> {
       const target = wrapWindowsScript(bin, ["--version"]);
       // Without an explicit env this probe would inherit the server's full
       // environment, including omp-web's own secrets, into the child.
-      execFile(target.file, target.args, { timeout: 10_000, windowsHide: true, env: createChildProcessEnvironment() }, (error, stdout) => {
+      // 30 s: a fresh ~120 MB runner binary's first start on Windows waits on the antivirus scan.
+      execFile(target.file, target.args, { timeout: 30_000, windowsHide: true, env: createChildProcessEnvironment() }, (error, stdout) => {
         if (error) reject(error);
         else resolve(stdout);
       });

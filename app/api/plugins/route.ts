@@ -2,7 +2,7 @@ import { execFile } from "child_process";
 import { existsSync, promises as fs } from "fs";
 import { basename, extname, join } from "path";
 import { ANSI_RE, parseJsonLoose } from "@/lib/omp/plugins-cli";
-import { resolveOmpBin } from "@/lib/omp/omp-cli";
+import { OMP_NOT_FOUND, resolveOmpBin } from "@/lib/omp/omp-cli";
 import { ensureAgentDir } from "@/lib/omp/paths";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
@@ -70,7 +70,7 @@ function runOmp(
 ): Promise<{ stdout: string; stderr: string }> {
   const bin = resolveOmpBin();
   if (!bin) {
-    return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN."));
+    return Promise.reject(new Error(OMP_NOT_FOUND));
   }
   return new Promise((resolve, reject) => {
     execFile(
@@ -256,7 +256,7 @@ function readScope(scope: unknown): PluginScope {
  * known cause worth a stable code for client-side localization. */
 function pluginErrorResponse(error: unknown): Response {
   const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("omp binary not found")) {
+  if (message.includes(OMP_NOT_FOUND)) {
     return Response.json({ error: message, code: "omp_not_found" }, { status: 500 });
   }
   return Response.json({ error: message }, { status: 500 });

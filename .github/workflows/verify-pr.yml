@@ -43,8 +43,12 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      # The runner's own deps too: lib/hosts/omp-socket.test.mjs checks the host against runner/src/channel.ts.
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm ci
+          npx bun runner/scripts/use-omp-build.ts
+          npx bun install --cwd runner --frozen-lockfile
 
       - name: TypeScript typecheck
         run: npm run typecheck
@@ -58,6 +62,9 @@ jobs:
       - name: Verify production build
         run: npm run build
 
+      - name: Build the omp runner
+        run: npx bun runner/scripts/build-binary.ts
+
       - name: Smoke test
         run: npm run smoke
 
@@ -68,25 +75,34 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
             npx bun scripts/build-binary.ts --target bun-windows-x64-baseline
-            npm run smoke -- --binary release/ompweb-windows-x64/ompweb.exe
+            bin=release/ompweb-windows-x64/ompweb.exe
+            archive=release/ompweb-windows-x64.zip
           else
             npx bun scripts/build-binary.ts --target bun-linux-x64-baseline
-            npm run smoke -- --binary release/ompweb-linux-x64/ompweb
+            bin=release/ompweb-linux-x64/ompweb
+            archive=release/ompweb-linux-x64.tar.gz
           fi
+          # The archive a host downloads must pass the updater's own size limits and checks.
+          npx bun scripts/check-host-release-archive.ts "$archive"
+          npm run smoke -- --binary "$bin"
+          # What the host updater checks on a new release before it switches (lib/hosts/update-worker.ts): the marker
+          # it finds the command by, then the command itself against the bundled ompweb-omp.
+          grep -qa ompweb-preflight-scratch- "$bin"
+          timeout 120 "$bin" preflight
 
       - name: Packed install smoke test
         shell: bash
         run: |
           npm pack --ignore-scripts
           npm install -g --prefix "$RUNNER_TEMP/ompweb-prefix" ./kahme247-ompweb-*.tgz
-          npm run smoke -- --package "$(npm root -g --prefix "$RUNNER_TEMP/ompweb-prefix")/@kahme247/ompweb"
+          npm run smoke -- --omp "$(ls runner/release/ompweb-omp-*)" --package "$(npm root -g --prefix "$RUNNER_TEMP/ompweb-prefix")/@kahme247/ompweb"
 
       # Bun's postinstall does not run here: the launcher must fall back to @oven/bun-<os>-<arch> (spec R1).
       - name: Packed install smoke test (install scripts disabled)
         shell: bash
         run: |
           npm install -g --ignore-scripts --prefix "$RUNNER_TEMP/ompweb-prefix-no-scripts" ./kahme247-ompweb-*.tgz
-          npm run smoke -- --package "$(npm root -g --prefix "$RUNNER_TEMP/ompweb-prefix-no-scripts")/@kahme247/ompweb"
+          npm run smoke -- --omp "$(ls runner/release/ompweb-omp-*)" --package "$(npm root -g --prefix "$RUNNER_TEMP/ompweb-prefix-no-scripts")/@kahme247/ompweb"
 
       - name: Parse Windows PowerShell scripts (Windows only)
         if: runner.os == 'Windows'

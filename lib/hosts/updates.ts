@@ -6,16 +6,17 @@ import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import packageJson from "../../package.json";
 import { checkNpmUpdate, detectInstallMethod } from "../npm-update";
-import { checkOmpUpdate, runOmpUpdate } from "../omp/updates";
+import { getOmpVersion } from "../omp/omp-cli";
 import { createChildProcessEnvironment } from "../project-command-env";
 import { isUpdateDisabled } from "../update-policy";
-import { isNewerVersion } from "../version-compare";
+import { releaseRepo } from "../release-repo";
 import { parseSystemdServiceCgroup } from "../self-update";
 import type { HostSoftwareUpdate, HostUpdateCompatibility, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
 import { assertOwnedPath, ensureHostUpdateRoot, fetchHostUpdateBytes, finishHostUpdate, HOST_VERSION_PATTERN, hostReleaseName, hostUpdateRoot, installedHostVersionMatches, isHostUpdateProcessAlive, processStartIdentity, pruneHostUpdateArtifacts, readHostUpdateState, sharedHostInstallReason, verifyHostServiceInstall, writeHostUpdateJson, type HostUpdateDescriptor } from "./update-worker";
 
 const exec = promisify(execFile);
-const LEASE_MS = 15 * 60 * 1000;
+// Covers a 15 min release download (update-worker.ts DOWNLOAD_TIMEOUT_MS) plus preflight, stop and restart.
+const LEASE_MS = 30 * 60 * 1000;
 let safetyGuard: (() => string | null) | null = null;
 const protocolCache = new Map<string, { value: number | null; checkedAt: number }>();
 
@@ -59,7 +60,7 @@ async function candidateProtocol(version: string, force: boolean): Promise<numbe
   if (!force && cached && Date.now() - cached.checkedAt < (cached.value === null ? 30000 : 5 * 60 * 1000)) return cached.value;
   let value: number | null = null;
   try {
-    const source = (await fetchHostUpdateBytes(`https://raw.githubusercontent.com/kahme247/ompweb/v${version}/lib/hosts/link-protocol.ts`, 128 * 1024)).toString("utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const source = (await fetchHostUpdateBytes(`https://raw.githubusercontent.com/${releaseRepo()}/v${version}/lib/hosts/link-protocol.ts`, 128 * 1024)).toString("utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
     const declarations = [...source.matchAll(/^export const LINK_PROTOCOL_VERSION\s*=\s*([1-9]\d*)\s*;\s*$/gm)];
     if (declarations.length === 1 && [...source.matchAll(/export\s+const\s+LINK_PROTOCOL_VERSION\b/g)].length === 1) {
       const parsed = Number(declarations[0][1]);
@@ -154,7 +155,7 @@ function installSupport(method: "npm" | "bun" | "binary"): string | null {
     if (!info.isDirectory() || info.isSymbolicLink() || realpathSync(directory) !== directory || (process.getuid && info.uid !== process.getuid()) || (process.platform !== "win32" && (info.mode & 0o022))) throw new Error("Host install is not an owned, writable release directory");
     if (method === "binary") {
       hostReleaseName();
-      if (realpathSync(process.execPath) !== join(directory, process.platform === "win32" ? "ompweb.exe" : "ompweb") || !existsSync(join(directory, "dist", "index.html")) || !existsSync(join(directory, "lib", "omp", "session-edit-extension.mjs"))) throw new Error("Binary updates require a complete owned host release directory");
+      if (realpathSync(process.execPath) !== join(directory, process.platform === "win32" ? "ompweb.exe" : "ompweb") || !existsSync(join(directory, "dist", "index.html"))) throw new Error("Binary updates require a complete owned host release directory");
     } else if (basename(directory) !== "ompweb" || basename(dirname(directory)) !== "@kahme247" || basename(dirname(dirname(directory))) !== "node_modules") throw new Error("Host updates require an installed npm/bun package; source checkouts are manual-only");
     if (!safetyGuard) throw new Error("Host daemon restart safety is not configured");
     return safetyGuard();
@@ -205,14 +206,13 @@ export async function checkHostUpdates(compatibility: HostUpdateCompatibility, f
   assertCompatibility(compatibility);
   const operation = getHostUpdateOperation();
   const disabled = isUpdateDisabled() ? "Updates are disabled by OMP_WEB_DISABLE_AUTOUPDATE" : null;
-  const [npmResult, ompResult] = await Promise.allSettled([checkNpmUpdate(force), checkOmpUpdate(force)]);
+  const [npm, ompVersion] = await Promise.all([checkNpmUpdate(force).catch(() => null), getOmpVersion()]);
   const base: HostSoftwareUpdate = { currentVersion: null, availableVersion: null, updateAvailable: false, canUpdate: false, blockedReason: null, updateCommand: "" };
-  const npm = npmResult.status === "fulfilled" ? npmResult.value : null;
-  const omp = ompResult.status === "fulfilled" ? ompResult.value : null;
   const installMethod = typeof Bun !== "undefined" && Bun.isStandaloneExecutable ? "binary" : detectInstallMethod(installDirectory());
-  const ompweb: HostUpdateInfo["ompweb"] = { ...base, ...npm, currentVersion: packageJson.version, installMethod, protocolVersion: null, updateCommand: installMethod === "binary" ? "https://github.com/kahme247/ompweb/releases/latest" : installMethod === "bun" ? "bun add -g @kahme247/ompweb" : "npm install -g @kahme247/ompweb" };
-  const runtime: HostUpdateInfo["omp"] = { ...base, ...omp, updateCommand: "omp update", updatesDisabled: Boolean(disabled) };
-  if (disabled) ompweb.blockedReason = runtime.blockedReason = disabled;
+  const ompweb: HostUpdateInfo["ompweb"] = { ...base, ...npm, currentVersion: packageJson.version, installMethod, protocolVersion: null, updateCommand: installMethod === "binary" ? `https://github.com/${releaseRepo()}/releases/latest` : installMethod === "bun" ? "bun add -g @kahme247/ompweb" : "npm install -g @kahme247/ompweb" };
+  // omp updates with ompweb (its runner ships inside each release): the row only reports the running version.
+  const runtime: HostUpdateInfo["omp"] = { currentVersion: ompVersion?.replace(/^omp\//, "") ?? null };
+  if (disabled) ompweb.blockedReason = disabled;
   else {
     if (!npm || !npm.availableVersion || !HOST_VERSION_PATTERN.test(npm.availableVersion)) ompweb.blockedReason = "Could not check the host's ompweb update version";
     else if (npm.updateAvailable) {
@@ -222,11 +222,10 @@ export async function checkHostUpdates(compatibility: HostUpdateCompatibility, f
       else if (operation?.state !== "running") ompweb.blockedReason = (await planHostUpdate(installMethod, npm.availableVersion)).blockedReason;
       ompweb.canUpdate = ompweb.blockedReason === null;
     }
-    if (!omp || !omp.currentVersion || !HOST_VERSION_PATTERN.test(omp.currentVersion.replace(/^v/, "")) || (omp.updateAvailable && (!omp.availableVersion || !HOST_VERSION_PATTERN.test(omp.availableVersion)))) runtime.blockedReason = `Could not check the host's omp update${ompResult.status === "rejected" ? `: ${messageOf(ompResult.reason).slice(0, 240)}` : " version"}`;
-    else runtime.canUpdate = omp.updateAvailable;
   }
   if (operation?.state === "running") {
-    for (const software of [ompweb, runtime]) { software.canUpdate = false; software.blockedReason ??= "Another host update is in progress"; }
+    ompweb.canUpdate = false;
+    ompweb.blockedReason ??= "Another host update is in progress";
   }
   return { ompweb, omp: runtime, operation };
 }
@@ -265,7 +264,7 @@ function releaseClaim(root: string, id: string): void {
 
 export async function startHostUpdate(target: HostUpdateTarget, version: string, compatibility: HostUpdateCompatibility): Promise<{ accepted: true; operation: HostUpdateOperation }> {
   assertCompatibility(compatibility);
-  if (target !== "ompweb" && target !== "omp") throw new HostUpdateError("invalid_target", "Invalid host software target", 400);
+  if (target !== "ompweb") throw new HostUpdateError("invalid_target", "Invalid host software target", 400);
   if (typeof version !== "string" || version.length > 100 || !HOST_VERSION_PATTERN.test(version)) throw new HostUpdateError("invalid_version", "Invalid host update version", 400);
   if (isUpdateDisabled()) throw new HostUpdateError("updates_disabled", "Updates are disabled by OMP_WEB_DISABLE_AUTOUPDATE", 403);
   const id = randomUUID();
@@ -277,31 +276,19 @@ export async function startHostUpdate(target: HostUpdateTarget, version: string,
     if (!software.updateAvailable || software.availableVersion !== version) throw new HostUpdateError("candidate_changed", "The available update candidate changed; refresh host updates");
     if (!software.canUpdate) throw new HostUpdateError("update_blocked", software.blockedReason || "This host update is blocked");
     const method = info.ompweb.installMethod;
-    const plan = target === "ompweb" ? await planHostUpdate(method, version) : null;
-    if (plan?.blockedReason) throw new HostUpdateError("update_blocked", plan.blockedReason);
+    const plan = await planHostUpdate(method, version);
+    if (plan.blockedReason) throw new HostUpdateError("update_blocked", plan.blockedReason);
     if (isUpdateDisabled()) throw new HostUpdateError("updates_disabled", "Updates are disabled by OMP_WEB_DISABLE_AUTOUPDATE", 403);
     const operation: HostUpdateOperation = { id, target, version, state: "running" };
     writeHostUpdateJson(join(root, "status.json"), { operation, startedAt: Date.now(), daemonPid: process.pid });
     claimed = true;
-    if (target === "omp") {
-      void (async () => {
-        try {
-          await runOmpUpdate([], 5 * 60 * 1000);
-          // `omp update` installs the newest release, which may have moved past the one requested: that is a success, an older one is not.
-          const reported = (await checkOmpUpdate(true)).currentVersion;
-          if (!reported || (reported.replace(/^v/, "") !== version && !isNewerVersion(reported, version))) throw new Error(`omp update did not install the requested version ${version} (reported ${reported || "unknown"})`);
-          finishHostUpdate(id);
-        } catch (error) { finishHostUpdate(id, messageOf(error)); }
-      })().catch((error) => console.error("Could not persist host runtime update status:", error));
-      return { accepted: true, operation };
-    }
     // The guard is read once more immediately before anything is staged or stopped.
     const busy = safetyGuard?.() ?? (safetyGuard ? null : "Host restart safety is not configured");
     if (busy) throw new HostUpdateError("host_busy", busy);
     const attempt = join(root, id);
     mkdirSync(attempt, { mode: 0o700 });
     const binary = method === "binary";
-    const descriptor: HostUpdateDescriptor = { id, target, version, fromVersion: packageJson.version, installMethod: method, installDir: installDirectory(), runtime: process.execPath, hostArgs: hostArguments(binary), cwd: process.cwd(), daemonPid: process.pid, daemonIdentity: plan!.daemonIdentity, restartOnly: plan!.restartOnly || undefined, systemd: plan!.systemd };
+    const descriptor: HostUpdateDescriptor = { id, target, version, fromVersion: packageJson.version, installMethod: method, installDir: installDirectory(), runtime: process.execPath, hostArgs: hostArguments(binary), cwd: process.cwd(), daemonPid: process.pid, daemonIdentity: plan.daemonIdentity, releaseRepo: releaseRepo(), restartOnly: plan.restartOnly || undefined, systemd: plan.systemd };
     if (!binary && !descriptor.restartOnly) {
       const names = process.platform === "win32" ? method === "npm" ? ["npm.cmd", "npm.exe"] : ["bun.exe"] : [method];
       const manager = (process.env.PATH || "").split(delimiter).flatMap((directory) => names.map((name) => join(directory, name))).find((path) => existsSync(path));
@@ -326,8 +313,8 @@ export async function startHostUpdate(target: HostUpdateTarget, version: string,
       chmodSync(copiedWorker, 0o600);
       args = [copiedWorker, "--host-update-descriptor", descriptorPath];
     }
-    if (plan!.systemd) {
-      const options = [...(plan!.systemd.user ? ["--user"] : []), "--scope", "--quiet", "--collect", "--no-ask-password"];
+    if (plan.systemd) {
+      const options = [...(plan.systemd.user ? ["--user"] : []), "--scope", "--quiet", "--collect", "--no-ask-password"];
       await exec("systemd-run", [...options, "true"], { timeout: 2000, env: createChildProcessEnvironment() });
       args = [...options, command, ...args];
       command = "systemd-run";

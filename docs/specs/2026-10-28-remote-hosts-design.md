@@ -313,11 +313,12 @@ that upload's file.
   frames, sent fair across channels; 6: composer uploads, with binary down
   frames, `upload_ack` and the `uploadStart`/`uploadAbort`/`uploadAttach`
   ops; 9: `open.launch.shareCredentials`; 10: `open.launch.configVersion`,
-  `config_state`, the `clusterConfig` op). Main links daemons from
-  `MIN_LINK_PROTOCOL_VERSION` (4) up to its own `LINK_PROTOCOL_VERSION` (10);
+  `config_state`, the `clusterConfig` op; 11: channel lines are the omp
+  runner's `{t}` frames, not omp RPC frames). Main links daemons from
+  `MIN_LINK_PROTOCOL_VERSION` (11) up to its own `LINK_PROTOCOL_VERSION` (11);
   its `welcome` carries the version the link speaks (see "Protocol versions and
   compatibility"). A hello whose `v` is outside that range (checked on the raw
-  JSON before decoding) gets close 4426 with reason `{"serverVersion":10}`; the
+  JSON before decoding) gets close 4426 with reason `{"serverVersion":11}`; the
   daemon exits 1, telling which side to
   update ("update ompweb on this host", or "this host's ompweb is newer than
   the server's: update ompweb on the server" when `serverVersion` is below its
@@ -373,8 +374,10 @@ that upload's file.
 Protocol v7 extends this original design with several web servers sharing one
 daemon and host-owned lifecycle. Its authoritative contracts, including `open`,
 `close`, `interest`, `channels_changed` and recovery, are in
-`2026-11-06-multi-server-host-design.md`. `MIN_LINK_PROTOCOL_VERSION` remains 4;
-v4–v6 links retain exclusive channels and their legacy server-owned lifecycle.
+`2026-11-06-multi-server-host-design.md`. v11 dropped v4–v10: their channel
+lines are omp RPC frames, which the runner-based daemon and server no longer
+speak, so every link is shared and host-owned (exclusive legacy channels and
+the `spawn` op are gone).
 
 
 - **A released version changes only compatibly.** Compatible means both: every
@@ -403,7 +406,7 @@ v4–v6 links retain exclusive channels and their legacy server-owned lifecycle.
     unknown type or op makes it refuse the line).
 - **Older versions stay supported** from the next version on, until supporting
   one becomes too much of a maintenance burden; dropping one is an explicit
-  decision (raising `MIN_LINK_PROTOCOL_VERSION`, which is 4 today). In
+  decision (raising `MIN_LINK_PROTOCOL_VERSION`, which is 11 today). In
   practice main keeps at least version N-1. For an older daemon main decodes
   its hello into today's shape and sends only messages that version
   understands (to a v4 daemon: no `part`, every line whole, and no unacked
@@ -435,6 +438,11 @@ v4–v6 links retain exclusive channels and their legacy server-owned lifecycle.
   inside `[MIN, LINK]`). A v6 daemon dialing a v5 server gets close 4426 with
   `{"serverVersion":5}`, logs "this host's ompweb is newer than the server's:
   update ompweb on the server" and exits 1; update the server first.
+- **v11 (omp runner) drops v4–v10.** The meaning of a channel line changed
+  (runner `{t}` frames instead of omp RPC frames), so no older peer can share
+  a channel; both sides refuse one with 426 / close 4426 instead of hanging.
+  Prerelease builds already shipped v10 with omp RPC frames, so the runner could
+  not reuse 10.
 - **Decided: backward compatibility becomes enforced once the WebSocket
   experiments end.** Until then (the browser transport experiment and the
   host-link measurements), versions may still be dropped as above. Call N the

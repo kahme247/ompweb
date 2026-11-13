@@ -40,6 +40,24 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      # The omp the runners compile against: the fork's newest integration build, not runner/omp-build.json's pin
+      # (not committed back). No such release or a runner that fails tsc against it fails the release.
+      - name: Find the newest omp integration build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api repos/ompweb-dev/oh-my-pi/commits/integration-release --jq .sha)
+          tag=$(gh api --paginate 'repos/ompweb-dev/oh-my-pi/releases?per_page=100' --jq '.[].tag_name' \
+            | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.g${sha:0:7}\$" | head -n 1 || true)
+          if [ -z "$tag" ]; then
+            echo "::error::ompweb-dev/oh-my-pi has no integration release for integration-release ($sha)"
+            exit 1
+          fi
+          echo "OMP_TAG=$tag" >> "$GITHUB_ENV"
+      # Without GH_TOKEN: bun install runs the omp packages' scripts.
+      - name: Pin the runner to it
+        run: npx bun runner/scripts/use-omp-build.ts "$OMP_TAG" && (cd runner && npx bun x tsc -p .)
       - name: Build the release binaries
         run: sh scripts/build-release-binaries.sh
       - run: npm run smoke -- --binary release/ompweb-linux-x64/ompweb
@@ -55,5 +73,5 @@ jobs:
           # A draft first, so a failed upload never leaves a published prerelease missing archives.
           gh release create "$tag" release/ompweb-*.tar.gz release/ompweb-*.zip \
             --repo "$GITHUB_REPOSITORY" --target "$SHA" --draft --prerelease --title "$title" \
-            --notes "Binaries built from $GITHUB_REPOSITORY@$SHA ($subject). Not a release: no npm package, no update notice."
+            --notes "Binaries built from $GITHUB_REPOSITORY@$SHA ($subject), omp: ompweb-dev/oh-my-pi $OMP_TAG. Not a release: no npm package, no update notice."
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false

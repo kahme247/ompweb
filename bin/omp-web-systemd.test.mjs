@@ -181,6 +181,8 @@ test("install creates the env file and unit with LAN settings", { skip: process.
     mkdirSync(binDir, { recursive: true });
     writeFileSync(fakeOmpweb, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     writeFileSync(fakeSystemctl, "#!/bin/sh\ncase \"$*\" in *is-active*) exit 3 ;; *) exit 0 ;; esac\n", { mode: 0o755 });
+    // A stock omp on PATH: pinning the services to it would replace ompweb's own omp, which its sessions need.
+    writeFileSync(path.join(binDir, "omp"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
     const childEnv = {
       ...process.env,
@@ -223,6 +225,7 @@ test("install creates the env file and unit with LAN settings", { skip: process.
       OMP_WEB_TRUSTED_HEADER_SHA256: "a".repeat(64),
     });
     assert.match(readFileSync(unitPath, "utf8"), /EnvironmentFile=.*web-service\.env/);
+    assert.doesNotMatch(readFileSync(unitPath, "utf8"), /OMP_WEB_OMP_BIN/);
     const hostUnit = readFileSync(path.join(path.dirname(unitPath), "ompweb-host.service"), "utf8");
     assert.match(hostUnit, /^ExecStart=.*\/ompweb host$/m);
     assert.match(hostUnit, /EnvironmentFile=.*web-service\.env/);

@@ -8,6 +8,8 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 require("./node-version").exitIfUnsupportedNode();
 
+// The daemon finds its runner from here (lib/omp/omp-cli.ts), not from whatever cwd it was started in.
+process.env.OMP_WEB_PACKAGE_DIR ??= module.require("node:path").join(__dirname, "..");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const jiti = require("jiti").createJiti(__filename);
 jiti.import("../lib/hosts/host-cli.ts").then(

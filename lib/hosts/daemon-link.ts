@@ -92,7 +92,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
   const channels = new Map<string, { buffered: number }>();
   // Uplink messages wait in `sender` until they go out, then here until main acks them; a dropped socket resends
   // them after the next welcome.
-  const sender = new LinkSender<Pending>(true);
+  const sender = new LinkSender<Pending>();
   const outbox = new Outbox<Queued>();
   const down = new SeqWindow();
   /** The downlink line main is sending in parts. */
@@ -338,7 +338,6 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
       case "welcome":
         if (message.v < MIN_LINK_PROTOCOL_VERSION || message.v > owner.version) throw new LinkProtocolError("Invalid welcome protocol version");
         owner.version = message.v;
-        sender.parts = owner.version >= 5;
         log("linked to " + serverUrl);
         acknowledgeHostUpdateHealth(); unknownLog.reset(); linked = socket; redialDelay = FIRST_RETRY_MS;
         resend = outbox.pending(); resendAt = 0; sender.dropBlobs();
@@ -458,7 +457,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
         if (typeof closed !== "string" && closed.code === LINK_CLOSE.versionMismatch) {
           let newest: unknown; try { newest = JSON.parse(closed.reason)?.serverVersion; } catch {}
           if (typeof newest === "number" && Number.isInteger(newest) && newest >= MIN_LINK_PROTOCOL_VERSION && newest < owner.version) {
-            owner.version = newest; sender.parts = newest >= 5; continue;
+            owner.version = newest; continue;
           }
           log(typeof newest === "number" && newest < LINK_PROTOCOL_VERSION
             ? "this host's ompweb is newer than the server's: update ompweb on the server"

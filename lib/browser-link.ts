@@ -199,7 +199,7 @@ function createLink(owner: string): BrowserLink {
     owner,
     socket: null,
     connection: null as unknown as EventStreamConnection,
-    sender: new LinkSender(true),
+    sender: new LinkSender(),
     outbox: new Outbox(),
     outboxBytes: 0,
     downSeq: 0,

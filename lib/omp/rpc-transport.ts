@@ -28,8 +28,6 @@ export interface RpcTransport {
   readonly hostOwnedLifecycle?: boolean;
   /** The host stopped the child on purpose (lifecycle or a server's request): not a crash. */
   readonly stopReason?: string;
-  /** The child's ready advertised exclude-from-context (exact true only). Remote: as the host last reported it on open. */
-  readonly supportsBashExcludeFromContext?: boolean;
   setInterest?(on: boolean): void;
   setPreparing?(on: boolean, takeOver?: boolean): void;
   /** Acquire (rejects while another server edits) or release the host's history-edit lease. */

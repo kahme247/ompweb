@@ -563,6 +563,7 @@ interface HistoryEntryRange {
   length: number;
   firstKeptEntryId?: string;
   legacyCustom?: boolean;
+  clientMessageId?: string;
 }
 
 interface SessionHistoryIndex {
@@ -620,6 +621,9 @@ function historyEntryMetadata(entry: SessionEntry): SessionEntry {
   } else if (entry.type === "custom" && entry.customType === "user_todo_edit") {
     compact.customType = entry.customType;
     compact.data = isRecord(entry.data) ? { phases: entry.data.phases } : undefined;
+  } else if (entry.type === "custom" && entry.customType === "client-message-entry") {
+    compact.customType = entry.customType;
+    compact.data = isRecord(entry.data) ? { clientMessageId: entry.data.clientMessageId, entryId: entry.data.entryId } : undefined;
   } else if (entry.type === "custom" && entry.customType === "client-message-resolution") {
     compact.customType = entry.customType;
     compact.data = { clientMessageIds: isRecord(entry.data) && Array.isArray(entry.data.clientMessageIds)
@@ -640,11 +644,12 @@ function buildHistoryIndex(
     },
   });
   if (loaded.error === "too_large") throw new SessionFileTooLargeError(filePath);
-  const { selected, compactionId, ...metadata } = selectSessionContext(loaded.entries, leafId, { includePreCompaction });
+  const { selected, compactionId, entryClientIds, ...metadata } = selectSessionContext(loaded.entries, leafId, { includePreCompaction });
   const rows = selected.map((entry): HistoryEntryRange => ({
     id: entry.id,
     ...ranges.get(entry)!,
     ...(entry.type === "compaction" ? { firstKeptEntryId: entry.firstKeptEntryId } : {}),
+    ...(entryClientIds.has(entry.id) ? { clientMessageId: entryClientIds.get(entry.id) } : {}),
     ...(entry.type === "message" && entry.message.role === "custom" ? { legacyCustom: true } : {}),
   }));
   const tipId = loaded.entries.at(-1)?.id ?? null;
@@ -741,6 +746,7 @@ export function getSessionHistoryPage(
           const message = entry.message as unknown as Record<string, unknown>;
           if (message.role === "hookMessage") message.role = "custom";
         }
+        if (row.clientMessageId) entry.clientMessageId = row.clientMessageId;
         rawEntries.push(entry);
       }
       if (historyFileVersion(fstatSync(fd)) !== version || historyFileVersion(statSync(filePath)) !== version) {
@@ -833,13 +839,15 @@ export function buildSessionContext(
   leafId?: string | null,
   options: { deferThinking?: boolean; deferToolResultImages?: boolean; includePreCompaction?: boolean } = {},
 ): SessionContext {
-  const { selected, compactionId, ...metadata } = selectSessionContext(entries, leafId, options);
+  const { selected, compactionId, entryClientIds, ...metadata } = selectSessionContext(entries, leafId, options);
   return {
     ...metadata,
     entryIds: selected.map((entry) => entry.id),
-    messages: selected.map((entry) => entry.type === "compaction"
-      ? compactionUiMessage(entry, entry.id === compactionId)
-      : entryToUiMessage(entry, options)!),
+    messages: selected.map((entry) => {
+      if (entry.type === "compaction") return compactionUiMessage(entry, entry.id === compactionId);
+      const clientMessageId = entryClientIds.get(entry.id);
+      return entryToUiMessage(clientMessageId ? { ...entry, clientMessageId } as SessionEntry : entry, options)!;
+    }),
   };
 }
 
@@ -849,7 +857,7 @@ function selectSessionContext(
   leafId?: string | null,
   options: { includePreCompaction?: boolean } = {},
 ) {
-  const empty = { selected: [] as SessionEntry[], compactionId: null as string | null, thinkingLevel: "off", model: null as SessionContext["model"], todoPhases: [] as TodoPhase[] };
+  const empty = { selected: [] as SessionEntry[], compactionId: null as string | null, thinkingLevel: "off", model: null as SessionContext["model"], todoPhases: [] as TodoPhase[], entryClientIds: new Map<string, string>() };
   const byId = new Map<string, SessionEntry>();
   for (const e of entries) byId.set(e.id, e);
   if (leafId === null) return empty;
@@ -874,9 +882,22 @@ function selectSessionContext(
   let compaction: CompactionEntry | null = null;
   const persistedClientMessageIds = new Set<string>();
   const resolvedClientMessageIds = new Set<string>();
+  // The journal names its message by id, so only entries on the active path count: an abandoned branch's are never visited.
+  const journaled = new Map<string, string>();
   for (const entry of path) {
-    if ((entry.type === "message" || entry.type === "custom_message") && isClientMessageId(entry.clientMessageId)) {
-      persistedClientMessageIds.add(entry.clientMessageId);
+    if (entry.type === "custom" && entry.customType === "client-message-entry" && isRecord(entry.data)
+      && isClientMessageId(entry.data.clientMessageId) && typeof entry.data.entryId === "string") {
+      journaled.set(entry.data.entryId, entry.data.clientMessageId);
+    }
+  }
+  const entryClientIds = new Map<string, string>();
+  for (const entry of path) {
+    if (entry.type === "message" || entry.type === "custom_message") {
+      const id = isClientMessageId(entry.clientMessageId) ? entry.clientMessageId : journaled.get(entry.id);
+      if (id) {
+        entryClientIds.set(entry.id, id);
+        persistedClientMessageIds.add(id);
+      }
     } else if (entry.type === "custom" && entry.customType === "client-message-resolution"
       && isRecord(entry.data) && Array.isArray(entry.data.clientMessageIds)) {
       for (const id of entry.data.clientMessageIds) if (isClientMessageId(id)) resolvedClientMessageIds.add(id);
@@ -935,6 +956,7 @@ function selectSessionContext(
   return {
     selected, compactionId: compaction?.id ?? null, thinkingLevel, model, todoPhases: getTodoPhasesFromEntries(entries, leafId),
     ...(persistedClientMessageIds.size ? { persistedClientMessageIds: [...persistedClientMessageIds] } : {}),
+    entryClientIds,
     ...(resolvedClientMessageIds.size ? { resolvedClientMessageIds: [...resolvedClientMessageIds] } : {}),
   };
 }

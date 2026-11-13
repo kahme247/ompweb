@@ -31,13 +31,34 @@ jobs:
 
       - run: npm install --global npm@^11.5.1
       - run: npm ci
+      # The omp the runners compile against: the fork's newest integration build, not runner/omp-build.json's pin
+      # (not committed back). No such release or a runner that fails tsc against it fails the release. Pinned before
+      # the tests: they import the runner (lib/hosts/omp-socket.test.mjs), and must run against the omp that ships.
+      - name: Find the newest omp integration build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api repos/ompweb-dev/oh-my-pi/commits/integration-release --jq .sha)
+          tag=$(gh api --paginate 'repos/ompweb-dev/oh-my-pi/releases?per_page=100' --jq '.[].tag_name' \
+            | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.g${sha:0:7}\$" | head -n 1 || true)
+          if [ -z "$tag" ]; then
+            echo "::error::ompweb-dev/oh-my-pi has no integration release for integration-release ($sha)"
+            exit 1
+          fi
+          echo "OMP_TAG=$tag" >> "$GITHUB_ENV"
+      # Without GH_TOKEN: bun install runs the omp packages' scripts.
+      - name: Pin the runner to it
+        run: npx bun runner/scripts/use-omp-build.ts "$OMP_TAG" && (cd runner && npx bun x tsc -p .)
       - run: npm test
       - run: npm run build
-      - run: npm run smoke
-
+      # Builds the omp runners too, which the source smoke spawns from runner/release/. The archives leave them out:
+      # every install fetches its runner from this release (lib/omp/runner-fetch.ts), attached below.
       - name: Build the release binaries
-        run: sh scripts/build-release-binaries.sh
-      - run: npm run smoke -- --binary release/ompweb-linux-x64/ompweb
+        run: sh scripts/build-release-binaries.sh --no-runner
+      - run: npm run smoke
+      # --omp: the draft release cannot serve the runner to the binary yet.
+      - run: npm run smoke -- --binary release/ompweb-linux-x64/ompweb --omp runner/release/ompweb-omp-linux-x64
 
       - name: Create draft GitHub Release
         env:
@@ -46,14 +67,28 @@ jobs:
         run: |
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             node bin/generate-release-notes.js --tag "$TAG" --output release-notes.md
+            printf '\nomp: ompweb-dev/oh-my-pi %s\n' "$OMP_TAG" >> release-notes.md
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file release-notes.md --draft
           fi
 
-      - name: Attach the binaries to the draft release
+      # The runners, by the names and checksum listing lib/omp/runner-fetch.ts fetches (OMP_RUNNER_ASSET,
+      # OMP_RUNNER_CHECKSUMS), for binary and npm installs alike.
+      - name: Attach the binaries and the omp runners to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release upload "$TAG" release/ompweb-*.tar.gz release/ompweb-*.zip --repo "$GITHUB_REPOSITORY" --clobber
+        run: |
+          set -euo pipefail
+          runners=(ompweb-omp-linux-x64 ompweb-omp-linux-arm64 ompweb-omp-darwin-x64 ompweb-omp-darwin-arm64 ompweb-omp-windows-x64.exe)
+          (cd runner/release && sha256sum "${runners[@]}" > ompweb-omp.sha256)
+          gh release upload "$TAG" release/ompweb-*.tar.gz release/ompweb-*.zip "${runners[@]/#/runner/release/}" runner/release/ompweb-omp.sha256 --repo "$GITHUB_REPOSITORY" --clobber
+
+      # Before npm: an npm install fetches its runner from this release, which a draft does not serve.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
       - name: Publish to npm
         run: |
@@ -64,12 +99,6 @@ jobs:
           else
             npm publish --provenance --access public
           fi
-
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
   notify-discord:
     needs: publish

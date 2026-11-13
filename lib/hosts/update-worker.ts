@@ -1,18 +1,24 @@
 // This file is copied outside the install before an update. Keep it self-contained and Node 24 compatible.
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { gunzipSync, inflateRawSync } from "node:zlib";
+import { createGunzip, inflateRawSync } from "node:zlib";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import type { HostUpdateOperation, HostUpdateTarget } from "./update-types";
 
 import { setTimeout as pause } from "node:timers/promises";
 const exec = promisify(execFile);
-const MAX_ARCHIVE = 200 * 1024 * 1024;
-const MAX_EXPANDED = 512 * 1024 * 1024;
-const MAX_MEMBER = 256 * 1024 * 1024;
+// A prerelease archive carries ompweb (~112 MB) plus its omp runner (~284 MB on linux-x64, ~172 MB gzipped), and a
+// release's runner asset (lib/omp/runner-fetch.ts) is held to the member limit: sized with headroom for both.
+// scripts/check-host-release-archive.ts holds every built archive to these in CI.
+export const HOST_RELEASE_MAX_ARCHIVE = 512 * 1024 * 1024;
+export const HOST_RELEASE_MAX_EXPANDED = 1024 * 1024 * 1024;
+export const HOST_RELEASE_MAX_MEMBER = 512 * 1024 * 1024;
+/** The whole release download (or npm install): 512 MiB in 15 min needs about 5 Mbit/s. */
+const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
 export const HOST_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
 
 export interface HostUpdateStoredState {
@@ -37,6 +43,8 @@ export interface HostUpdateDescriptor {
   managerPath?: string;
   restartOnly?: boolean;
   systemd: { unit: string; user: boolean } | null;
+  /** `owner/name` whose releases the binary comes from (lib/release-repo.ts; this file stays self-contained). */
+  releaseRepo: string;
 }
 
 export function hostUpdateRoot(): string {
@@ -118,7 +126,7 @@ export function finishHostUpdate(id: string, error?: string): void {
   }
 }
 
-export async function fetchHostUpdateBytes(url: string, maxBytes: number, timeout = 5000): Promise<Buffer> {
+async function readHostUpdate(url: string, maxBytes: number, timeout: number, onChunk: (chunk: Uint8Array) => void): Promise<void> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
@@ -127,7 +135,6 @@ export async function fetchHostUpdateBytes(url: string, maxBytes: number, timeou
     if (response.url && (!response.url.startsWith("https://") || !["raw.githubusercontent.com", "api.github.com", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"].includes(new URL(response.url).hostname))) throw new Error("Unexpected release download destination");
     if (Number(response.headers.get("content-length")) > maxBytes) throw new Error("Release response is too large");
     const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
     let size = 0;
     try {
       while (true) {
@@ -135,111 +142,172 @@ export async function fetchHostUpdateBytes(url: string, maxBytes: number, timeou
         if (item.done) break;
         size += item.value.byteLength;
         if (size > maxBytes) throw new Error("Release response is too large");
-        chunks.push(item.value);
+        onChunk(item.value);
       }
     } catch (error) { await reader.cancel().catch(() => {}); throw error; }
-    return Buffer.concat(chunks, size);
   } finally { clearTimeout(timer); }
+}
+export async function fetchHostUpdateBytes(url: string, maxBytes: number, timeout = 5000): Promise<Buffer> {
+  const chunks: Uint8Array[] = [];
+  await readHostUpdate(url, maxBytes, timeout, (chunk) => { chunks.push(chunk); });
+  return Buffer.concat(chunks);
+}
+/** Streams the response into a new `file` (never whole in memory); returns its `sha256:<hex>` digest. */
+export async function downloadHostUpdateFile(url: string, file: string, maxBytes: number, timeout = DOWNLOAD_TIMEOUT_MS): Promise<string> {
+  const hash = createHash("sha256");
+  const fd = openSync(file, "wx", 0o600);
+  try { await readHostUpdate(url, maxBytes, timeout, (chunk) => { writeSync(fd, chunk); hash.update(chunk); }); }
+  finally { closeSync(fd); }
+  return `sha256:${hash.digest("hex")}`;
 }
 export function hostReleaseName(platform = process.platform, arch = process.arch): string {
   if (!["linux", "darwin", "win32"].includes(platform) || !["x64", "arm64"].includes(arch) || (platform === "win32" && arch !== "x64")) throw new Error(`Host updates are unsupported on ${platform}/${arch}`);
   return `ompweb-${platform === "win32" ? "windows" : platform}-${arch}`;
 }
-export function verifyHostReleaseDigest(bytes: Uint8Array, digest: string): void {
-  if (!/^sha256:[a-f0-9]{64}$/.test(digest) || `sha256:${createHash("sha256").update(bytes).digest("hex")}` !== digest) throw new Error("Official release asset digest mismatch or unavailable");
-}
-interface ArchiveMember { name: string; directory: boolean; data: Buffer }
+interface ArchiveMember { name: string; directory: boolean; size: number; write(file: string): void }
 function memberName(name: string, root: string): string {
   const normalized = name.replace(/\/$/, "");
   if (normalized.includes("\\") || normalized.includes(":") || normalized.startsWith("/") || normalized.split("/").some((part) => !part || part === ".." || part === "." || /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part) || [...part].some((char) => char.charCodeAt(0) < 32)) || (normalized !== root && !normalized.startsWith(`${root}/`))) throw new Error("Unsafe release archive member path");
   return normalized;
 }
-export function validateHostReleaseArchive(input: Uint8Array, root: string): ArchiveMember[] {
-  const bytes = Buffer.from(input);
+/** Checks every member of a tar or ZIP (bytes, or an open file descriptor) before anything is written; each member's
+ * `write` then copies (tar, stored ZIP) or inflates (deflated ZIP) only that member. */
+export function validateHostReleaseArchive(input: Uint8Array | number, root: string): ArchiveMember[] {
+  const length = typeof input === "number" ? fstatSync(input).size : input.length;
+  const read = (position: number, count: number): Buffer => {
+    count = Math.max(0, Math.min(count, length - position));
+    if (typeof input !== "number") return Buffer.from(input.buffer, input.byteOffset + position, count);
+    const buffer = Buffer.allocUnsafe(count);
+    let done = 0;
+    while (done < count) {
+      const n = readSync(input, buffer, done, count - done, position + done);
+      if (!n) throw new Error("Release archive is truncated");
+      done += n;
+    }
+    return buffer;
+  };
+  const copy = (start: number, size: number) => (file: string) => {
+    const fd = openSync(file, "wx", 0o644);
+    try { for (let done = 0; done < size; done += 8 * 1024 * 1024) writeSync(fd, read(start + done, Math.min(8 * 1024 * 1024, size - done))); }
+    finally { closeSync(fd); }
+  };
   const entries: ArchiveMember[] = [];
   const seen = new Set<string>();
   let expanded = 0;
-  const add = (name: string, directory: boolean, data: Buffer) => {
+  const add = (name: string, directory: boolean, size: number, write: (file: string) => void) => {
     name = memberName(name, root);
     if (!name || seen.has(name) || entries.length >= 20000) throw new Error("Invalid duplicate or excessive archive members");
-    if (data.length > MAX_MEMBER || (expanded += data.length) > MAX_EXPANDED) throw new Error("Release member size is too large");
-    seen.add(name); entries.push({ name, directory, data });
+    if (size > HOST_RELEASE_MAX_MEMBER || (expanded += size) > HOST_RELEASE_MAX_EXPANDED) throw new Error("Release member size is too large");
+    seen.add(name); entries.push({ name, directory, size, write });
   };
-  if (bytes.readUInt32LE(0) === 0x04034b50) {
+  if (length >= 4 && read(0, 4).readUInt32LE(0) === 0x04034b50) {
     // Read central metadata first: Unix symlink attributes are not present in local headers.
-    let end = bytes.length - 22;
-    while (end >= Math.max(0, bytes.length - 65557) && bytes.readUInt32LE(end) !== 0x06054b50) end--;
-    if (end < 0 || bytes.readUInt32LE(end) !== 0x06054b50 || bytes.readUInt16LE(end + 4) || bytes.readUInt16LE(end + 6)) throw new Error("Invalid or multi-disk ZIP archive");
-    const count = bytes.readUInt16LE(end + 10);
-    let offset = bytes.readUInt32LE(end + 16);
-    if (count > 20000 || offset >= end) throw new Error("Invalid ZIP member count or offset");
+    const tailStart = Math.max(0, length - 65557);
+    const tail = read(tailStart, length - tailStart);
+    let end = tail.length - 22;
+    while (end >= 0 && tail.readUInt32LE(end) !== 0x06054b50) end--;
+    if (end < 0 || tail.readUInt16LE(end + 4) || tail.readUInt16LE(end + 6)) throw new Error("Invalid or multi-disk ZIP archive");
+    const count = tail.readUInt16LE(end + 10);
+    const centralStart = tail.readUInt32LE(end + 16);
+    end += tailStart;
+    if (count > 20000 || centralStart >= end) throw new Error("Invalid ZIP member count or offset");
+    const central = read(centralStart, end - centralStart);
+    let offset = 0;
     for (let index = 0; index < count; index++) {
-      if (offset + 46 > end || bytes.readUInt32LE(offset) !== 0x02014b50) throw new Error("Invalid ZIP central member");
-      const flags = bytes.readUInt16LE(offset + 8), method = bytes.readUInt16LE(offset + 10);
-      const size = bytes.readUInt32LE(offset + 24), compressed = bytes.readUInt32LE(offset + 20);
-      const nameLength = bytes.readUInt16LE(offset + 28), extraLength = bytes.readUInt16LE(offset + 30), commentLength = bytes.readUInt16LE(offset + 32);
-      const mode = bytes.readUInt32LE(offset + 38) >>> 16;
-      const name = bytes.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
+      if (offset + 46 > central.length || central.readUInt32LE(offset) !== 0x02014b50) throw new Error("Invalid ZIP central member");
+      const flags = central.readUInt16LE(offset + 8), method = central.readUInt16LE(offset + 10);
+      const size = central.readUInt32LE(offset + 24), compressed = central.readUInt32LE(offset + 20);
+      const nameLength = central.readUInt16LE(offset + 28), extraLength = central.readUInt16LE(offset + 30), commentLength = central.readUInt16LE(offset + 32);
+      const mode = central.readUInt32LE(offset + 38) >>> 16;
+      const name = central.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
       if ((flags & 1) || ![0, 8].includes(method) || ((mode & 0o170000) !== 0 && ![0o100000, 0o040000].includes(mode & 0o170000))) throw new Error("Unsupported ZIP member type or encryption");
-      if (size > MAX_MEMBER || expanded + size > MAX_EXPANDED) throw new Error("Release member size is too large");
-      const local = bytes.readUInt32LE(offset + 42);
-      if (local + 30 > bytes.length || bytes.readUInt32LE(local) !== 0x04034b50) throw new Error("Invalid ZIP local member");
-      const localNameLength = bytes.readUInt16LE(local + 26), localExtraLength = bytes.readUInt16LE(local + 28);
-      if (bytes.subarray(local + 30, local + 30 + localNameLength).toString("utf8") !== name) throw new Error("ZIP member path mismatch");
+      if (size > HOST_RELEASE_MAX_MEMBER || expanded + size > HOST_RELEASE_MAX_EXPANDED) throw new Error("Release member size is too large");
+      const local = central.readUInt32LE(offset + 42);
+      const header = read(local, 30);
+      if (header.length < 30 || header.readUInt32LE(0) !== 0x04034b50) throw new Error("Invalid ZIP local member");
+      const localNameLength = header.readUInt16LE(26), localExtraLength = header.readUInt16LE(28);
+      if (read(local + 30, localNameLength).toString("utf8") !== name) throw new Error("ZIP member path mismatch");
       const start = local + 30 + localNameLength + localExtraLength;
-      if (start + compressed > bytes.readUInt32LE(end + 16)) throw new Error("Invalid ZIP member size");
-      const packed = bytes.subarray(start, start + compressed);
-      const data = method === 0 ? packed : inflateRawSync(packed, { maxOutputLength: MAX_MEMBER });
-      if (data.length !== size) throw new Error("ZIP member size mismatch");
-      add(name, name.endsWith("/"), data);
+      if (start + compressed > centralStart || (method === 0 && compressed !== size)) throw new Error("Invalid ZIP member size");
+      add(name, name.endsWith("/"), size, method === 0 ? copy(start, size) : (file) => {
+        const data = inflateRawSync(read(start, compressed), { maxOutputLength: HOST_RELEASE_MAX_MEMBER });
+        if (data.length !== size) throw new Error("ZIP member size mismatch");
+        writeFileSync(file, data, { mode: 0o644, flag: "wx" });
+      });
       offset += 46 + nameLength + extraLength + commentLength;
     }
   } else {
-    for (let offset = 0; offset + 512 <= bytes.length;) {
-      const header = bytes.subarray(offset, offset + 512);
+    for (let offset = 0; offset + 512 <= length;) {
+      const header = read(offset, 512);
       if (header.every((byte) => byte === 0)) break;
-      const text = (start: number, length: number) => header.subarray(start, start + length).toString("utf8").replace(/\0[\s\S]*$/, "");
+      const text = (start: number, count: number) => header.subarray(start, start + count).toString("utf8").replace(/\0[\s\S]*$/, "");
       const name = text(345, 155) ? `${text(345, 155)}/${text(0, 100)}` : text(0, 100);
       memberName(name, root);
       const type = header[156];
       if (![0, 48, 53].includes(type)) throw new Error("Unsupported release member type (links are forbidden)");
       const sizeText = text(124, 12).trim();
       const size = /^[0-7]+$/.test(sizeText) ? parseInt(sizeText, 8) : NaN;
-      if (!Number.isSafeInteger(size) || size > MAX_MEMBER || size < 0 || expanded + size > MAX_EXPANDED) throw new Error("Release member size is too large or invalid");
+      if (!Number.isSafeInteger(size) || size > HOST_RELEASE_MAX_MEMBER || size < 0 || expanded + size > HOST_RELEASE_MAX_EXPANDED) throw new Error("Release member size is too large or invalid");
       const checksumText = text(148, 8).trim();
       const checksum = header.reduce((sum, value, index) => sum + (index >= 148 && index < 156 ? 32 : value), 0);
-      if (!/^[0-7]+$/.test(checksumText) || parseInt(checksumText, 8) !== checksum || offset + 512 + size > bytes.length) throw new Error("Invalid release tar header or size");
-      add(name, type === 53, bytes.subarray(offset + 512, offset + 512 + size));
+      if (!/^[0-7]+$/.test(checksumText) || parseInt(checksumText, 8) !== checksum || offset + 512 + size > length) throw new Error("Invalid release tar header or size");
+      add(name, type === 53, size, copy(offset + 512, size));
       offset += 512 + Math.ceil(size / 512) * 512;
     }
   }
   if (!entries.length) throw new Error("Empty release archive");
   return entries;
 }
+/** Unpacks a release archive (`.tar.gz`, or `.zip`) into `staging` through the checks above, without holding it in
+ * memory: a `.tar.gz` is gunzipped to a scratch tar beside it first. Returns the members (only names and sizes stay valid). */
+export async function extractHostReleaseArchive(archive: string, root: string, staging: string): Promise<ArchiveMember[]> {
+  let source = archive;
+  if (archive.endsWith(".tar.gz")) {
+    source = archive.slice(0, -3);
+    let size = 0;
+    await pipeline(createReadStream(archive), createGunzip(), async function* (chunks: AsyncIterable<Buffer>) {
+      for await (const chunk of chunks) {
+        // The tar adds a header and padding per member on top of the member bytes the parser bounds.
+        if ((size += chunk.length) > HOST_RELEASE_MAX_EXPANDED + 64 * 1024 * 1024) throw new Error("Release archive expands too far");
+        yield chunk;
+      }
+    }, createWriteStream(source, { flags: "wx", mode: 0o600 }));
+  }
+  const fd = openSync(source, "r");
+  try {
+    const members = validateHostReleaseArchive(fd, root);
+    for (const member of members) {
+      const file = join(staging, member.name);
+      if (member.directory) mkdirSync(file, { recursive: true, mode: 0o755 });
+      else {
+        mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
+        member.write(file);
+      }
+    }
+    return members;
+  } finally {
+    closeSync(fd);
+    if (source !== archive) rmSync(source, { force: true });
+  }
+}
 
 async function stageBinary(d: HostUpdateDescriptor, staging: string): Promise<string> {
   const name = hostReleaseName();
   const assetName = `${name}${process.platform === "win32" ? ".zip" : ".tar.gz"}`;
-  const metadata = JSON.parse((await fetchHostUpdateBytes(`https://api.github.com/repos/kahme247/ompweb/releases/tags/v${d.version}`, 2 * 1024 * 1024)).toString("utf8")) as { tag_name?: string; assets?: { name: string; digest?: string }[] };
+  const metadata = JSON.parse((await fetchHostUpdateBytes(`https://api.github.com/repos/${d.releaseRepo}/releases/tags/v${d.version}`, 2 * 1024 * 1024)).toString("utf8")) as { tag_name?: string; assets?: { name: string; digest?: string }[] };
   const asset = metadata.assets?.find((item) => item.name === assetName);
   if (metadata.tag_name !== `v${d.version}` || !asset?.digest || !/^sha256:[a-f0-9]{64}$/.test(asset.digest)) throw new Error("Official release asset digest is unavailable");
-  const compressed = await fetchHostUpdateBytes(`https://github.com/kahme247/ompweb/releases/download/v${d.version}/${assetName}`, MAX_ARCHIVE, 120000);
-  verifyHostReleaseDigest(compressed, asset.digest);
-  const archive = process.platform === "win32" ? compressed : gunzipSync(compressed, { maxOutputLength: MAX_EXPANDED });
-  const members = validateHostReleaseArchive(archive, name);
+  const download = join(staging, assetName);
+  if (await downloadHostUpdateFile(`https://github.com/${d.releaseRepo}/releases/download/v${d.version}/${assetName}`, download, HOST_RELEASE_MAX_ARCHIVE) !== asset.digest) throw new Error("Official release asset digest mismatch or unavailable");
   const release = join(staging, name);
   mkdirSync(release, { mode: 0o700 });
-  for (const member of members) {
-    const file = join(staging, member.name);
-    if (member.directory) mkdirSync(file, { recursive: true, mode: 0o755 });
-    else {
-      mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
-      writeFileSync(file, member.data, { mode: 0o644, flag: "wx" });
-    }
-  }
+  try { await extractHostReleaseArchive(download, name, staging); } finally { rmSync(download, { force: true }); }
   const binary = join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb");
+  if (!existsSync(join(release, "dist", "index.html"))) throw new Error("Incomplete host binary release layout");
   chmodSync(binary, 0o755);
-  if (!existsSync(join(release, "dist", "index.html")) || !existsSync(join(release, "lib", "omp", "session-edit-extension.mjs"))) throw new Error("Incomplete host binary release layout");
+  // Releases from before the runner became its own asset (preflightHostRelease fetches it otherwise) carry it here.
+  const runner = join(release, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp");
+  if (existsSync(runner)) chmodSync(runner, 0o755);
   if (!(await binaryReportsVersion(binary, release, d.version))) throw new Error("Downloaded host binary reports a different version");
   return release;
 }
@@ -253,7 +321,7 @@ async function stagePackage(d: HostUpdateDescriptor, staging: string): Promise<s
   const windows = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
   // `/s /c` strips one outer pair of quotes; verbatim so Node does not escape the inner ones (as Node's `shell: true`).
   const line = [command, ...args].map((arg) => `"${arg.replaceAll('"', '')}"`).join(" ");
-  await exec(windows ? process.env.ComSpec || "cmd.exe" : command, windows ? ["/d", "/s", "/c", `"${line}"`] : args, { timeout: 300000, maxBuffer: 1024 * 1024, env: workerEnvironment(), windowsHide: true, windowsVerbatimArguments: windows });
+  await exec(windows ? process.env.ComSpec || "cmd.exe" : command, windows ? ["/d", "/s", "/c", `"${line}"`] : args, { timeout: DOWNLOAD_TIMEOUT_MS, maxBuffer: 1024 * 1024, env: workerEnvironment(), windowsHide: true, windowsVerbatimArguments: windows });
   const modules = join(prefix, "node_modules");
   const packageDir = join(modules, "@kahme247", "ompweb");
   const metadata = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
@@ -332,6 +400,37 @@ export async function verifyHostServiceInstall(service: NonNullable<HostUpdateDe
 async function binaryReportsVersion(binary: string, packageDir: string, version: string): Promise<boolean> {
   const { stdout } = await exec(binary, ["--version"], { timeout: 10000, env: workerEnvironment({ OMP_WEB_PACKAGE_DIR: packageDir }), maxBuffer: 1024 * 1024 });
   return stdout.trim().split(/\s+/).some((token) => token.replace(/^v/, "") === version);
+}
+/** PREFLIGHT_MARKER (lib/hosts/preflight.ts), encoded so this module, bundled into the same binary, does not embed it. */
+export const PREFLIGHT_MARKER_BASE64 = "b21wd2ViLXByZWZsaWdodC1zY3JhdGNoLQ==";
+/** The candidate's `ompweb fetch-omp` (lib/omp/runner-fetch.ts: its omp runner from its own release, unless it has
+ * one), then its `ompweb preflight` (lib/hosts/preflight.ts) in this host's environment: the session omp it resolves
+ * must start and say hello before the switch. A new binary release without the preflight command is refused (it
+ * would run a runner unchecked); a restart-only update of an install that predates the command restarts what already
+ * runs. */
+async function preflightHostRelease(d: HostUpdateDescriptor, release: string): Promise<void> {
+  const binary = d.installMethod === "binary";
+  const entry = binary ? join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb") : join(release, "bin", "omp-web.js");
+  // Detected statically: an older ompweb takes `preflight` for a positional and starts the web server.
+  if (!(binary ? readFileSync(entry).includes(Buffer.from(PREFLIGHT_MARKER_BASE64, "base64")) : existsSync(join(release, "lib", "hosts", "preflight.ts")))) {
+    if (binary && !d.restartOnly) throw new Error("The new host release has no preflight command to check its omp with");
+    console.warn(`ompweb ${d.version} has no preflight command; its omp was not checked`);
+    return;
+  }
+  const command = (args: string[], timeout: number) => exec(binary ? entry : d.runtime, binary ? args : [entry, ...args], { cwd: release, timeout, env: workerEnvironment(), maxBuffer: 1024 * 1024, windowsHide: true });
+  const detail = (error: unknown) => (String((error as { stderr?: unknown }).stderr ?? "").trim() || (error instanceof Error ? error.message : String(error))).slice(-500);
+  // A binary release with the preflight command and no runner beside it has `fetch-omp`; every npm one that has
+  // runner-fetch.ts does (an npm package never carries the runner).
+  if (binary ? !existsSync(join(release, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp")) : existsSync(join(release, "lib", "omp", "runner-fetch.ts"))) {
+    try { await command(["fetch-omp"], DOWNLOAD_TIMEOUT_MS); }
+    catch (error) { throw new Error(`The new host release could not fetch its omp: ${detail(error)}`); }
+  }
+  try {
+    // 120 s: the preflight itself can take 30 s for the hello, 7 s to stop omp and 30 s for the version probe.
+    await command(["preflight"], 120000);
+  } catch (error) {
+    throw new Error(`The new host release cannot start a session: ${detail(error)}`);
+  }
 }
 /** The installation on disk already holds `version`: what a restart-only update relies on. */
 export async function installedHostVersionMatches(method: HostUpdateDescriptor["installMethod"], installDir: string, version: string): Promise<boolean> {
@@ -477,7 +576,7 @@ function validateDescriptor(path: string): HostUpdateDescriptor {
   const root = ensureHostUpdateRoot();
   assertOwnedPath(path);
   const d = JSON.parse(readFileSync(path, "utf8")) as HostUpdateDescriptor;
-  if (!/^[a-zA-Z0-9-]{1,80}$/.test(d.id) || resolve(path) !== join(root, d.id, "descriptor.json") || !HOST_VERSION_PATTERN.test(d.version) || !HOST_VERSION_PATTERN.test(d.fromVersion) || d.target !== "ompweb" || !["npm", "bun", "binary"].includes(d.installMethod) || !isAbsolute(d.installDir) || !isAbsolute(d.runtime) || !isAbsolute(d.cwd) || !Number.isSafeInteger(d.daemonPid) || d.daemonPid <= 1 || !Array.isArray(d.hostArgs) || d.hostArgs.some((arg) => arg !== "--allow-http")) throw new Error("Invalid host update descriptor");
+  if (!/^[a-zA-Z0-9-]{1,80}$/.test(d.id) || resolve(path) !== join(root, d.id, "descriptor.json") || !HOST_VERSION_PATTERN.test(d.version) || !HOST_VERSION_PATTERN.test(d.fromVersion) || d.target !== "ompweb" || !["npm", "bun", "binary"].includes(d.installMethod) || !isAbsolute(d.installDir) || !isAbsolute(d.runtime) || !isAbsolute(d.cwd) || !Number.isSafeInteger(d.daemonPid) || d.daemonPid <= 1 || !Array.isArray(d.hostArgs) || d.hostArgs.some((arg) => arg !== "--allow-http") || typeof d.releaseRepo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(d.releaseRepo)) throw new Error("Invalid host update descriptor");
   if (d.restartOnly !== undefined && typeof d.restartOnly !== "boolean") throw new Error("Invalid host restart-only descriptor");
   if (!d.systemd && (typeof d.daemonIdentity !== "string" || !d.daemonIdentity || d.daemonIdentity.length > 200)) throw new Error("Invalid host update descriptor: the daemon's process identity is missing");
   assertOwnedPath(dirname(path), true);
@@ -490,7 +589,7 @@ function validateDescriptor(path: string): HostUpdateDescriptor {
   if (!parent.isDirectory() || parent.isSymbolicLink() || (process.getuid && parent.uid !== process.getuid()) || (process.platform !== "win32" && (parent.mode & 0o022))) throw new Error("Unsafe host installation parent directory");
   if (d.installMethod === "binary") {
     hostReleaseName();
-    if (!existsSync(join(d.installDir, process.platform === "win32" ? "ompweb.exe" : "ompweb")) || !existsSync(join(d.installDir, "dist", "index.html")) || !existsSync(join(d.installDir, "lib", "omp", "session-edit-extension.mjs"))) throw new Error("Incomplete host binary release layout");
+    if (!existsSync(join(d.installDir, process.platform === "win32" ? "ompweb.exe" : "ompweb")) || !existsSync(join(d.installDir, "dist", "index.html")) || !existsSync(join(d.installDir, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp"))) throw new Error("Incomplete host binary release layout");
   } else {
     if (basename(d.installDir) !== "ompweb" || basename(dirname(d.installDir)) !== "@kahme247" || basename(dirname(dirname(d.installDir))) !== "node_modules") throw new Error("Package updates require an installed npm/bun package layout");
     const current = JSON.parse(readFileSync(join(d.installDir, "package.json"), "utf8"));
@@ -528,6 +627,7 @@ export async function runHostUpdateWorker(path: string): Promise<number> {
       const sharingAfterStage = await sharedHostInstallReason(d.installDir, [process.pid, d.daemonPid]);
       if (sharingAfterStage) throw new Error(sharingAfterStage);
     }
+    await preflightHostRelease(d, release ?? d.installDir);
     // The daemon blocks new children for the entire persisted running operation.
     if (readHostUpdateState()?.operation.id !== d.id || readHostUpdateState()?.operation.state !== "running") throw new Error("Host update no longer owns the operation");
     validateDescriptor(path);

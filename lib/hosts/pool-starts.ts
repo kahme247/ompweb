@@ -10,7 +10,7 @@ import type { ProjectLaunchConfig } from "../types";
 import { sharesCredentials } from "./cluster";
 import type { Host } from "./host";
 import { adoptedChild, getHost, getHostCapacity, getHostLinkProtocol, hostOwnsLifecycle, isHostConfigCurrent, reconcilePooledChild } from "./hub";
-import { CLUSTER_CONFIG_SINCE_VERSION, CREATION_ID_RE, HostOpError, SHARED_CREDENTIALS_SINCE_VERSION, type HelloChannel } from "./link-protocol";
+import { CREATION_ID_RE, HostOpError, type HelloChannel } from "./link-protocol";
 import { loadPools, pathApi, selectPoolHost, type PoolHostSnapshot } from "./pools";
 
 export interface PoolCreateInput {
@@ -323,8 +323,7 @@ export function startPooledSession(input: PoolCreateInput, start: Start, authori
         const host = getHost(member.hostId);
         const linkProtocol = getHostLinkProtocol(member.hostId) ?? 0;
         // A cluster member always runs on the server's logins; without a link that honours that, spawnRpc would refuse it after preparation.
-        if (sharesCredentials({ id: member.hostId, shareCredentials: false }, pools)
-          && (!hostOwnsLifecycle(member.hostId) || linkProtocol < SHARED_CREDENTIALS_SINCE_VERSION)) continue;
+        if (sharesCredentials({ id: member.hostId, shareCredentials: false }, pools) && !hostOwnsLifecycle(member.hostId)) continue;
         // A cluster member behind the master's configuration stays in the map, marked, so selection skips it before any preparation.
         if (host) snapshots.set(member.hostId, { status: host.status(), linkProtocol, configCurrent: isHostConfigCurrent(member.hostId), capacity: getHostCapacity(member.hostId) });
       }
@@ -336,12 +335,9 @@ export function startPooledSession(input: PoolCreateInput, start: Start, authori
       }
       const hostId = selectPoolHost(pool, snapshots, pending, performance.now());
       if (!hostId) {
-        // Say why only when members would be eligible but for the configuration. A member below protocol 10 never
-        // catches up, so it counts as "receiving" only for the message that names the update it needs.
-        const ifCurrent = (reached: (snapshot: PoolHostSnapshot) => boolean) => selectPoolHost(pool, new Map([...snapshots].map(([id, snapshot]) => [id, { ...snapshot, configCurrent: snapshot.configCurrent || reached(snapshot) }])), pending, performance.now()) !== null;
-        throw new PoolStartError(503, "pool_unavailable", ifCurrent((snapshot) => snapshot.linkProtocol >= CLUSTER_CONFIG_SINCE_VERSION)
-          ? "The pool's workers are still receiving the cluster's configuration"
-          : ifCurrent(() => true) ? "Update ompweb on the pool's workers to use them in the cluster" : "No pool worker currently has eligible capacity");
+        // Say why only when members would be eligible but for the configuration.
+        const eligibleOnceCurrent = selectPoolHost(pool, new Map([...snapshots].map(([id, snapshot]) => [id, { ...snapshot, configCurrent: true }])), pending, performance.now()) !== null;
+        throw new PoolStartError(503, "pool_unavailable", eligibleOnceCurrent ? "The pool's workers are still receiving the cluster's configuration" : "No pool worker currently has eligible capacity");
       }
       const member = pool.members.find((candidate) => candidate.hostId === hostId)!;
       const cloneRoot = project.clonePaths[hostId] ?? pathApi(member.projectsRoot).join(member.projectsRoot, project.id);
