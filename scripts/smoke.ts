@@ -3,12 +3,14 @@
 // bundle, the SPA, a hashed asset, the API, a session listed through the daemon, a live session started through the
 // omp runner (no model call) and the SSE stream, then stops both.
 // <dir>: the repo root (after `npm run build` and `bun runner/scripts/build-binary.ts`) or a packed install;
-// <path>: release/ompweb-<os>-<arch>/ompweb, whose directory holds the static files and the runner (ompweb-omp). Prints one `ok <step>` / `FAIL <step>: <detail>` line per step.
+// <path>: release/ompweb-<os>-<arch>/ompweb, whose directory holds the static files and the runner (ompweb-omp) unless
+// built --no-runner. Prints one `ok <step>` / `FAIL <step>: <detail>` line per step.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { releaseRepo } from "../lib/release-repo";
 
 const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" }, binary: { type: "string" }, omp: { type: "string" }, "second-server": { type: "boolean" } } });
 const binary = values.binary && path.resolve(values.binary);
@@ -88,7 +90,8 @@ const env: Record<string, string | undefined> = {
 };
 // OMP_WEB_OMP_BIN: an agent shell points it at its own omp; test this install's runner instead.
 for (const name of ["OMP_WEB_PASSWORD", "OMP_WEB_PASSWORD_HASH", "OMP_WEB_OMP_BIN"]) delete env[name];
-// --omp <path>: a packed install has no runner of its own until the per-platform runner packages are published.
+// --omp <path>: a packed install, or a --no-runner binary, fetches its runner from its release, which a build under
+// test has not published yet (lib/omp/runner-fetch.ts).
 if (values.omp) env.OMP_WEB_OMP_BIN = path.resolve(values.omp);
 
 let log = "";
@@ -222,7 +225,7 @@ try {
       await step("the binary points updates at the release page and offers no in-app update", async () => {
         const update = await (await fetch(`${base}/api/app-update`)).json() as { installMethod?: string; selfUpdateSupported?: boolean; updateCommand?: string };
         assert(update.installMethod === "binary" && update.selfUpdateSupported === false, JSON.stringify(update));
-        assert(update.updateCommand?.startsWith("https://github.com/kahme247/ompweb/releases"), `updateCommand ${update.updateCommand}`);
+        assert(update.updateCommand?.startsWith(`https://github.com/${releaseRepo()}/releases`), `updateCommand ${update.updateCommand}`);
       });
     }
 
