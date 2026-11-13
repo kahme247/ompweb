@@ -7,8 +7,8 @@
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "file:./vendor/oh-my-pi-pi-coding-agent-18.20.0.tgz",
-    "@oh-my-pi/pi-natives": "file:./vendor/oh-my-pi-pi-natives-18.20.0-int.202611130808.gfd57e86.tgz",
-    "@oh-my-pi/pi-utils": "file:./vendor/oh-my-pi-pi-utils-18.20.0-int.202611130808.gfd57e86.tgz"
+    "@oh-my-pi/pi-natives": "file:./vendor/oh-my-pi-pi-natives-18.20.0-int.202611131515.g11d9dc7.tgz",
+    "@oh-my-pi/pi-utils": "file:./vendor/oh-my-pi-pi-utils-18.20.0-int.202611131515.g11d9dc7.tgz"
   },
   "devDependencies": {
     "@types/bun": "1.4.4",
@@ -22,15 +22,15 @@
     "@oh-my-pi/pi-catalog": "file:./vendor/oh-my-pi-pi-catalog-18.20.0.tgz",
     "@oh-my-pi/pi-coding-agent": "file:./vendor/oh-my-pi-pi-coding-agent-18.20.0.tgz",
     "@oh-my-pi/pi-mnemopi": "file:./vendor/oh-my-pi-pi-mnemopi-18.20.0.tgz",
-    "@oh-my-pi/pi-natives": "file:./vendor/oh-my-pi-pi-natives-18.20.0-int.202611130808.gfd57e86.tgz",
-    "@oh-my-pi/pi-natives-darwin-arm64": "file:./vendor/oh-my-pi-pi-natives-darwin-arm64-18.20.0-int.202611130808.gfd57e86.tgz",
-    "@oh-my-pi/pi-natives-darwin-x64": "file:./vendor/oh-my-pi-pi-natives-darwin-x64-18.20.0-int.202611130808.gfd57e86.tgz",
-    "@oh-my-pi/pi-natives-linux-arm64": "file:./vendor/oh-my-pi-pi-natives-linux-arm64-18.20.0-int.202611130808.gfd57e86.tgz",
-    "@oh-my-pi/pi-natives-linux-x64": "file:./vendor/oh-my-pi-pi-natives-linux-x64-18.20.0-int.202611130808.gfd57e86.tgz",
-    "@oh-my-pi/pi-natives-win32-arm64": "file:./vendor/oh-my-pi-pi-natives-win32-arm64-18.20.0-int.202611130808.gfd57e86.tgz",
-    "@oh-my-pi/pi-natives-win32-x64": "file:./vendor/oh-my-pi-pi-natives-win32-x64-18.20.0-int.202611130808.gfd57e86.tgz",
+    "@oh-my-pi/pi-natives": "file:./vendor/oh-my-pi-pi-natives-18.20.0-int.202611131515.g11d9dc7.tgz",
+    "@oh-my-pi/pi-natives-darwin-arm64": "file:./vendor/oh-my-pi-pi-natives-darwin-arm64-18.20.0-int.202611131515.g11d9dc7.tgz",
+    "@oh-my-pi/pi-natives-darwin-x64": "file:./vendor/oh-my-pi-pi-natives-darwin-x64-18.20.0-int.202611131515.g11d9dc7.tgz",
+    "@oh-my-pi/pi-natives-linux-arm64": "file:./vendor/oh-my-pi-pi-natives-linux-arm64-18.20.0-int.202611131515.g11d9dc7.tgz",
+    "@oh-my-pi/pi-natives-linux-x64": "file:./vendor/oh-my-pi-pi-natives-linux-x64-18.20.0-int.202611131515.g11d9dc7.tgz",
+    "@oh-my-pi/pi-natives-win32-arm64": "file:./vendor/oh-my-pi-pi-natives-win32-arm64-18.20.0-int.202611131515.g11d9dc7.tgz",
+    "@oh-my-pi/pi-natives-win32-x64": "file:./vendor/oh-my-pi-pi-natives-win32-x64-18.20.0-int.202611131515.g11d9dc7.tgz",
     "@oh-my-pi/pi-tui": "file:./vendor/oh-my-pi-pi-tui-18.20.0.tgz",
-    "@oh-my-pi/pi-utils": "file:./vendor/oh-my-pi-pi-utils-18.20.0-int.202611130808.gfd57e86.tgz",
+    "@oh-my-pi/pi-utils": "file:./vendor/oh-my-pi-pi-utils-18.20.0-int.202611131515.g11d9dc7.tgz",
     "@oh-my-pi/pi-wire": "file:./vendor/oh-my-pi-pi-wire-18.20.0.tgz",
     "@oh-my-pi/snapcompact": "file:./vendor/oh-my-pi-snapcompact-18.20.0.tgz"
   }
