@@ -155,6 +155,9 @@ export function useMarkdownBodyRendering({ children, isStreaming, cwd, sourceSes
         return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
       }
 
+      // A relative or path href the file panel cannot open would resolve against omp-web's own
+      // origin (a 404 or the app itself): show its text, as FileViewer's preview does.
+      if (!href || !/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(href)) return <>{textParts}{imageParts}</>;
       const anchor = (
         <a href={href} {...props} target="_blank" rel="noopener noreferrer">
           {textParts}

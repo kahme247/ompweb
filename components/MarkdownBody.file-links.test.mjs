@@ -79,3 +79,9 @@ test("without a file panel (a remote host's session) a path link renders as its 
   assert.deepEqual(links.map((a) => a.getAttribute("href")), ["https://x.test"]);
   assert.match(container.textContent, /local:\/\/uploads\/a\.txt/);
 });
+
+test("a path link the file panel cannot open renders as text, never an app-relative URL", () => {
+  const { container } = render(React.createElement(MarkdownBody, { onOpenFile: () => {} }, "[spec](docs/specs/a.md), [up](../x.md), [site](https://x.test), [fn](#note)"));
+  assert.deepEqual([...container.querySelectorAll("a")].map((a) => a.getAttribute("href")), ["https://x.test", "#note"]);
+  assert.match(container.textContent, /spec, up, site, fn/);
+});
