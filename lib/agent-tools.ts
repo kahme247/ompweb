@@ -1,5 +1,6 @@
 import type { HostToolDefinition } from "./pi-types";
 import { isRecord } from "./type-guards";
+import { startsUnasked, type AgentToolHost } from "./agent-tool-hosts";
 import { GITHUB_TOOL_DEFINITIONS, GITHUB_TOOL_NAMES, executeGithubTool, type GithubToolOps } from "./github/tools";
 
 /**
@@ -98,15 +99,6 @@ export interface AgentToolSessionSummary {
 
 /** A session as the ops layer lists it; executeAgentTool names its host. */
 export type AgentToolSessionRow = Omit<AgentToolSessionSummary, "host"> & { hostId: string };
-
-/** A machine sessions can start on; this machine has id "local". */
-export interface AgentToolHost {
-  id: string;
-  label: string;
-  online: boolean;
-  /** Off: the user confirms each agent-started session there. */
-  allowAgentStart: boolean;
-}
 
 export interface AgentToolCreateSessionInput {
   cwd: string;
@@ -319,11 +311,6 @@ function resolveHost(hosts: AgentToolHost[], host: string): AgentToolHost {
   if (!match) throw new Error(`Unknown host "${host}". Known hosts: ${hosts.map((h) => h.label).join(", ")}.`);
   if (!match.online) throw new Error(`${match.label} is offline.`);
   return match;
-}
-
-/** A host's allowAgentStart covers its agents' calls; a remote caller always asks before reaching this machine. */
-export function startsUnasked(target: AgentToolHost, sourceHostId: string): boolean {
-  return target.allowAgentStart && !(target.id === "local" && sourceHostId !== "local");
 }
 
 /**
