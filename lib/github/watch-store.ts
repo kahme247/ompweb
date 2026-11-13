@@ -21,6 +21,8 @@ export interface Watch {
   itemKey: string;
   kind: ItemKind;
   cursor: WatchCursor;
+  /** Registration time (ms); tells a re-watch apart from the watch before it. */
+  createdAt: number;
 }
 
 export interface PendingUpdate {
@@ -109,13 +111,14 @@ function open(dir: string, path: string): Database {
 
 // ---------------------------------------------------------------- watches
 
-type WatchRow = { session_id: string; item_key: string; kind: ItemKind; cursor_json: string };
+type WatchRow = { session_id: string; item_key: string; kind: ItemKind; cursor_json: string; created_at: number };
 
 const toWatch = (row: WatchRow): Watch => ({
   sessionId: row.session_id,
   itemKey: row.item_key,
   kind: row.kind,
   cursor: JSON.parse(row.cursor_json) as WatchCursor,
+  createdAt: row.created_at,
 });
 
 /** `exists` leaves the stored cursor as it is; `limit` refuses the watch beyond MAX_WATCHES_PER_SESSION. */
@@ -149,7 +152,7 @@ export function removeSessionWatches(sessionId: string): void {
 }
 
 export function listWatches(): Watch[] {
-  return db().prepare<WatchRow, []>("SELECT session_id, item_key, kind, cursor_json FROM watches ORDER BY created_at").all().map(toWatch);
+  return db().prepare<WatchRow, []>("SELECT session_id, item_key, kind, cursor_json, created_at FROM watches ORDER BY created_at").all().map(toWatch);
 }
 
 /** Saves the cursor, or deletes the watch when `final`; either way the watch's pending update is cleared in the same transaction. */

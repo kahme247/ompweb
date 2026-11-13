@@ -177,7 +177,8 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
         continue;
       }
       const update = {
-        entryId: updateEntryId(`${watch.sessionId}\0${itemKey}`, events),
+        // createdAt: a close after a re-watch repeats the first close's event id, and the outbox keeps delivered ids for days.
+        entryId: updateEntryId(`${watch.sessionId}\0${itemKey}\0${watch.createdAt}`, events),
         message: formatUpdate(formatTarget(target), snapshot.url, events),
         cursor,
         final: events.some((e) => e.kind === "merged" || e.kind === "closed"),
