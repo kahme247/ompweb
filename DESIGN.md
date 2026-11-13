@@ -69,7 +69,7 @@ Bun, would tie it to omp's internals and make the application unreliable.
 Therefore, the ompweb server and daemon must not add those runtime dependencies.
 
 Live work goes through ompweb's own omp build, `runner/`, compiled against the
-fork's integration build: an `andrebrait/oh-my-pi` release that is an upstream omp
+fork's integration build: an `ompweb-dev/oh-my-pi` release that is an upstream omp
 release plus the PRs the fork carries (among them `runSessionHost`, which the
 headless mode needs), pinned to one release in `runner/omp-build.json` and
 re-pinned to the newest one by each ompweb release. The runner replaces omp's

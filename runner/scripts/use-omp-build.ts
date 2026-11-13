@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Puts the omp npm packages the runner compiles against into `vendor/`: the `omp-packages-<version>.zip` asset of
- * one `andrebrait/oh-my-pi` integration release, which `omp-build.json` pins.
+ * one `ompweb-dev/oh-my-pi` integration release, which `omp-build.json` pins.
  *
  * `bun scripts/use-omp-build.ts`: fetch the pinned release's packages (then `bun install --frozen-lockfile`).
  * `bun scripts/use-omp-build.ts <tag>`: re-pin to that release: fetch it, point `omp-build.json`, the `@oh-my-pi/*`
@@ -71,7 +71,7 @@ if (!tag) {
 		});
 	await fetchBuild(pin);
 } else {
-	const pin: Pin = { repo: "andrebrait/oh-my-pi", tag };
+	const pin: Pin = { repo: "ompweb-dev/oh-my-pi", tag };
 	const manifest = await Bun.file(manifestPath).json();
 	const direct = Object.keys(manifest.dependencies).filter(name => name.startsWith("@oh-my-pi/"));
 	const index = await fetchBuild(pin, [...direct, ...LEAVES]);

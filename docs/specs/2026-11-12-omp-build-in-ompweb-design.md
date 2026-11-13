@@ -6,7 +6,7 @@ Depends on: PR #473's runner (`runner/`, `ompweb-omp`); can1357/oh-my-pi#19075 (
 
 ## Why
 
-Before this design, ompweb's own omp build (`ompweb-omp`, `runner/`) compiled against npm `@oh-my-pi/pi-coding-agent@18.19.0` plus a Bun patch that back-ported `runSessionHost`, and the omp deployed on the build host came from integration-ci's hourly integration of upstream releases plus the carried PRs, released on `andrebrait/oh-my-pi`. This design moves that round into the fork itself, makes fork binaries update from fork releases, and makes `ompweb-omp` compile against the fork's own packages.
+Before this design, ompweb's own omp build (`ompweb-omp`, `runner/`) compiled against npm `@oh-my-pi/pi-coding-agent@18.19.0` plus a Bun patch that back-ported `runSessionHost`, and the omp deployed on the build host came from integration-ci's hourly integration of upstream releases plus the carried PRs, released on `ompweb-dev/oh-my-pi`. This design moves that round into the fork itself, makes fork binaries update from fork releases, and makes `ompweb-omp` compile against the fork's own packages.
 
 Current state: `runner/omp-build.json` pins the fork release `v18.20.0-int.202611130808.gfd57e86`, the runner installs only that release's packages, and the Bun patch and `runner/patches/` are gone. Every ompweb (pre)release re-pins to the newest `integration-release` build (W2). Progress per task is in `docs/plans/2026-11-12-omp-build-in-ompweb.md`.
 
@@ -14,7 +14,7 @@ Current state: `runner/omp-build.json` pins the fork release `v18.20.0-int.20261
 
 | Where | Owns after cut-over | Secrets |
 |---|---|---|
-| `andrebrait/oh-my-pi` (the fork) | the omp round on branch `fork-ci` (workflows, config, fixups, repair prompt, helper scripts); releases `v<upstream>-int.<stamp>.g<sha7>` with binaries and an npm package zip; `integration-release`; `apple-sdk` mirror; escalation issues | Environment `omp-round` (only `fork-ci`): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OMP_FORK_TOKEN` (fallback only, F3). Everything else uses the workflow's own `GITHUB_TOKEN` |
+| `ompweb-dev/oh-my-pi` (the fork) | the omp round on branch `fork-ci` (workflows, config, fixups, repair prompt, helper scripts); releases `v<upstream>-int.<stamp>.g<sha7>` with binaries and an npm package zip; `integration-release`; `apple-sdk` mirror; escalation issues | Environment `omp-round` (only `fork-ci`): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OMP_FORK_TOKEN` (fallback only, F3). Everything else uses the workflow's own `GITHUB_TOKEN` |
 | `kahme247/ompweb` | `runner/` pinned to one fork release's packages; every (pre)release re-pins to the newest `integration-release` build; the omp row follows ompweb | none |
 | `andrebrait/integration-ci` | the `integration` script (single copy); graphify, superpowers and ompweb builds; its omp workflows, scripts, config, fixups, releases and omp secrets are deleted after cut-over | omp secrets removed |
 
@@ -43,7 +43,7 @@ What the default-branch switch changes:
 
 - **Upstream's workflows in the fork** run today: `CI` and `Warm bun store cache` on pushes to `main` (every mirror sync), `OMP Nix` on its schedule and on every `v*` tag (each `-int.` release starts a Nix build), `os-session-tests`, `windows-rename-probe`, `Windows EPIPE regression`, `Copilot`. All are disabled (decided, F2).
 - **`gh pr create`** from the local oh-my-pi checkout keeps targeting upstream (`gh repo set-default can1357/oh-my-pi`). A PR opened inside the fork defaults to base `fork-ci`; pass `--base main`. `sync_fork_base` already passes `--base`.
-- **"Sync fork" / `gh repo sync`** act on the default branch: sync the mirror with `integration` or `gh repo sync andrebrait/oh-my-pi -b main`, never the bare command or the web button. The `fork-ci` README says so. Only the user's own GitHub UI clicks are affected (decided acceptable).
+- **"Sync fork" / `gh repo sync`** act on the default branch: sync the mirror with `integration` or `gh repo sync ompweb-dev/oh-my-pi -b main`, never the bare command or the web button. The `fork-ci` README says so. Only the user's own GitHub UI clicks are affected (decided acceptable).
 - Clones check out `fork-ci`; `origin/HEAD` moves. The script uses explicit refs everywhere.
 - 60 days without repository activity disables the fork's schedules; releases are frequent, so no keep-alive (decided).
 
@@ -77,7 +77,7 @@ Push with `GITHUB_TOKEN` first, then retry once with `OMP_FORK_TOKEN` (fine-grai
 | `TEST_CMD` (line 25 list) | remove `rpc-native-input`, `rpc-input-frame`, `rpc-prompt-result`, `rpc-skill-command`, `rpc-compatible-primitives`, `rpc-extension-ui`; comment loses "and host RPC contracts" |
 | `TEST_CMD` (lines 59–60) | delete "Carried PR #18646 (RPC form dialog) contract tests" and its separate `bun test …rpc-extension-ui.test.ts packages/tui/test/html-form.test.ts` process |
 | fixups | `18668-prompt-claim-optional.patch`, `18668-resolve.patch`, `18668-skill-command-client-message-id.patch` are not copied to `fork-ci` |
-| `CI_REPO` / `CI_WORKFLOW` / `CI_CONFIG_REF` | `andrebrait/oh-my-pi` / `omp.yml` / `origin/fork-ci` (F8) |
+| `CI_REPO` / `CI_WORKFLOW` / `CI_CONFIG_REF` | `ompweb-dev/oh-my-pi` / `omp.yml` / `origin/fork-ci` (F8) |
 | `STACKED_PRS` | unchanged |
 
 10 `packages/coding-agent/test/rpc-*.test.ts` occurrences (`rpc-extension-ui` twice). Merged upstream RPC work (#18929, #18930, earlier `feat(rpc)` PRs) is in the base release. #14148, #14458 (stacked on #14148) and #14608 stay (decided). Resolution patches written with #18668/#18646 present may stop applying; the first round's `integrate-repair` or a local `integration rebuild` refreshes them.
@@ -125,7 +125,7 @@ Host wiring (the build host): a worktree of `fork-ci`. `~/.config/integration` b
 
 Release contract (from the update-source note; `feat/configurable-update-source` at `ef93b0ad`, 19/19 tests incl. an all-digit leading-zero hash):
 
-1. Compile with `PI_UPDATE_REPO=andrebrait/oh-my-pi` in the env of `bun run ci:release:build-binaries`.
+1. Compile with `PI_UPDATE_REPO=ompweb-dev/oh-my-pi` in the env of `bun run ci:release:build-binaries`.
 2. Tag = `v` + exactly what `omp --version` reports (post-install check requires equality, else rollback).
 3. Version format: `<upstream version>-int.<YYYYMMDDHHMM UTC>.g<sha7>`, e.g. `18.20.0-int.202611130355.gd2c2eff`.
    The numeric time identifier makes same-base builds sort (verified with `compareVersions` and `Bun.semver.order`); the `g` keeps an all-digit hash from becoming a numeric identifier with a leading zero (decided).
@@ -140,7 +140,7 @@ Build step (each `binaries` matrix job), verbatim from the note:
            shell: bash
            env:
               RELEASE_TARGETS: ${{ matrix.target }}
-              PI_UPDATE_REPO: andrebrait/oh-my-pi
+              PI_UPDATE_REPO: ompweb-dev/oh-my-pi
               SHA: ${{ inputs.sha }}
            run: |
               set -euo pipefail
@@ -162,7 +162,7 @@ rel="v$version-int.$stamp.g${SHA:0:7}"
 **Natives version (addition beyond the note).** Only `packages/utils/package.json` feeds `VERSION`, and with the note's step alone the natives keep `18.20.0`, which is correct for loading. But the natives loader keys its extracted-addon cache by the natives package's own version (`loader-state.js`: `versionedDir = path.join(nativesDir, packageVersion)`, `packageVersion` from `packages/natives/package.json`), so upstream omp, fork omp and `ompweb-omp` on one machine would share `~/.omp/natives/18.20.0/`, checked only by version and size. To separate them, the same stamp is appended to `packages/natives/package.json` with the identical `jq` line (`… packages/natives/package.json > "$RUNNER_TEMP/natives.json"`, then `mv`) in **every** job that builds or embeds natives — `natives` (before `bazel-natives.ts`, which stamps that version into each addon after linking, so bazel's caches are unaffected), `binaries` and `pack` — so the addon stamp, the leaf packages and the embedded manifest agree. Doing it in only some of those jobs makes the loader reject the addon. This needs one `binaries` run to confirm (plan Task 5).
 
 - **Idempotence.** An sha that already has a new-format release (tag ending `.g<sha7>`) is not released again.
-- **Smoke.** `bin/omp --version` must print `omp/$VERSION`; the linux-x64 binary must contain `andrebrait/oh-my-pi` (fails the build if the update-source PR dropped out).
+- **Smoke.** `bin/omp --version` must print `omp/$VERSION`; the linux-x64 binary must contain `ompweb-dev/oh-my-pi` (fails the build if the update-source PR dropped out).
 - **Rolling `oh-my-pi` release** (manual `integration build`): same `version` job and define.
 - **Old-format tags.** `v<base>-int.<sha7>` tags (`v18.19.0-int.77d6529`, `v18.20.0-int.d2c2eff`, …) sort above new ones of the same base when the sha has a letter. Cut-over deletes every old-format release and tag; `release` and prune only handle the new format, so the old one is never reused.
 - **Bootstrap.** Existing fork binaries report the plain base version and update from Stencil: `omp update` or `update.auto` would move them to upstream's binary on upstream's next release. The first stamped build is installed by hand; on the build host the deploy (F8) does that. After that, updates come from fork releases.
@@ -172,7 +172,7 @@ rel="v$version-int.$stamp.g${SHA:0:7}"
 
 ### W1. `runner/` against the fork's packages (LibSpike option A)
 
-- `runner/omp-build.json` (committed): `{ "repo": "andrebrait/oh-my-pi", "tag": "v18.20.0-int.<stamp>.g<sha7>" }` — **the pin**.
+- `runner/omp-build.json` (committed): `{ "repo": "ompweb-dev/oh-my-pi", "tag": "v18.20.0-int.<stamp>.g<sha7>" }` — **the pin**.
 - `runner/vendor/` (git-ignored) holds the unzipped `omp-packages-<version>.zip`.
 - `runner/package.json`: the three direct `@oh-my-pi/*` dependencies become `file:./vendor/<file>.tgz`; `overrides` map **every** `@oh-my-pi/*` package (all 12) **and every native leaf** (all 6) to `file:./vendor/<file>.tgz`. Without a leaf override, `bun install` silently pulls upstream's npm leaf of the same version and the runner embeds upstream's addon (LibSpike pitfall); with the stamped natives version (F9) a missing override fails instead, because no npm leaf has that version. `patchedDependencies` and `runner/patches/` are deleted.
 - `runner/bun.lock` records each `file:` tarball with its sha512; `--frozen-lockfile` fails on a tampered or different tarball.
@@ -187,9 +187,9 @@ rel="v$version-int.$stamp.g${SHA:0:7}"
 
 `prerelease.yml` and `publish.yml`, before `sh scripts/build-release-binaries.sh`:
 
-1. `sha=$(gh api repos/andrebrait/oh-my-pi/commits/integration-release --jq .sha)`; `tag` = the fork release matching `^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.g${sha:0:7}$`. `GITHUB_TOKEN` reads public repositories; no secret.
+1. `sha=$(gh api repos/ompweb-dev/oh-my-pi/commits/integration-release --jq .sha)`; `tag` = the fork release matching `^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.g${sha:0:7}$`. `GITHUB_TOKEN` reads public repositories; no secret.
 2. `npx bun runner/scripts/use-omp-build.ts "$tag"`, then `(cd runner && npx bun x tsc -p .)`.
-3. Notes gain `omp: andrebrait/oh-my-pi <tag>`.
+3. Notes gain `omp: ompweb-dev/oh-my-pi <tag>`.
 
 `integration-release` moves only after its release exists. If the build has no package zip or the runner fails `tsc` against it, the (pre)release **fails** (decided); a human fixes the runner or the round. The re-pin is not committed back. Added time: about 1 minute plus the runner builds already there. ompweb gains no secrets, environments or triggers.
 
@@ -240,13 +240,13 @@ None.
 
 ## Decisions recorded (2026-11-13)
 
-- The round lives in `andrebrait/oh-my-pi` on default branch `fork-ci`; releases, `apple-sdk` and escalation issues on the fork; integration-ci keeps only the script and its other builds; ompweb has no secrets and builds no omp.
-- `fork-ci` as default branch is fine; sync the mirror with `integration` or `gh repo sync andrebrait/oh-my-pi -b main`.
+- The round lives in `ompweb-dev/oh-my-pi` on default branch `fork-ci`; releases, `apple-sdk` and escalation issues on the fork; integration-ci keeps only the script and its other builds; ompweb has no secrets and builds no omp.
+- `fork-ci` as default branch is fine; sync the mirror with `integration` or `gh repo sync ompweb-dev/oh-my-pi -b main`.
 - All upstream workflows are disabled in the fork (F2). No inactivity keep-alive.
 - Tokens: `GITHUB_TOKEN` first, PAT retry only on a `workflows`-permission refusal; no token spike.
 - The round also runs when any carried PR's head changes (F5).
 - #14148, #14458, #14608 stay; #18646 dropped; #18668 is RPC-only, in `SKIP_PRS` (F4).
-- Fork versions `<upstream>-int.<YYYYMMDDHHMM>.g<sha7>`, stamp = integration commit's committer time in UTC, computed once; tags `v` + that version; binaries compiled with `PI_UPDATE_REPO=andrebrait/oh-my-pi`; old-format tags deleted, never reused (F9).
+- Fork versions `<upstream>-int.<YYYYMMDDHHMM>.g<sha7>`, stamp = integration commit's committer time in UTC, computed once; tags `v` + that version; binaries compiled with `PI_UPDATE_REPO=ompweb-dev/oh-my-pi`; old-format tags deleted, never reused (F9).
 - ompweb's runner uses the fork's own npm tarballs (LibSpike option A) from one `omp-packages-<version>.zip` per promoted release, `file:` deps plus overrides for every package and leaf, sha512-pinned in `bun.lock` (W1).
 - Pin bumps are manual; every (pre)release re-pins to the newest `integration-release` build and fails if it cannot (W1, W2).
 - The omp row is read-only, "Updated with ompweb" (W3).

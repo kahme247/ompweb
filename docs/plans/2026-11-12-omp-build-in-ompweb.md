@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** the omp round runs in `andrebrait/oh-my-pi` from its default branch `fork-ci` (RPC dropped; also triggered by carried-PR changes; escalating on the fork; fork binaries versioned `<upstream>-int.<stamp>.g<sha7>` and updating from fork releases; each promoted release carrying an npm package zip). ompweb's `runner/` compiles against that zip, every ompweb (pre)release re-pins to the newest `integration-release` build, and the omp row follows ompweb. integration-ci keeps only the script and its other builds.
+**Goal:** the omp round runs in `ompweb-dev/oh-my-pi` from its default branch `fork-ci` (RPC dropped; also triggered by carried-PR changes; escalating on the fork; fork binaries versioned `<upstream>-int.<stamp>.g<sha7>` and updating from fork releases; each promoted release carrying an npm package zip). ompweb's `runner/` compiles against that zip, every ompweb (pre)release re-pins to the newest `integration-release` build, and the omp row follows ompweb. integration-ci keeps only the script and its other builds.
 
 **Spec:** `docs/specs/2026-11-12-omp-build-in-ompweb-design.md` (F1–F9, W1–W3, cleanup). Read it first. No open questions.
 
@@ -10,7 +10,7 @@
 
 **Owners and places:**
 - **integration-ci** — `andrebrait/integration-ci` (a local checkout), CI reads its `main`; the script's only home. Tasks I1, I2, I3.
-- **fork-ci** — orphan branch `fork-ci` of `andrebrait/oh-my-pi`, in a worktree of the local oh-my-pi checkout. Sources: integration-ci at `5db42d1`. Tasks K1–K7.
+- **fork-ci** — orphan branch `fork-ci` of `ompweb-dev/oh-my-pi`, in a worktree of the local oh-my-pi checkout. Sources: integration-ci at `5db42d1`. Tasks K1–K7.
 - **ompweb** — `kahme247/ompweb`, PR #473 (`feat/omp-runner`). Tasks W1–W3.
 
 Order: I1 → K1–K4 → K5 → K6 → W1+W2+I2 (PR B) → W3 (PR C) → K7 → I3.
@@ -48,9 +48,9 @@ Order: I1 → K1–K4 → K5 → K6 → W1+W2+I2 (PR B) → W3 (PR C) → K7 →
 **Files:** copy from integration-ci `.github/workflows/{omp-auto,omp,publish}.yml`, `.github/actions/{omp-agent,omp-round}/`, `config/root--git--oh-my-pi.sh`, `config/fixups/root--git--oh-my-pi/*.patch` (without `18668-*`), `prompts/omp-repair.md`, `scripts/{collect-round,commit-fixups,publish-round,push-rebased}.sh`; create `.github/workflows/fork-guard.yml`, `README.md`.
 
 - [x] `git -C <oh-my-pi checkout> worktree add --orphan -b fork-ci <fork-ci worktree>`; copy keeping paths.
-- [x] Config (F4): `EXTRA_PRS='7851=carry/pr-7851'`; `SKIP_PRS='18668'` with a one-line why; the ten `rpc-*` tests and the #18646 `TEST_CMD+=` line and comment removed; "and host RPC contracts" removed; `CI_REPO=andrebrait/oh-my-pi`, `CI_WORKFLOW=omp.yml`, `CI_CONFIG_REF=origin/fork-ci`. Make sure the update-source PR (`feat/configurable-update-source`) is carried: open upstream, or a fork-qualified `EXTRA_PRS` entry until it is.
+- [x] Config (F4): `EXTRA_PRS='7851=carry/pr-7851'`; `SKIP_PRS='18668'` with a one-line why; the ten `rpc-*` tests and the #18646 `TEST_CMD+=` line and comment removed; "and host RPC contracts" removed; `CI_REPO=ompweb-dev/oh-my-pi`, `CI_WORKFLOW=omp.yml`, `CI_CONFIG_REF=origin/fork-ci`. Make sure the update-source PR (`feat/configurable-update-source`) is carried: open upstream, or a fork-qualified `EXTRA_PRS` entry until it is.
 - [x] `fork-guard.yml` (F2): `schedule` `0 5 * * *` + `workflow_dispatch`; `permissions: actions: write`; disables every active workflow whose `path` is not a file in this checkout.
-- [x] `README.md`: what `fork-ci` is; never merge it; sync `main` only with `integration` or `gh repo sync andrebrait/oh-my-pi -b main`; PRs inside the fork need `--base main`.
+- [x] `README.md`: what `fork-ci` is; never merge it; sync `main` only with `integration` or `gh repo sync ompweb-dev/oh-my-pi -b main`; PRs inside the fork need `--base main`.
 - [x] `prompts/omp-repair.md` and script comments: integration-ci → the fork's `fork-ci`; script at `tools/integration`; fixups commit to `fork-ci`.
 - [x] Verify: `source config/root--git--oh-my-pi.sh; grep -c 'rpc-' <<<"$TEST_CMD"` prints `0`; `bash -n scripts/*.sh`. Commit `ci: the omp integration round, moved from integration-ci`.
 
@@ -73,7 +73,7 @@ Order: I1 → K1–K4 → K5 → K6 → W1+W2+I2 (PR B) → W3 (PR C) → K7 →
 - [x] `omp.yml` first job `version` (no fork code; `contents: read`; blobless clone at `inputs.sha`): the release-tag lines from F9 verbatim (`stamp=…`, `version="$(jq -r .version packages/utils/package.json)"`, `rel="v$version-int.$stamp.g${SHA:0:7}"`); outputs `stamp`, `version` (`${rel#v}`), `tag` (`$rel`); `workflow_call` outputs `version`, `tag`.
 - [x] `binaries` "Build release binary": F9's snippet verbatim, plus the natives line (same `jq` on `packages/natives/package.json`).
 - [x] `natives`: before `bazel-natives.ts`, the same stamp and natives `jq` line. `pack` (K4): utils and natives lines.
-- [x] `smoke`: `bin/omp --version` (and `omp.exe`) == `omp/${{ needs.version.outputs.version }}`; linux-x64: `grep -c andrebrait/oh-my-pi bin/omp` > 0.
+- [x] `smoke`: `bin/omp --version` (and `omp.exe`) == `omp/${{ needs.version.outputs.version }}`; linux-x64: `grep -c ompweb-dev/oh-my-pi bin/omp` > 0.
 - [x] `omp-auto.yml` `release`: tag `${{ needs.build.outputs.tag }}`; fail unless it matches `^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.g[0-9a-f]{7}$` and its base equals the round's tag without `v`; skip when a release whose tag ends `.g<sha7>` exists; `--latest`, never `--prerelease`/`--draft`. Prune only the new format.
 - [x] `publish.yml` callers: same `version` job.
 - [x] Verify `actionlint`; K5's round. Commit `ci: stamp fork versions and update fork binaries from fork releases`.
@@ -90,18 +90,18 @@ Order: I1 → K1–K4 → K5 → K6 → W1+W2+I2 (PR B) → W3 (PR C) → K7 →
 ### Task K5 (fork, operational; user is fork admin): cut-over round
 
 - [x] User: Environment `omp-round`, deployment branches `fork-ci` only, secrets `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OMP_FORK_TOKEN` (fine-grained, this repository, Contents + Workflows write).
-- [x] `git -C <fork-ci worktree> push origin fork-ci`; `gh api -X PATCH repos/andrebrait/oh-my-pi -f default_branch=fork-ci`.
-- [x] `gh release download apple-sdk -R andrebrait/integration-ci -D /tmp/sdk && gh release create apple-sdk -R andrebrait/oh-my-pi --latest=false --title "Apple SDK mirror" --notes "SHA256-named Apple SDK packages for the bazel darwin toolchain" /tmp/sdk/*.pkg`.
-- [x] `gh workflow run fork-guard.yml -R andrebrait/oh-my-pi`; `gh workflow list -R andrebrait/oh-my-pi` shows only `fork-ci`'s workflows active.
+- [x] `git -C <fork-ci worktree> push origin fork-ci`; `gh api -X PATCH repos/ompweb-dev/oh-my-pi -f default_branch=fork-ci`.
+- [x] `gh release download apple-sdk -R andrebrait/integration-ci -D /tmp/sdk && gh release create apple-sdk -R ompweb-dev/oh-my-pi --latest=false --title "Apple SDK mirror" --notes "SHA256-named Apple SDK packages for the bazel darwin toolchain" /tmp/sdk/*.pkg`.
+- [x] `gh workflow run fork-guard.yml -R ompweb-dev/oh-my-pi`; `gh workflow list -R ompweb-dev/oh-my-pi` shows only `fork-ci`'s workflows active.
 - [x] `gh workflow disable omp-auto.yml -R andrebrait/integration-ci`.
-- [x] Delete old-format releases and tags: `gh release list -R andrebrait/oh-my-pi --limit 100 --json tagName --jq '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9a-f]{7}$' | xargs -r -n1 gh release delete -R andrebrait/oh-my-pi --cleanup-tag --yes`.
-- [x] `gh workflow run omp-auto.yml -R andrebrait/oh-my-pi -f force=true`; watch (cold bazel cache, up to ~2 h). Expected: a Latest release `v<base>-int.<stamp>.g<sha7>` (stamp = the integration commit's committer minute, UTC) listing #19075 and the update-source PR, neither #18646 nor #18668; binaries print the tag without `v`; `omp-packages-<version>.zip` with 18 tarballs; no `OMP Nix` run on the tag. A failure opens an `omp-auto` issue on the fork; fix, re-dispatch.
+- [x] Delete old-format releases and tags: `gh release list -R ompweb-dev/oh-my-pi --limit 100 --json tagName --jq '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9a-f]{7}$' | xargs -r -n1 gh release delete -R ompweb-dev/oh-my-pi --cleanup-tag --yes`.
+- [x] `gh workflow run omp-auto.yml -R ompweb-dev/oh-my-pi -f force=true`; watch (cold bazel cache, up to ~2 h). Expected: a Latest release `v<base>-int.<stamp>.g<sha7>` (stamp = the integration commit's committer minute, UTC) listing #19075 and the update-source PR, neither #18646 nor #18668; binaries print the tag without `v`; `omp-packages-<version>.zip` with 18 tarballs; no `OMP Nix` run on the tag. A failure opens an `omp-auto` issue on the fork; fix, re-dispatch.
 
 ### Task K6 (fork / build host): rewiring and bootstrap (spec F8, F9)
 
 - [ ] Replace the `~/.config/integration` symlink with a directory: per-file symlinks into the integration-ci checkout's `config/` for everything but the omp config and fixups (keep `.retired-*`); `root--git--oh-my-pi.sh` and `fixups/root--git--oh-my-pi` → the `fork-ci` worktree's `config/…`.
 - [x] In the oh-my-pi checkout: `git fetch origin && git branch -f integration origin/integration-release && integration build && integration deploy`.
-- [ ] Verify: the deployed omp's `--version` prints the stamped version; `HOME=$(mktemp -d) <deployed omp> update --check` asks `api.github.com/repos/andrebrait/oh-my-pi` and reports up to date; `integration prs` still finds the graphify, superpowers and ompweb configs. Other machines on older fork binaries: install this release by hand once.
+- [ ] Verify: the deployed omp's `--version` prints the stamped version; `HOME=$(mktemp -d) <deployed omp> update --check` asks `api.github.com/repos/ompweb-dev/oh-my-pi` and reports up to date; `integration prs` still finds the graphify, superpowers and ompweb configs. Other machines on older fork binaries: install this release by hand once.
 
 ### Task W1 (ompweb): runner against the fork's packages (spec W1)
 
@@ -125,7 +125,7 @@ Order: I1 → K1–K4 → K5 → K6 → W1+W2+I2 (PR B) → W3 (PR C) → K7 →
 **Files:** `.github/workflows/prerelease.yml`, `.github/workflows/publish.yml`.
 
 - [x] Before `Build the release binaries` in both: resolve `sha` and `tag` (spec W2 step 1, `GH_TOKEN: ${{ github.token }}`); no match → fail with a clear message; `npx bun runner/scripts/use-omp-build.ts "$tag" && (cd runner && npx bun x tsc -p .)`; export `OMP_TAG`. `build-release-binaries.sh`'s own fetch then finds the re-pinned `omp-build.json`.
-- [x] Notes: prerelease `--notes` and the draft release notes gain `omp: andrebrait/oh-my-pi $OMP_TAG`.
+- [x] Notes: prerelease `--notes` and the draft release notes gain `omp: ompweb-dev/oh-my-pi $OMP_TAG`.
 - [ ] Verify `actionlint`; after merge, the next pre-release names the current `integration-release` tag and its `ompweb-omp --version` prints it without `v`.
 - [x] Commit `ci(release): ship the newest omp integration build with every release`. (Landed in PR #473 instead of a separate PR B.)
 
@@ -151,4 +151,4 @@ Order: I1 → K1–K4 → K5 → K6 → W1+W2+I2 (PR B) → W3 (PR C) → K7 →
 
 ## Rollback
 
-Before I3: `gh api -X PATCH repos/andrebrait/oh-my-pi -f default_branch=main`, `gh workflow enable omp-auto.yml -R andrebrait/integration-ci`, restore the `~/.config/integration` symlink, copy new `fork-ci` fixups back to integration-ci. Revert PR B (with I2) and PR C independently.
+Before I3: `gh api -X PATCH repos/ompweb-dev/oh-my-pi -f default_branch=main`, `gh workflow enable omp-auto.yml -R andrebrait/integration-ci`, restore the `~/.config/integration` symlink, copy new `fork-ci` fixups back to integration-ci. Revert PR B (with I2) and PR C independently.
