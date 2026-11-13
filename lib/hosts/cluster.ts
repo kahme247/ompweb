@@ -1,19 +1,16 @@
 // Pure computation of cluster membership (spec M3, M6): no disk, network or clock.
-// Browser-importable: only types from ./pools (it loads node:fs), no node:* modules; ./link-protocol is pure.
+// Browser-importable: only types from ./pools (it loads node:fs), no node:* modules.
 import { comparableProjectPath } from "../comparable-path";
 import { cloneDirectoryName, repositoryKey } from "../git-clone";
 import { LOCAL_HOST_ID } from "../project-ordering";
 import { isNewerVersion } from "../version-compare";
 import type { ManagedProject } from "../types";
 import type { HostStatus } from "./host";
-import { CLUSTER_CONFIG_SINCE_VERSION } from "./link-protocol";
 import type { HostPool, PoolProject } from "./pools";
 
 export const CLUSTER_ID = "cluster";
 export const CLUSTER_LABEL = "Cluster";
 export const CLUSTER_PROJECTS_DIR = "ompweb-cluster";
-/** The first link protocol whose daemons can be cluster members (they apply the master's configuration); they also need the `gitOrigins` operation. */
-export const CLUSTER_SINCE_VERSION = CLUSTER_CONFIG_SINCE_VERSION;
 /** The first omp that honours the broker variables; an older one could start with the host's own logins. */
 export const MIN_SHARED_CREDENTIALS_OMP = "15.13.1";
 
@@ -25,12 +22,12 @@ export function ompSharesCredentials(version: string | null): boolean {
 
 /**
  * Why a host cannot join the cluster now, or null: the one rule behind the join route and the Settings switch.
- * Non-online hosts retain their status as the reason; online hosts need the protocol and operation below ("upgrade"),
- * then an omp that takes shared credentials, which members always use ("omp-old").
+ * Non-online hosts retain their status as the reason; online ones (older link protocols are refused at link time) need the
+ * operation below ("upgrade"), then an omp that takes shared credentials, which members always use ("omp-old").
  */
-export function clusterJoinBlock(host: { status: HostStatus; protocol: number | null; ompVersion: string | null; supports: (operation: "gitOrigins") => boolean }): Exclude<HostStatus, "online"> | "upgrade" | "omp-old" | null {
+export function clusterJoinBlock(host: { status: HostStatus; ompVersion: string | null; supports: (operation: "gitOrigins") => boolean }): Exclude<HostStatus, "online"> | "upgrade" | "omp-old" | null {
   if (host.status !== "online") return host.status;
-  if ((host.protocol ?? 0) < CLUSTER_SINCE_VERSION || !host.supports("gitOrigins")) return "upgrade";
+  if (!host.supports("gitOrigins")) return "upgrade";
   return ompSharesCredentials(host.ompVersion) ? null : "omp-old";
 }
 

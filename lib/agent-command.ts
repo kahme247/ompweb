@@ -20,13 +20,6 @@ export const NO_SPAWN_REPLIES: Record<string, unknown> = {
   btw_cancel: { cancelled: false },
 };
 
-// Live diagnostics of a skill-resolving omp. A saved or exited session has none,
-// and resuming a full child (MCP, LSP) just to answer a read-only inspection or
-// flip one setting is not what the click asked for: with no live wrapper these
-// answer 409 instead of starting omp, and a live idle child is never replaced
-// because the advisor flag differs.
-const LIVE_SESSION_ONLY = new Set(["get_skill_diagnostics", "set_skill_startup_diagnostics"]);
-
 /** omp-web's own failures carry a stable code the client can localize; omp's
  * errors stay opaque English text. */
 export function commandErrorResponse(error: unknown): Response {
@@ -114,9 +107,8 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     let resumeId = id;
     let resumeHost: AgentSessionWrapper["host"] | undefined;
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, type);
-    const liveOnly = LIVE_SESSION_ONLY.has(type);
     if (existing?.isAlive()) {
-      if (noSpawn || liveOnly || (existing.adopted && !existing.hostOwnedLifecycle)
+      if (noSpawn || (existing.adopted && !existing.hostOwnedLifecycle)
         || existing.advisorSpawned === (advisor === true || existing.launchAdvisor === true) || existing.isRunning() || existing.isEditingHistory()) {
         const result = await send(existing);
         return Response.json({ success: true, data: result });
@@ -129,12 +121,6 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
       if (!existing.hostOwnedLifecycle) await existing.destroyAndWait("advisor", true);
     }
     if (noSpawn) return Response.json({ success: true, data: NO_SPAWN_REPLIES[type] });
-    if (liveOnly) {
-      return Response.json(
-        { error: "Skill diagnostics require a running session", code: "skill_diagnostics_unavailable" },
-        { status: 409 },
-      );
-    }
 
     const resolved = resumeHost ? { host: resumeHost } : await resolveSessionHostOr404(resumeId);
     if ("response" in resolved) return resolved.response;

@@ -5,12 +5,13 @@ import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 
 /**
- * Interactive login over a dedicated `omp --mode rpc-ui` process. omp drives
- * the flow with extension_ui_request frames: `open_url` carries the OAuth URL,
- * `input` asks for the pasted code/redirect URL, `notify` reports progress.
- * The SSE stream keeps pi-web's event names (auth, prompt_request, progress,
- * success, error, cancelled) so the client flow is unchanged; the POST handler
- * feeds the user's pasted value back as an extension_ui_response frame.
+ * Interactive login over a dedicated headless runner. The runner drives the
+ * flow with login frames (runner/src/commands/agents.ts): `login_open_url`
+ * carries the OAuth URL, `login_input` asks for the pasted code/redirect URL,
+ * `login_progress` reports progress. The SSE stream keeps pi-web's event names
+ * (auth, prompt_request, progress, success, error, cancelled) so the client
+ * flow is unchanged; the POST handler feeds the user's pasted value back as a
+ * `login_input_response` frame.
  */
 
 const LOGIN_EXTRA_ARGS = ["--no-session", "--no-extensions", "--no-skills", "--no-lsp"];
@@ -94,41 +95,36 @@ export async function GET(
         }
       }, HEARTBEAT_MS);
 
-      // The user may paste the code before omp's input request arrives (the
-      // auth event shows the paste box immediately) — buffer one value.
-      let pendingInputId: string | null = null;
+      // The user may paste the code before the runner's input request arrives
+      // (the auth event shows the paste box immediately) — buffer one value.
+      let pendingInputId: number | null = null;
       let bufferedValue: string | null = null;
 
       let proc: RpcProcess | null = null;
       const handleFrame = (frame: RpcFrame) => {
-        if (frame.type !== "extension_ui_request") return;
-        const method = frame.method;
-        if (method === "open_url") {
+        if (frame.type === "login_open_url") {
           send({
             type: "auth",
             url: String(frame.url ?? ""),
             instructions: typeof frame.instructions === "string" ? frame.instructions : null,
             token,
           });
-        } else if (method === "input") {
-          const id = String(frame.id);
+        } else if (frame.type === "login_input" && typeof frame.id === "number") {
           if (bufferedValue !== null) {
             const value = bufferedValue;
             bufferedValue = null;
-            proc?.sendFrame({ type: "extension_ui_response", id, value });
+            proc?.sendFrame({ type: "login_input_response", id: frame.id, value });
           } else {
-            pendingInputId = id;
+            pendingInputId = frame.id;
             send({
               type: "prompt_request",
-              message: typeof frame.title === "string" ? frame.title : "Enter the authorization code",
+              message: typeof frame.prompt === "string" ? frame.prompt : "Enter the authorization code",
               placeholder: typeof frame.placeholder === "string" ? frame.placeholder : null,
               token,
             });
           }
-        } else if (method === "notify") {
+        } else if (frame.type === "login_progress") {
           if (typeof frame.message === "string") send({ type: "progress", message: frame.message });
-        } else if (method === "cancel") {
-          if (pendingInputId !== null && frame.targetId === pendingInputId) pendingInputId = null;
         }
       };
 
@@ -149,7 +145,7 @@ export async function GET(
           if (pendingInputId !== null) {
             const id = pendingInputId;
             pendingInputId = null;
-            child.sendFrame({ type: "extension_ui_response", id, value });
+            child.sendFrame({ type: "login_input_response", id, value });
           } else {
             bufferedValue = value;
           }
@@ -164,8 +160,7 @@ export async function GET(
       req.signal.addEventListener("abort", cleanup);
 
       try {
-        const ready = await child.waitReady(READY_TIMEOUT_MS);
-        await child.negotiateProtocol(ready);
+        await child.waitReady(READY_TIMEOUT_MS);
         await child.sendCommand({ type: "login", providerId: provider }, LOGIN_TIMEOUT_MS);
         enableProvider(provider);
         invalidateModelsCache();

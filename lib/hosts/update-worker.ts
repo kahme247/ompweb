@@ -238,8 +238,10 @@ async function stageBinary(d: HostUpdateDescriptor, staging: string): Promise<st
     }
   }
   const binary = join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb");
+  const runner = join(release, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp");
+  if (!existsSync(join(release, "dist", "index.html")) || !existsSync(runner)) throw new Error("Incomplete host binary release layout");
   chmodSync(binary, 0o755);
-  if (!existsSync(join(release, "dist", "index.html")) || !existsSync(join(release, "lib", "omp", "session-edit-extension.mjs"))) throw new Error("Incomplete host binary release layout");
+  chmodSync(runner, 0o755);
   if (!(await binaryReportsVersion(binary, release, d.version))) throw new Error("Downloaded host binary reports a different version");
   return release;
 }
@@ -332,6 +334,28 @@ export async function verifyHostServiceInstall(service: NonNullable<HostUpdateDe
 async function binaryReportsVersion(binary: string, packageDir: string, version: string): Promise<boolean> {
   const { stdout } = await exec(binary, ["--version"], { timeout: 10000, env: workerEnvironment({ OMP_WEB_PACKAGE_DIR: packageDir }), maxBuffer: 1024 * 1024 });
   return stdout.trim().split(/\s+/).some((token) => token.replace(/^v/, "") === version);
+}
+/** PREFLIGHT_MARKER (lib/hosts/preflight.ts), encoded so this module, bundled into the same binary, does not embed it. */
+export const PREFLIGHT_MARKER_BASE64 = "b21wd2ViLXByZWZsaWdodC1zY3JhdGNoLQ==";
+/** The candidate's `ompweb preflight` (lib/hosts/preflight.ts) in this host's environment: the session omp it resolves
+ * must start and say hello before the switch. A new release without the command gets it only if it has no runner
+ * either; a restart-only update of an install that predates the command restarts what already runs. */
+async function preflightHostRelease(d: HostUpdateDescriptor, release: string): Promise<void> {
+  const binary = d.installMethod === "binary";
+  const entry = binary ? join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb") : join(release, "bin", "omp-web.js");
+  // Detected statically: an older ompweb takes `preflight` for a positional and starts the web server.
+  if (!(binary ? readFileSync(entry).includes(Buffer.from(PREFLIGHT_MARKER_BASE64, "base64")) : existsSync(join(release, "lib", "hosts", "preflight.ts")))) {
+    const runner = binary || Object.keys(JSON.parse(readFileSync(join(release, "package.json"), "utf8")).optionalDependencies ?? {}).some((name) => name.startsWith("@kahme247/ompweb-omp-"));
+    if (runner && !d.restartOnly) throw new Error("The new host release has no preflight command to check its omp with");
+    console.warn(`ompweb ${d.version} has no preflight command; its omp was not checked`);
+    return;
+  }
+  try {
+    await exec(binary ? entry : d.runtime, binary ? ["preflight"] : [entry, "preflight"], { cwd: release, timeout: 60000, env: workerEnvironment(), maxBuffer: 1024 * 1024, windowsHide: true });
+  } catch (error) {
+    const detail = String((error as { stderr?: unknown }).stderr ?? "").trim() || (error instanceof Error ? error.message : String(error));
+    throw new Error(`The new host release cannot start a session: ${detail.slice(-500)}`);
+  }
 }
 /** The installation on disk already holds `version`: what a restart-only update relies on. */
 export async function installedHostVersionMatches(method: HostUpdateDescriptor["installMethod"], installDir: string, version: string): Promise<boolean> {
@@ -490,7 +514,7 @@ function validateDescriptor(path: string): HostUpdateDescriptor {
   if (!parent.isDirectory() || parent.isSymbolicLink() || (process.getuid && parent.uid !== process.getuid()) || (process.platform !== "win32" && (parent.mode & 0o022))) throw new Error("Unsafe host installation parent directory");
   if (d.installMethod === "binary") {
     hostReleaseName();
-    if (!existsSync(join(d.installDir, process.platform === "win32" ? "ompweb.exe" : "ompweb")) || !existsSync(join(d.installDir, "dist", "index.html")) || !existsSync(join(d.installDir, "lib", "omp", "session-edit-extension.mjs"))) throw new Error("Incomplete host binary release layout");
+    if (!existsSync(join(d.installDir, process.platform === "win32" ? "ompweb.exe" : "ompweb")) || !existsSync(join(d.installDir, "dist", "index.html")) || !existsSync(join(d.installDir, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp"))) throw new Error("Incomplete host binary release layout");
   } else {
     if (basename(d.installDir) !== "ompweb" || basename(dirname(d.installDir)) !== "@kahme247" || basename(dirname(dirname(d.installDir))) !== "node_modules") throw new Error("Package updates require an installed npm/bun package layout");
     const current = JSON.parse(readFileSync(join(d.installDir, "package.json"), "utf8"));
@@ -528,6 +552,7 @@ export async function runHostUpdateWorker(path: string): Promise<number> {
       const sharingAfterStage = await sharedHostInstallReason(d.installDir, [process.pid, d.daemonPid]);
       if (sharingAfterStage) throw new Error(sharingAfterStage);
     }
+    await preflightHostRelease(d, release ?? d.installDir);
     // The daemon blocks new children for the entire persisted running operation.
     if (readHostUpdateState()?.operation.id !== d.id || readHostUpdateState()?.operation.state !== "running") throw new Error("Host update no longer owns the operation");
     validateDescriptor(path);

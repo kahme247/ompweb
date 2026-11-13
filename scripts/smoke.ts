@@ -1,16 +1,16 @@
 // `npm run smoke [-- --package <dir> | --binary <path>]`: starts ompweb (`node <dir>/bin/omp-web.js`, or the compiled
 // binary) on a free port with a throwaway HOME, then `ompweb host` from the same install, and checks the shipped
-// bundle, the SPA, a hashed asset, the API, a session listed through the daemon, the session-edit extension the daemon
-// hands omp (a stand-in omp records its arguments) and the SSE stream, then stops both.
-// <dir>: the repo root (after `npm run build`) or a packed install; <path>: release/ompweb-<os>-<arch>/ompweb, whose
-// directory holds the static files. Prints one `ok <step>` / `FAIL <step>: <detail>` line per step.
+// bundle, the SPA, a hashed asset, the API, a session listed through the daemon, a live session started through the
+// omp runner (no model call) and the SSE stream, then stops both.
+// <dir>: the repo root (after `npm run build` and `bun runner/scripts/build-binary.ts`) or a packed install;
+// <path>: release/ompweb-<os>-<arch>/ompweb, whose directory holds the static files and the runner (ompweb-omp). Prints one `ok <step>` / `FAIL <step>: <detail>` line per step.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" }, binary: { type: "string" }, "second-server": { type: "boolean" } } });
+const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" }, binary: { type: "string" }, omp: { type: "string" }, "second-server": { type: "boolean" } } });
 const binary = values.binary && path.resolve(values.binary);
 const dir = binary ? path.dirname(binary) : path.resolve(values.package ?? path.join(import.meta.dir, ".."));
 const ompweb = binary ? [binary] : ["node", path.join(dir, "bin", "omp-web.js")];
@@ -77,33 +77,19 @@ writeFileSync(path.join(agentDir, "sessions", "-project", `2026-01-01_${SESSION_
   { type: "message", id: "m0", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: "hello" } },
   { type: "message", id: "m1", parentId: "m0", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } },
 ].map((line) => `${JSON.stringify(line)}\n`).join(""));
-// A stand-in omp: answers the version and update checks, records every run's arguments and fails any other run.
-const ompRuns = path.join(temp, "omp-runs.jsonl");
-const fakeOmp = path.join(temp, process.platform === "win32" ? "omp.cmd" : "omp");
-const fakeOmpSource = `const args = process.argv.slice(2);
-require("node:fs").appendFileSync(${JSON.stringify(ompRuns)}, JSON.stringify(args) + "\\n");
-if (args[0] === "--version") console.log("14.0.0-smoke");
-else if (args[0] === "update") console.log("Current version: 14.0.0-smoke");
-else process.exitCode = 1;
-`;
-// Windows cannot spawn a shebang script: a .cmd runs it, as in lib/hosts/link-integration.test.mjs.
-if (process.platform === "win32") {
-  writeFileSync(`${fakeOmp}.cjs`, fakeOmpSource);
-  writeFileSync(fakeOmp, `@"${process.execPath.replaceAll("%", "%%")}" "${fakeOmp.replaceAll("%", "%%")}.cjs" %*\r\n`);
-} else {
-  writeFileSync(fakeOmp, `#!${process.execPath}\n${fakeOmpSource}`, { mode: 0o755 });
-}
 // USERPROFILE: os.homedir() on Windows, so the real ~/.omp stays untouched there too.
 const env: Record<string, string | undefined> = {
   ...process.env,
   HOME: home,
   USERPROFILE: home,
   PI_CODING_AGENT_DIR: agentDir,
-  OMP_WEB_OMP_BIN: fakeOmp,
   // A smoke launched from an installed agent inherits its package root; test this install instead.
   OMP_WEB_PACKAGE_DIR: dir,
 };
-for (const name of ["OMP_WEB_PASSWORD", "OMP_WEB_PASSWORD_HASH"]) delete env[name];
+// OMP_WEB_OMP_BIN: an agent shell points it at its own omp; test this install's runner instead.
+for (const name of ["OMP_WEB_PASSWORD", "OMP_WEB_PASSWORD_HASH", "OMP_WEB_OMP_BIN"]) delete env[name];
+// --omp <path>: a packed install has no runner of its own until the per-platform runner packages are published.
+if (values.omp) env.OMP_WEB_OMP_BIN = path.resolve(values.omp);
 
 let log = "";
 let launcher: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
@@ -171,12 +157,12 @@ try {
       daemon = child;
       void readText(child.stdout, (text) => { log += text; });
       void readText(child.stderr, (text) => { log += text; });
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + 60_000;
       for (;;) {
         const { hosts } = await (await fetch(`${base}/api/hosts`)).json() as { hosts: { id: string; status: string }[] };
         if (hosts.find((host) => host.id === "local")?.status === "online") break;
         assert(child.exitCode === null, `ompweb host exited with ${child.exitCode}`);
-        assert(Date.now() < deadline, "this machine is not linked 30 s after `ompweb host` started");
+        assert(Date.now() < deadline, "this machine is not linked 60 s after `ompweb host` started");
         await Bun.sleep(200);
       }
     });
@@ -201,7 +187,7 @@ try {
         secondLauncher = child;
         void readText(child.stdout, (text) => { log += text; });
         void readText(child.stderr, (text) => { log += text; });
-        const deadline = Date.now() + 30_000;
+        const deadline = Date.now() + 60_000;
         for (;;) {
           assert(child.exitCode === null, `second server exited with ${child.exitCode}`);
           try {
@@ -223,18 +209,13 @@ try {
       });
     }
 
-    // In the binary the daemon's modules live in Bun's virtual filesystem, which omp cannot read: the extension it
-    // hands omp must be the install's own file.
-    await step("omp starts with the session-edit extension this install ships", async () => {
+    // No model call: the spawn, the runner's hello and the get_state that follows it.
+    await step("a live session starts through the omp runner", async () => {
       const response = await fetch(`${base}/api/agent/${SESSION_ID}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "get_state" }) });
-      // An error answer: the stand-in omp exits at once.
-      await response.arrayBuffer();
-      const runs = readFileSync(ompRuns, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
-      const run = runs.find((args) => args.includes("--extension"));
-      assert(run, `no omp run had --extension: ${JSON.stringify(runs)}`);
-      const extension = run[run.indexOf("--extension") + 1];
-      assert(existsSync(extension), `${extension} does not exist`);
-      assert(realpathSync(extension) === realpathSync(path.join(dir, "lib", "omp", "session-edit-extension.mjs")), `${extension} is not this install's`);
+      const text = await response.text();
+      assert(response.status === 200 && text.includes(SESSION_ID), `get_state: status ${response.status} ${text} (no runner? build it with \`bun runner/scripts/build-binary.ts\`)`);
+      const state = await (await fetch(`${base}/api/agent/${SESSION_ID}`)).json() as { running?: boolean };
+      assert(state.running === true, `GET /api/agent: ${JSON.stringify(state)}`);
     });
 
     if (binary) {
@@ -242,11 +223,6 @@ try {
         const update = await (await fetch(`${base}/api/app-update`)).json() as { installMethod?: string; selfUpdateSupported?: boolean; updateCommand?: string };
         assert(update.installMethod === "binary" && update.selfUpdateSupported === false, JSON.stringify(update));
         assert(update.updateCommand?.startsWith("https://github.com/kahme247/ompweb/releases"), `updateCommand ${update.updateCommand}`);
-        const ompCheck = await (await fetch(`${base}/api/omp-update`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "check" }) })).json() as { selfUpdateSupported?: boolean };
-        assert(ompCheck.selfUpdateSupported === false, `omp update check: ${JSON.stringify(ompCheck)}`);
-        // Started, the worker would run on this binary: a second ompweb, not the update.
-        const response = await fetch(`${base}/api/omp-update`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "update" }) });
-        assert(response.status === 409, `POST /api/omp-update update: status ${response.status}`);
       });
     }
 
@@ -300,7 +276,10 @@ try {
       }
     });
   }
-  await step("temp dirs removed", () => rmSync(temp, { recursive: true, force: true }));
+  // omp's shared brokers (daemon broker, LSP mux, embedding server) detach and outlive the session by design;
+  // on Windows they keep the throwaway HOME locked, so stop every runner process this smoke started.
+  if (process.platform === "win32") Bun.spawnSync(["taskkill", "/f", "/t", "/im", "ompweb-omp.exe"]);
+  await step("temp dirs removed", () => rmSync(temp, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 }));
 }
 
 if (failed && log) console.log(`--- ompweb output ---\n${log}`);

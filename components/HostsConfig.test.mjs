@@ -58,7 +58,7 @@ test("this machine can be renamed but not revoked", async (t) => {
     return Response.json({});
   });
   render(createElement(HostsConfig));
-  const row = (fields) => ({ status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, ...fields });
+  const row = (fields) => ({ status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, workspaceOps: [], ...fields });
   const hosts = [row({ id: "local", label: "" }), row({ id: "h1", label: "Laptop", allowAgentStart: false })];
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
   const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
@@ -84,7 +84,7 @@ test("an offline this-machine row says to start the service, with the server's i
   globalThis.Worker = FakeWorker;
   mockHostRequests(t, async () => Response.json({}));
   render(createElement(HostsConfig));
-  const row = (fields) => ({ id: "local", label: "", status: "offline", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, serverPlatform: "darwin", daemonManaged: true, ...fields });
+  const row = (fields) => ({ id: "local", label: "", status: "offline", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, workspaceOps: [], serverPlatform: "darwin", daemonManaged: true, ...fields });
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
   const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
   const send = (hosts) => act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts }) } }));
@@ -118,7 +118,7 @@ test("the local name hint is the input's description, not part of its label", as
   globalThis.Worker = FakeWorker;
   mockHostRequests(t, async () => Response.json({}));
   render(createElement(HostsConfig));
-  const row = { id: "local", label: "", status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: 3, serverVersion: 3, serverPlatform: "linux", daemonManaged: true };
+  const row = { id: "local", label: "", status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: 3, serverVersion: 3, workspaceOps: [], serverPlatform: "linux", daemonManaged: true };
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
   const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
   act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts: [row] }) } }));
@@ -134,12 +134,12 @@ const software = (overrides = {}) => ({
 });
 const updateInfo = (overrides = {}) => ({
   ompweb: software({ installMethod: "npm", protocolVersion: 3 }),
-  omp: software({ updatesDisabled: false }),
+  omp: { currentVersion: "2.0.0" },
   operation: null, ...overrides,
 });
 const hostRow = (overrides = {}) => ({
   id: "local", label: "", status: "online", ompVersion: "1.0.0", platform: "linux",
-  hostVersion: 3, serverVersion: 3, lastSeenAt: null, ...overrides,
+  hostVersion: 3, serverVersion: 3, lastSeenAt: null, workspaceOps: [], ...overrides,
 });
 async function showHosts(hosts) {
   globalThis.Worker = FakeWorker;
@@ -162,8 +162,11 @@ test("local host shows both installed versions and a blocked candidate with its 
   const row = screen.getByRole("button", { name: "Rename This machine" }).closest("li");
   await within(row).findByText(/Update the web server first: protocol 4 is not supported\./);
   assert.ok(within(row).getByRole("button", { name: "Update ompweb host" }).disabled);
-  assert.equal(within(row).getByRole("button", { name: "Update omp runtime" }).disabled, false);
+  // omp is read-only: it updates with ompweb.
+  assert.equal(within(row).queryByRole("button", { name: "Update omp runtime" }), null);
+  within(row).getByText("Updated with ompweb");
   assert.match(row.textContent, /Current: 1\.0\.0/);
+  assert.match(row.textContent, /Current: 2\.0\.0/);
   assert.match(row.textContent, /Available: 1\.1\.0/);
   assert.deepEqual(urls, ["/api/hosts/local/updates"]);
 });
@@ -199,22 +202,6 @@ test("remote daemon update requires closing host sessions and targets only that 
   view.unmount();
 });
 
-test("runtime update explains existing sessions without forcing any session restart", async (t) => {
-  const requests = [];
-  mockHostRequests(t, async (url, init) => {
-    requests.push([String(url), init?.method ?? "GET", init?.body]);
-    if (init?.method === "POST") return Response.json({ accepted: true, operation: { id: "omp1", target: "omp", version: "1.1.0", state: "succeeded" } }, { status: 202 });
-    return Response.json(updateInfo());
-  });
-  await showHosts([hostRow()]);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "Update omp runtime" }));
-  assert.match(screen.getByRole("dialog").textContent, /existing sessions.*old runtime.*restart/i);
-  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Update" }));
-  await waitFor(() => assert.equal(requests.filter(([, method]) => method === "POST").length, 1));
-  assert.deepEqual(requests.find(([, method]) => method === "POST"), ["/api/hosts/local/updates", "POST", JSON.stringify({ target: "omp", version: "1.1.0" })]);
-});
-
 test("offline and protocol-incompatible hosts render unavailable rows without requesting updates", async (t) => {
   const calls = [];
   mockHostRequests(t, async (url) => { calls.push(url); return Response.json({}); });
@@ -242,7 +229,7 @@ test("a failed manual check keeps known versions but never claims up to date", a
   let fail = false;
   mockHostRequests(t, async () => fail
     ? Response.json({ error: "Registry unavailable" }, { status: 503 })
-    : Response.json(updateInfo({ ompweb: software({ updateAvailable: false, availableVersion: null }), omp: software({ updateAvailable: false, availableVersion: null }) })));
+    : Response.json(updateInfo({ ompweb: software({ updateAvailable: false, availableVersion: null, installMethod: "npm", protocolVersion: 3 }) })));
   await showHosts([hostRow()]);
   await screen.findAllByText("Up to date");
   fail = true;
@@ -264,16 +251,16 @@ for (const [lost, answer] of [
       calls.push(init?.method ?? "GET");
       if (init?.method === "POST") {
         // The host received the request and started the update; only its answer was lost.
-        operation = { id: "lost", target: "omp", version: "1.1.0", state: "failed", error: "Install failed; restored previous runtime" };
+        operation = { id: "lost", target: "ompweb", version: "1.1.0", state: "failed", error: "Install failed; restored previous host" };
         return answer();
       }
       return Response.json(updateInfo({ operation }));
     });
     await showHosts([hostRow()]);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Update omp runtime" }));
+    await user.click(await screen.findByRole("button", { name: "Update ompweb host" }));
     await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Update" }));
-    await screen.findByText(/Install failed; restored previous runtime/, {}, { timeout: 3500 });
+    await screen.findByText(/Install failed; restored previous host/, {}, { timeout: 3500 });
     assert.deepEqual(calls, ["GET", "POST", "GET"]);
   });
 }
@@ -293,8 +280,8 @@ test("an unknown update outcome keeps Update disabled until a status read succee
   });
   await showHosts([hostRow()]);
   const user = userEvent.setup();
-  const updateButton = () => screen.getByRole("button", { name: "Update omp runtime" });
-  assert.equal((await screen.findByRole("button", { name: "Update omp runtime" })).disabled, false);
+  const updateButton = () => screen.getByRole("button", { name: "Update ompweb host" });
+  assert.equal((await screen.findByRole("button", { name: "Update ompweb host" })).disabled, false);
   await user.click(updateButton());
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Update" }));
 
@@ -330,7 +317,7 @@ test("idle host checks stop, and a manual check bypasses cached release data", a
     return Response.json(updateInfo());
   });
   await showHosts([hostRow()]);
-  await screen.findByRole("button", { name: "Update omp runtime" });
+  await screen.findByRole("button", { name: "Update ompweb host" });
   await act(() => new Promise((resolve) => setTimeout(resolve, 1100)));
   assert.deepEqual(urls, ["/api/hosts/local/updates"]);
   await userEvent.setup().click(screen.getByRole("button", { name: "Check updates" }));
@@ -367,7 +354,7 @@ test("unavailable discovery retains versions advertised by the host", async (t) 
 test("per-software discovery failure or unknown installed version never claims up to date", async (t) => {
   mockHostRequests(t, async () => Response.json(updateInfo({
     ompweb: software({ availableVersion: null, updateAvailable: false, canUpdate: false, blockedReason: "Registry metadata could not be loaded", installMethod: "npm", protocolVersion: 3 }),
-    omp: software({ currentVersion: null, availableVersion: null, updateAvailable: false, canUpdate: false, updatesDisabled: false }),
+    omp: { currentVersion: null },
   })));
   await showHosts([hostRow()]);
   await screen.findByText(/Registry metadata could not be loaded/);
@@ -377,24 +364,25 @@ test("per-software discovery failure or unknown installed version never claims u
 test("a registry version that is not newer is not shown as an available candidate", async (t) => {
   mockHostRequests(t, async () => Response.json(updateInfo({
     ompweb: software({ currentVersion: "18.14.0", availableVersion: "18.14.0", updateAvailable: false, canUpdate: false, installMethod: "npm", protocolVersion: 3 }),
-    omp: software({ currentVersion: "20.1.0-beta.1", availableVersion: "20.0.9", updateAvailable: false, canUpdate: false, updatesDisabled: false }),
+    omp: { currentVersion: "20.1.0-beta.1" },
   })));
   await showHosts([hostRow()]);
   await screen.findByText("Current: 18.14.0");
   screen.getByText("Current: 20.1.0-beta.1");
-  assert.equal(screen.getAllByText("Up to date").length, 2);
+  screen.getByText("Up to date");
   assert.equal(screen.queryByText(/^Available:/), null);
   assert.equal(screen.queryByRole("button", { name: /^Update (ompweb host|omp runtime)$/ }), null);
 });
 
-test("resident-session blocking stays readable with a disabled daemon update and allows runtime updates", async (t) => {
+test("resident-session blocking stays readable with a disabled daemon update; the omp row stays read-only", async (t) => {
   mockHostRequests(t, async () => Response.json(updateInfo({
     ompweb: software({ canUpdate: false, blockedReason: "Close all sessions on Laptop before updating the host daemon.", installMethod: "npm", protocolVersion: 3 }),
   })));
   await showHosts([hostRow({ id: "laptop", label: "Laptop", allowAgentStart: false })]);
   await screen.findByText(/Close all sessions on Laptop before updating the host daemon/);
   assert.ok(screen.getByRole("button", { name: "Update ompweb host" }).disabled);
-  assert.equal(screen.getByRole("button", { name: "Update omp runtime" }).disabled, false);
+  assert.equal(screen.queryByRole("button", { name: "Update omp runtime" }), null);
+  screen.getByText("Updated with ompweb");
 });
 
 test("sharing credentials is confirmed before it is turned on, and turned off at once", async (t) => {

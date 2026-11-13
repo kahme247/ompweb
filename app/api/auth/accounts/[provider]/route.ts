@@ -9,9 +9,6 @@ interface OmpProviderAccount {
   type: "api_key" | "oauth";
 }
 
-// omp releases older than the get_logout_accounts/logout RPC answer "Unknown command".
-const UNSUPPORTED = "Unknown command";
-
 function isAccount(value: unknown): value is OmpProviderAccount {
   if (typeof value !== "object" || value === null) return false;
   const a = value as Record<string, unknown>;
@@ -35,9 +32,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ provide
       accounts: list.map(({ credentialId, label, detail, type }) => ({ credentialId, label, detail, type })),
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes(UNSUPPORTED)) return Response.json({ supported: false, accounts: [] });
-    return Response.json({ error: message }, { status: 500 });
+    return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }
 
@@ -54,16 +49,6 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ provi
     invalidateModelsCache();
     return Response.json({ ok: true });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes(UNSUPPORTED)) {
-      return Response.json(
-        {
-          error: "omp-web cannot disconnect accounts with this omp version. Update omp, or run `omp` in a terminal and use /logout.",
-          code: "logout_unsupported",
-        },
-        { status: 501 },
-      );
-    }
-    return Response.json({ error: message }, { status: 500 });
+    return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }

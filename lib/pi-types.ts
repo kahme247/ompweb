@@ -1,4 +1,3 @@
-import type { SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import type { AgentMessage } from "./types";
 
 // Local mirrors of the omp shapes used by omp-web. omp's SDK packages are
@@ -114,8 +113,6 @@ export interface RpcSessionState {
   usageLimit?: UsageLimitState;
   /** omp's reported output throughput; null/undefined when not generating. */
   tokensPerSecond?: number | null;
-  /** Structured skill resolution diagnostics; absent on older OMP builds. */
-  skillDiagnostics?: SkillDiagnosticsSnapshot;
 }
 
 /**
@@ -152,8 +149,6 @@ export interface WebSessionState {
   usageLimit?: UsageLimitState;
   autoRetryEnabled?: boolean;
   tokensPerSecond?: number | null;
-  /** Parsed public diagnostics DTO; absent means unsupported or malformed. */
-  skillDiagnostics?: SkillDiagnosticsSnapshot;
   todoPhases: TodoPhase[];
   extensionStatuses: Array<{ key: string; text: string }>;
   extensionWidgets: Array<{ key: string; lines: string[]; placement: "aboveEditor" | "belowEditor" }>;
@@ -221,7 +216,7 @@ export interface SessionStatsInfo {
   contextUsage?: ContextUsage;
 }
 
-/** One question of omp's RPC ask dialog (`method: "ask"`, opt-in via `set_ask_dialog`). */
+/** One question of omp's ask dialog (`method: "ask"`, omp's `askDialog`). */
 export interface RpcAskDialogQuestion {
   id: string;
   question: string;
@@ -240,24 +235,11 @@ export interface RpcAskDialogAnswer {
 }
 
 /**
- * omp's rpc-ui extension UI request frames, including the methods missing from
- * the browser-facing union in lib/types.ts (`open_url`, `cancel`). The wrapper
- * adds `expiresAt` when a timeout is present so reconnecting clients can
- * expire stale dialogs.
+ * A submitted whole-form ask (omp's `formDialog`), by control `name`: radios, single checkboxes and
+ * single selects give their value (omitted when nothing is chosen), checkbox groups and multi-selects
+ * an array, `number`/`range` inputs a number, other text fields their text. Mirrors pi-tui's html-form.
  */
-export type OmpExtensionUiRequest =
-  | { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "ask"; questions: RpcAskDialogQuestion[]; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
-  | { type: "extension_ui_request"; id: string; method: "notify"; message: string; notifyType?: "info" | "warning" | "error" }
-  | { type: "extension_ui_request"; id: string; method: "setStatus"; statusKey: string; statusText: string | undefined }
-  | { type: "extension_ui_request"; id: string; method: "setWidget"; widgetKey: string; widgetLines: string[] | undefined; widgetPlacement?: "aboveEditor" | "belowEditor" }
-  | { type: "extension_ui_request"; id: string; method: "setTitle"; title: string }
-  | { type: "extension_ui_request"; id: string; method: "set_editor_text"; text: string }
-  | { type: "extension_ui_request"; id: string; method: "open_url"; url: string; launchUrl?: string; instructions?: string };
+export type HtmlFormData = Record<string, string | number | string[]>;
 
 /**
  * omp's RPC host-tool bridge: omp-web registers host tools (set_host_tools)

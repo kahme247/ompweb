@@ -1,13 +1,13 @@
 import { execFile } from "child_process";
 import { existsSync, realpathSync, statSync } from "fs";
-import { homedir } from "os";
-import { delimiter, join } from "path";
+import { createRequire } from "module";
+import { dirname, join } from "path";
 import { createChildProcessEnvironment } from "../project-command-env";
 
 /**
- * Locating and probing the user's installed `omp` CLI. omp-web never embeds
- * the (Bun-only) @oh-my-pi SDK — every live-agent capability goes through the
- * omp binary, so its absence is a first-class, user-visible state.
+ * Locating and probing ompweb's own omp build (`ompweb-omp`, built from runner/). omp-web never
+ * embeds the (Bun-only) @oh-my-pi SDK — every live-agent capability goes through that binary, so
+ * its absence is a first-class, user-visible state.
  */
 
 let cachedBin: string | null = null;
@@ -16,7 +16,8 @@ let cachedVersion: { fingerprint: string; value: string; expiresAt: number } | n
 let versionMiss: { fingerprint: string | null; retryAt: number } | null = null;
 let versionProbe: Promise<string | null> | null = null;
 
-const BIN_NAME = process.platform === "win32" ? "omp.exe" : "omp";
+const BIN_NAME = process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp";
+const PLATFORM = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
 // .cmd/.bat launchers (e.g. OMP_WEB_OMP_BIN pointing at a wrapper script) cannot
 // be spawned directly by Node — spawning them requires a shell. Route them
 // through `cmd.exe /c`; every other platform and binary passes through.
@@ -38,28 +39,29 @@ const VERSION_TTL_MS = 5 * 60_000;
 function probeOmpBin(): string | null {
   const override = process.env.OMP_WEB_OMP_BIN;
   if (override) return existsSync(override) ? override : null;
-  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-    if (!dir) continue;
-    const candidate = join(dir, BIN_NAME);
-    if (existsSync(candidate)) return candidate;
-  }
-  // GUI-launched processes often miss homebrew/bun dirs in PATH; probe the
-  // usual install locations before giving up.
-  const fallbackDirs = [
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    join(homedir(), ".bun", "bin"),
-    join(homedir(), ".local", "bin"),
+  const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
+  const candidates = [
+    // Compiled release: beside the ompweb binary.
+    join(dirname(process.execPath), BIN_NAME),
+    // npm install: the platform's optional dependency.
+    () => join(dirname(createRequire(join(packageDir, "package.json")).resolve(`@kahme247/ompweb-omp-${PLATFORM}/package.json`)), BIN_NAME),
+    // Source checkout: what `bun runner/scripts/build-binary.ts` writes.
+    join(packageDir, "runner", "release", `ompweb-omp-${PLATFORM}${process.platform === "win32" ? ".exe" : ""}`),
   ];
-  for (const dir of fallbackDirs) {
-    const candidate = join(dir, BIN_NAME);
-    if (existsSync(candidate)) return candidate;
+  for (const candidate of candidates) {
+    let path: string;
+    try {
+      path = typeof candidate === "string" ? candidate : candidate();
+    } catch {
+      continue; // optional dependency not installed
+    }
+    if (existsSync(path)) return path;
   }
   return null;
 }
 
-/** Resolve the omp binary: OMP_WEB_OMP_BIN override, then PATH lookup. Returns
- * null when omp is not installed. A hit is cached for the process lifetime; a
+/** Resolve ompweb's omp binary: OMP_WEB_OMP_BIN override, else the release, npm or source-checkout
+ * copy (see probeOmpBin). Returns null when none exists. A hit is cached while the file exists; a
  * miss is re-probed after MISS_TTL_MS. */
 export function resolveOmpBin(): string | null {
   // A global Bun/npm update can replace or remove its launcher while this
@@ -116,7 +118,8 @@ async function probeOmpVersion(): Promise<string | null> {
       const target = wrapWindowsScript(bin, ["--version"]);
       // Without an explicit env this probe would inherit the server's full
       // environment, including omp-web's own secrets, into the child.
-      execFile(target.file, target.args, { timeout: 10_000, windowsHide: true, env: createChildProcessEnvironment() }, (error, stdout) => {
+      // 30 s: a fresh ~120 MB runner binary's first start on Windows waits on the antivirus scan.
+      execFile(target.file, target.args, { timeout: 30_000, windowsHide: true, env: createChildProcessEnvironment() }, (error, stdout) => {
         if (error) reject(error);
         else resolve(stdout);
       });

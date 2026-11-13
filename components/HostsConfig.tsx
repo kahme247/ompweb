@@ -185,7 +185,7 @@ function JoinDialog({ host, localJoins, reload, onClose }: { host: HostRow; loca
 /** `localReason`: this machine is not a member yet, so a join adds it too, and why its own daemon is not ready for that. */
 type ClusterState = { pools: HostPool[]; poolsLoaded: boolean; poolsFailed: boolean; localReason: string | null; masterFailed: boolean };
 
-const joinBlock = (row: HostRow) => clusterJoinBlock({ status: row.status, protocol: row.hostVersion, ompVersion: row.ompVersion, supports: (operation) => row.workspaceOps.includes(operation) });
+const joinBlock = (row: HostRow) => clusterJoinBlock({ status: row.status, ompVersion: row.ompVersion, supports: (operation) => row.workspaceOps.includes(operation) });
 
 function HostCard({ host, cluster, onRename, onRevoke, onShare, onJoin, onLeave }: { host: HostRow; cluster: ClusterState; onRename: () => void; onRevoke: () => void; onShare: () => void; onJoin: () => void; onLeave: () => void }) {
   const { t } = useI18n();

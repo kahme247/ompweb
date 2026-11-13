@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 import { hashPassword } from "@/lib/web-password-hash";
+import { LINK_PROTOCOL_VERSION } from "@/lib/hosts/link-protocol";
 
 const repo = path.join(import.meta.dir, "..");
 const root = mkdtempSync(path.join(os.tmpdir(), "omp-web-app-"));
@@ -334,7 +335,7 @@ test("Bun's idle timeout spares the event stream, the browser link and the host 
     // A host daemon's link: a WebSocket whose hello gets a welcome, and which the hub pings 15 s after it opens.
     const created = await fetch(url("/api/hosts"), { method: "POST", headers: signedIn, body: JSON.stringify({ label: "box" }) });
     const bearer = { authorization: `Bearer ${(await created.json()).token}` };
-    const hostHello = { type: "hello", v: 4, ompVersion: "14.0.0", platform: "linux", home: "/home/u", autoApproveExtension: false, ack: 0, channels: [] };
+    const hostHello = { type: "hello", v: LINK_PROTOCOL_VERSION, ompVersion: "14.0.0", platform: "linux", home: "/home/u", autoApproveExtension: false, ack: 0, channels: [] };
     // This repo's DOM typing has no init argument; Bun's WebSocket takes `{ headers }`.
     const link = new WebSocket(url("/api/hosts/link").href.replace(/^http/, "ws"), { headers: bearer } as unknown as string[]);
     t.after(() => link.close());

@@ -16,7 +16,7 @@ const OPTIONS = [
 ];
 
 function askRequest(questions = [{ id: "color", header: "Color", question: "Pick a color", options: OPTIONS, recommended: 1 }]) {
-  return { type: "extension_ui_request", id: "ask-1", method: "ask", questions };
+  return { type: "ui_request", id: 1, method: "askDialog", args: [questions] };
 }
 
 /** Renders the composer-attached panel — the mobile path these fixes cover. */
@@ -24,7 +24,7 @@ function renderAttached(request = askRequest(), attached = true) {
   const responses = [];
   const view = render(React.createElement(ExtensionDialog, {
     request,
-    onRespond: (_request, response) => responses.push(response),
+    onRespond: (_request, value) => responses.push(value),
     attached,
   }));
   return { responses, view };
@@ -109,7 +109,7 @@ test("both ask grids pin their column so a wide question cannot stretch the pane
   const grids = html.match(/grid-template-columns:minmax\(0, 1fr\)/g) ?? [];
   assert.equal(grids.length, 2, "the questions grid and each question's fieldset");
   assert.equal((html.match(/<fieldset [^>]*min-width:0/g) ?? []).length, 1);
-  assert.match(html, /<div style="padding:14px">/);
+  assert.match(html, /<div class="extension-dialog-body">/);
 });
 
 test("the option row, its text and its preview cannot push past the panel edge", () => {
@@ -117,7 +117,8 @@ test("the option row, its text and its preview cannot push past the panel edge",
   // The label is a flex row inside the fieldset's grid: it needs a zero
   // minimum and wrapping text of its own, otherwise a long option label or
   // preview keeps the track at min-content and overflows.
-  assert.match(html, /<label style="[^"]*display:flex[^"]*min-width:0[^"]*"/);
+  assert.match(html, /<label class="extension-choice">/);
+  assert.match(ruleBody(".extension-choice"), /display:\s*flex;[^}]*min-width:\s*0;/);
   assert.match(html, /<span style="min-width:0;overflow-wrap:anywhere">Red/);
   // A preview used to be `white-space: pre` + `overflow-x: auto`, which turns
   // every option row into its own horizontal scroller.
@@ -298,7 +299,7 @@ test("the keyboard cap applies to every attached method with a text field", () =
   const restore = stubVisualViewport(viewportHeight);
   const restoreMedia = stubMedia({ coarse: true });
   try {
-    renderAttached({ type: "extension_ui_request", id: "input-1", method: "input", title: "Name?" });
+    renderAttached({ type: "ui_request", id: 2, method: "input", args: ["Name?"] });
     fireEvent.focus(screen.getByRole("textbox", { name: "Name?" }));
     assert.equal(screen.getByRole("dialog").style.maxHeight, `${viewportHeight - 12}px`);
   } finally {
@@ -319,7 +320,7 @@ test("on touch, focusing an option or button keeps the panel's height", () => {
       assert.equal(panel.style.maxHeight, "min(420px, 60dvh)");
     }
     view.rerender(React.createElement(ExtensionDialog, {
-      request: { type: "extension_ui_request", id: "select-1", method: "select", title: "Which?", options: ["First", "Second"] },
+      request: { type: "ui_request", id: 3, method: "select", args: ["Which?", ["First", "Second"]] },
       onRespond: () => {},
       attached: true,
     }));
@@ -339,7 +340,10 @@ test("without a visible-area API the panel keeps its CSS cap", () => {
   fireEvent.change(other, { target: { value: "Teal" } });
   assert.equal(panel.style.maxHeight, "min(420px, 60dvh)");
   fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-  assert.deepEqual(responses, [{ answers: [{ id: "color", selectedOptions: [], customInput: "Teal" }] }]);
+  assert.deepEqual(responses, [{
+    kind: "submit",
+    results: [{ id: "color", question: "Pick a color", options: OPTIONS.map((option) => option.label), multi: false, selectedOptions: [], customInput: "Teal" }],
+  }]);
 });
 
 /** A press as the browser sends it: pointerdown, then the compat mousedown.

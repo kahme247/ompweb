@@ -11,8 +11,9 @@ import type { SpawnRequest } from "./host";
 import { isWorkspaceOp, WORKSPACE_OP_PARAMS } from "../workspace-types";
 import type { WorkspaceFileEvent } from "../workspace-types";
 
-/** 10: `open.launch.configVersion`, the `config_state` report and the `clusterConfig` op. 9: `open.launch.shareCredentials`.
- * 8: pool capacity reports, creation identity and project preparation. 7: shared host-owned channels, lifecycle,
+/** 10: channel stdin/stdout lines are the runner's `{t}` frames (`cmd`/`res`/`hello`/…), no longer omp RPC frames;
+ * `open.launch.configVersion`, the `config_state` report and the `clusterConfig` op.
+ * 9: `open.launch.shareCredentials`. 8: pool capacity reports, creation identity and project preparation. 7: shared host-owned channels, lifecycle,
  * dialogs and callbacks. 6: composer uploads
  * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
  * `part` messages and a large result as several binary frames, both sent fair across channels
@@ -20,17 +21,11 @@ import type { WorkspaceFileEvent } from "../workspace-types";
  * binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
 export const LINK_PROTOCOL_VERSION = 10;
-/** The first daemon link version that honours `open.launch.shareCredentials`: main answers 426 below it for a sharing host. */
-export const SHARED_CREDENTIALS_SINCE_VERSION = 9;
-/** The first daemon link version that applies the master's configuration (`open.launch.configVersion`, `clusterConfig`): a cluster member below it gets 426. */
-export const CLUSTER_CONFIG_SINCE_VERSION = 10;
+/** The oldest daemon protocol the server still links (older ones get close 4426). Dropping one is an explicit decision:
+ * 10 dropped all older ones, whose channel lines mean omp RPC frames. */
+export const MIN_LINK_PROTOCOL_VERSION = 10;
 /** A configuration version: the manifest's SHA-256, in lowercase hex. */
 export const CONFIG_VERSION_RE = /^[0-9a-f]{64}$/;
-/** The first daemon link version that takes uploads: main answers 426 below it (host_upgrade_required, or
- * host_restart_required on this machine, whose daemon an in-place upgrade leaves running). */
-export const UPLOADS_SINCE_VERSION = 6;
-/** The oldest daemon protocol the server still links (older ones get close 4426). Dropping one is an explicit decision. */
-export const MIN_LINK_PROTOCOL_VERSION = 4;
 /** Safe identity shared by spawn requests and reconnect channel metadata. */
 export const CREATION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -110,14 +105,14 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   preparePoolProject: ["input"],
 };
 
-/** Unknown additions are answered with 501; pool preparation needs a v8 peer, `clusterConfig` a v10 one. */
-export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "open", "close", "editLease", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention", "clusterConfig"] as const;
+/** Unknown additions are answered with 501; pool preparation needs a v8 peer. */
+export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "open", "close", "editLease", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention", "clusterConfig"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
 
 export type OpenChannelRequest = { sessionId: string | null; launch: SpawnRequest; replaceAdvisor?: boolean; preparing?: boolean; expectedChannel?: string };
-/** `supportsBashExcludeFromContext`: exact true only when the child's ready advertised it; an older daemon omits it, which is false. */
-export type OpenChannelResult = { ch: string; joined: boolean; pending: string[] | null; streaming: string | null; cwd: string; fellBack: boolean; launchAdvisor: boolean; advisorSpawned: boolean; autoApproveExtension: boolean; supportsBashExcludeFromContext?: boolean };
+/** `continuous`: the opening link was already a member and got every output line in order, so `streaming` repeats lines it has. */
+export type OpenChannelResult = { ch: string; joined: boolean; pending: string[] | null; streaming: string | null; cwd: string; fellBack: boolean; launchAdvisor: boolean; advisorSpawned: boolean; autoApproveExtension: boolean; continuous?: boolean };
 
 /** A failed host op, as carried by `res {ok: false, error}`. */
 export class HostOpError extends Error {

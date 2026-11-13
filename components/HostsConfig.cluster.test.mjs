@@ -91,8 +91,7 @@ test("a first pool without this machine gives its row no master label", async (t
 const RESTART = "Restart the host service on this machine first";
 for (const [label, local, pools, reason] of [
   ["offline", { status: "offline" }, [], RESTART],
-  ["on protocol 8", { hostVersion: 8 }, cluster("h1"), RESTART],
-  ["without gitOrigins", { workspaceOps: [] }, [], RESTART],
+  ["without gitOrigins", { workspaceOps: [] }, cluster("h1"), RESTART],
   // A restart does not update omp: the reason names what this machine needs.
   ["on an omp too old to share credentials", { ompVersion: "omp/15.13.0" }, [], "Update omp on This machine to 15.13.1 or newer first"],
 ]) {
@@ -113,13 +112,12 @@ test("once this machine is a member, its own readiness no longer blocks a join",
 
 for (const [label, row, reason] of [
   ["offline", { status: "offline" }, "The host is offline"],
-  ["a protocol below 9", { hostVersion: 8 }, "Update ompweb on this host first"],
   ["no gitOrigins operation", { workspaceOps: [] }, "Update ompweb on this host first"],
-  ["flagged needs-upgrade by the hub", { status: "needs-upgrade", hostVersion: 8 }, "Update ompweb on this host first"],
+  ["flagged needs-upgrade by the hub", { status: "needs-upgrade", hostVersion: 9 }, "Update ompweb on this host first"],
   // Members always share credentials; the daemon refuses that below omp 15.13.1, and on an omp it cannot read.
   ["on an omp too old to share credentials", { ompVersion: "omp/15.13.0" }, "Update omp on Laptop to 15.13.1 or newer first"],
   ["on an unknown omp", { ompVersion: "omp/next" }, "Update omp on Laptop to 15.13.1 or newer first"],
-  ["on an outdated daemon and an old omp (the daemon first)", { hostVersion: 8, ompVersion: "omp/15.13.0" }, "Update ompweb on this host first"],
+  ["on an outdated daemon and an old omp (the daemon first)", { workspaceOps: [], ompVersion: "omp/15.13.0" }, "Update ompweb on this host first"],
   ["without omp (its own status text is the reason)", { status: "omp-missing" }, "omp not installed"],
 ]) {
   test(`a host that is ${label} cannot join and says why`, async (t) => {
@@ -141,7 +139,7 @@ test("when the pools cannot be loaded every switch is disabled with poolsUnavail
 
 test("a member can always leave: offline or outdated never disables its switch", async (t) => {
   await showHosts(t, {
-    hosts: [hostRow(), linked("h1", "Laptop", { status: "offline" }), linked("h2", "Desk", { hostVersion: 7, workspaceOps: [] })],
+    hosts: [hostRow(), linked("h1", "Laptop", { status: "offline" }), linked("h2", "Desk", { workspaceOps: [] })],
     pools: cluster("local", "h1", "h2"),
   });
   for (const name of ["Laptop", "Desk"]) {
@@ -299,7 +297,6 @@ for (const [label, overrides, lines] of [
   ["failed", { clusterConfig: configState({ files: "failed", error: "the master answered 500 for the manifest", current: false }) }, ["Configuration: failed — the master answered 500 for the manifest"]],
   ["held by another server", { clusterConfig: configState({ owned: false, current: false }) }, ["Configuration: held by another ompweb server; remove it from that server's cluster first"]],
   ["current, with commands it lacks", { clusterConfig: configState({ missingCommands: ["uvx", "docker"] }) }, ["Configuration: same as the master", "Not installed on this host: uvx, docker"]],
-  ["below link protocol 10, never reporting", { hostVersion: 9 }, ["Update ompweb on this host first"]],
   ["offline, with its last report", { status: "offline", clusterConfig: configState({ missingCommands: ["uvx"] }) }, []],
   ["offline, never reported", { status: "offline" }, []],
 ]) {

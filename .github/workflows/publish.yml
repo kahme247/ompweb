@@ -33,10 +33,28 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - run: npm run smoke
-
+      # The omp the runners compile against: the fork's newest integration build, not runner/omp-build.json's pin
+      # (not committed back). No such release or a runner that fails tsc against it fails the release.
+      - name: Find the newest omp integration build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api repos/andrebrait/oh-my-pi/commits/integration-release --jq .sha)
+          tag=$(gh api --paginate 'repos/andrebrait/oh-my-pi/releases?per_page=100' --jq '.[].tag_name' \
+            | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.g${sha:0:7}\$" | head -n 1 || true)
+          if [ -z "$tag" ]; then
+            echo "::error::andrebrait/oh-my-pi has no integration release for integration-release ($sha)"
+            exit 1
+          fi
+          echo "OMP_TAG=$tag" >> "$GITHUB_ENV"
+      # Without GH_TOKEN: bun install runs the omp packages' scripts.
+      - name: Pin the runner to it
+        run: npx bun runner/scripts/use-omp-build.ts "$OMP_TAG" && (cd runner && npx bun x tsc -p .)
+      # Builds the omp runners too, which the source smoke spawns from runner/release/.
       - name: Build the release binaries
         run: sh scripts/build-release-binaries.sh
+      - run: npm run smoke
       - run: npm run smoke -- --binary release/ompweb-linux-x64/ompweb
 
       - name: Create draft GitHub Release
@@ -46,6 +64,7 @@ jobs:
         run: |
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             node bin/generate-release-notes.js --tag "$TAG" --output release-notes.md
+            printf '\nomp: andrebrait/oh-my-pi %s\n' "$OMP_TAG" >> release-notes.md
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file release-notes.md --draft
           fi
 
@@ -54,6 +73,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: gh release upload "$TAG" release/ompweb-*.tar.gz release/ompweb-*.zip --repo "$GITHUB_REPOSITORY" --clobber
+
+      # npm installs get the runner the esbuild way: one prebuilt package per platform, which npm installs only on
+      # the matching os/cpu, pinned to this exact version. No install script, no Bun or compile on the user's machine.
+      - name: Publish the omp runner packages and pin them
+        run: |
+          VERSION="$(node -p 'require("./package.json").version')"
+          for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+            os="${target%-*}"; cpu="${target#*-}"; exe=""
+            if [ "$os" = windows ]; then os=win32; exe=.exe; fi
+            name="@kahme247/ompweb-omp-$target"
+            dir="runner-packages/$target"
+            mkdir -p "$dir"
+            cp "runner/release/ompweb-omp-$target$exe" "$dir/ompweb-omp$exe"
+            cp LICENSE "$dir/"
+            node -e 'const [name, version, os, cpu, bin] = process.argv.slice(1); process.stdout.write(JSON.stringify({ name, version, description: "The omp runner ompweb spawns, for one platform", license: "MIT", repository: { type: "git", url: "git+https://github.com/kahme247/ompweb.git" }, os: [os], cpu: [cpu], files: [bin, "LICENSE"] }, null, 2))' "$name" "$VERSION" "$os" "$cpu" "ompweb-omp$exe" > "$dir/package.json"
+            if ! npm view "$name@$VERSION" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+              (cd "$dir" && npm publish --provenance --access public)
+            fi
+            npm pkg set "optionalDependencies.$name=$VERSION"
+          done
 
       - name: Publish to npm
         run: |

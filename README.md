@@ -26,14 +26,12 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 
 ## Requirements
 
-- [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
+- Nothing else for omp: ompweb ships its own [omp](https://github.com/can1357/oh-my-pi) build, `ompweb-omp` (beside the single binary, or as the `@kahme247/ompweb-omp-<os>-<arch>` optional dependency of the npm package). It reads your `~/.omp` settings, auth and sessions. `OMP_WEB_OMP_BIN` points ompweb at another one
 - Node.js `>= 24`. The server runs on [Bun](https://bun.sh), which installs automatically as a dependency of the npm package (a Bun on your `PATH` is used if the bundled one is missing)
 
-The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
+The **Steer**, **Delete** and **Edit** actions on a queued message are commands of the `ompweb-omp` channel (`promote_queued_message`, `remove_queued_message`). Deletion is confirmed by omp before the chip disappears; editing recalls text only after cancellation succeeds. A message that is no longer pending leaves the queue unchanged and displays a notice; ompweb does not send a duplicate steering message.
 
-Queue **Delete** and **Edit** additionally require `remove_queued_message`. Deletion is confirmed by OMP before the chip disappears; editing recalls text only after cancellation succeeds. Unsupported runtimes or messages that are no longer pending leave the queue unchanged and display a notice.
-
-The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events, omp 18.4.4 or later), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs. Older omp runtimes show no queue panel, and Stop cannot take queued messages back.
+The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs.
 
 ## Shareable navigation
 
@@ -69,20 +67,6 @@ support. Local Chromium verification covered cookie-gated metadata with HTTP
 icon URLs blocked (zero installability errors). The owner also confirmed that
 installation on a physical phone works as expected behind Cloudflare Access.
 
-Skill startup notices require an OMP runtime with `get_skill_diagnostics`,
-`set_skill_startup_diagnostics`, and `skill_diagnostics_update`. Conflicts and
-redundant installations appear above the composer when its OMP session starts;
-an empty new-chat page does not start OMP just for diagnostics. **Details** shows
-the resolved default, variants, identical copies, backing paths, sources, and
-selection reason. The **×** button dismisses the notice for that session until
-the diagnostic report changes. **Turn off** and **Settings →
-Interface & Behavior → Skill startup notices** use OMP's persisted
-`skills.showStartupDiagnostics` preference, not a separate browser setting.
-**Settings → Extensions & Tools → Skills → View skill diagnostics** remains
-available for a selected running session when notices are off. Inspection does
-not resume stopped sessions. Missing support or no running session is unavailable,
-not a clean result.
-
 ## Notifications
 
 Turn on notifications in **Settings → Notifications**. Each browser keeps its own
@@ -106,8 +90,8 @@ session you are viewing. Clicking a notification opens its session.
 - Desktop browsers show notifications through the operating system's
   notification center. Push delivery needs the browser process running.
 
-Completion notifications use omp's `prompt_result` and `session_settled` RPC
-frames (omp 18.3.1 or later).
+Completion notifications use the `ompweb-omp` channel's `prompt_result` and
+`session_settled` frames.
 
 ## Quick Start
 
@@ -139,6 +123,7 @@ Open [http://127.0.0.1:30177](http://127.0.0.1:30177) in your browser.
 ompweb --port 8080                         # Custom port
 ompweb --hostname 0.0.0.0                  # Listen on network
 ompweb hash-password                       # Print the value for OMP_WEB_PASSWORD_HASH
+ompweb preflight                           # Start the session omp once (as a new session would) and wait for its hello; exit 1 says why it failed
 ompweb --no-open                           # Don't auto-open the browser
 ompweb --install-tray                      # Install Windows System Tray service & Desktop shortcuts
 ompweb --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts
@@ -468,7 +453,7 @@ Each [release](https://github.com/kahme247/ompweb/releases/latest) also ships
 ompweb as one compiled program with the files it serves beside it:
 `ompweb-linux-x64.tar.gz`, `ompweb-linux-arm64.tar.gz`, `ompweb-darwin-x64.tar.gz`,
 `ompweb-darwin-arm64.tar.gz` and `ompweb-windows-x64.zip`. It needs no Node, npm
-or Bun; only omp must be installed. The x64 builds use Bun's baseline runtime, so
+or Bun, and no omp: its own omp build, `ompweb-omp`, is beside it. The x64 builds use Bun's baseline runtime, so
 they also run on CPUs without AVX2. Each archive carries the licenses of what it
 bundles in `licenses/`. Every commit on `main` that passes CI is also published as a
 [prerelease](https://github.com/kahme247/ompweb/releases) named after the time it was
@@ -480,7 +465,7 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
 ~/.local/share/ompweb-linux-x64/ompweb host          # the local daemon, in a second terminal
 ```
 
-- **Keep `ompweb` in its directory.** It serves `dist/`, `public/` and the other
+- **Keep `ompweb` in its directory.** It runs `ompweb-omp` and serves `dist/`, `public/` and the other
   files from the directory it is in (a symlink to it on your `PATH` works), or
   from `OMP_WEB_PACKAGE_DIR` when that is set.
 - **macOS** quarantines downloads: run `xattr -dr com.apple.quarantine ompweb-darwin-arm64`
@@ -494,8 +479,7 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
   `ompweb host`, replace the directory with the new release, and start both again;
   **Settings → System** links the release page when a new version is out.
   Your sessions and settings live in `~/.omp`, not in that directory.
-- **As systemd user services**, write the two units yourself (adjust the paths;
-  add omp's directory to `PATH`, or set `OMP_WEB_OMP_BIN`):
+- **As systemd user services**, write the two units yourself (adjust the paths):
 
 ```ini
 # ~/.config/systemd/user/ompweb.service
@@ -840,7 +824,7 @@ update, stop the service, replace the release directory, and start it again. Aft
 revoking a host, stop and remove its service: it otherwise keeps retrying.
 
 **Linux (systemd user service).** Create `~/.config/systemd/user/ompweb-host.service`
-(adjust the release path, and add omp's directory to `PATH` or set `OMP_WEB_OMP_BIN`):
+(adjust the release path):
 
 ```ini
 [Unit]
