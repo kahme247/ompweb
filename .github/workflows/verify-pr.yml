@@ -47,6 +47,7 @@ jobs:
       - name: Install dependencies
         run: |
           npm ci
+          npx bun runner/scripts/use-omp-build.ts
           npx bun install --cwd runner --frozen-lockfile
 
       - name: TypeScript typecheck

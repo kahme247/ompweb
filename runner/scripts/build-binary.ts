@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 /**
  * Compiles `src/cli.ts` into a standalone `ompweb-omp-<os>-<arch>` binary under `release/`, the way
- * omp 18.19.0 builds its release binaries (`scripts/ci-release-build-binaries.ts` and
+ * omp builds its release binaries (`scripts/ci-release-build-binaries.ts` and
  * `packages/coding-agent/scripts/compile-binary.ts` upstream). Those helpers assume the monorepo
  * (addons under `packages/natives/native`, docs and the stats client generated in place), so this
- * script feeds the same `Bun.build` the prebuilt equivalents the npm packages ship.
+ * script feeds the same `Bun.build` the prebuilt equivalents the npm packages ship. The packages are
+ * the pinned `andrebrait/oh-my-pi` build's tarballs in `vendor/` (`scripts/use-omp-build.ts`).
  *
  * Usage: `bun scripts/build-binary.ts [target...]`; with no target it builds the host's.
  * A cross target needs its addon package installed: `bun install --os=<os> --cpu=<cpu>`.
