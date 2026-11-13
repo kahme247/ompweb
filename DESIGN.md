@@ -68,14 +68,20 @@ OMP SDK packages are Bun-only TypeScript and import Bun APIs. Importing
 Bun, would tie it to omp's internals and make the application unreliable.
 Therefore, the ompweb server and daemon must not add those runtime dependencies.
 
-Live work goes through ompweb's own omp build, `runner/`: upstream omp's CLI
-pinned to an exact release, with one change, its session factory connects every
-session to `ompweb host` over ompweb's channel. The host receives the same
-`AgentSession` events and calls the same session methods omp's TUI does, so
-nothing depends on omp's RPC mode. A session started from the runner's TUI
-connects to the daemon's Unix socket and shows up live in the web; dialogs open
-on both sides and the first answer wins. The design and the wire are in
-`docs/specs/2026-11-12-omp-runner-design.md`.
+Live work goes through ompweb's own omp build, `runner/`, compiled against the
+fork's integration build: an `andrebrait/oh-my-pi` release that is an upstream omp
+release plus the PRs the fork carries (among them `runSessionHost`, which the
+headless mode needs), pinned to one release in `runner/omp-build.json` and
+re-pinned to the newest one by each ompweb release. The runner replaces omp's
+launch command: its session factory connects every session to `ompweb host`
+over ompweb's channel. The host receives the same `AgentSession` events and
+calls the same session methods omp's TUI does, so nothing depends on omp's RPC
+mode. A session started from the runner's TUI connects to the daemon's Unix
+socket and shows up live in the web; dialogs open on both sides and the first
+answer wins. Each ompweb release ships its runner as `ompweb-omp`, so omp
+updates with ompweb. The design and the wire are in
+`docs/specs/2026-11-12-omp-runner-design.md`; the fork build in
+`docs/specs/2026-11-12-omp-build-in-ompweb-design.md`.
 
 ### The Host seam
 

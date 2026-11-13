@@ -1,6 +1,6 @@
 # ompweb's own omp build and channel — design
 
-Date: 2026-11-12. Branch: `feat/omp-runner`.
+Date: 2026-11-12. Branch: `feat/omp-runner` (PR #473).
 Replaces: the `omp --mode rpc-ui` boundary in `DESIGN.md` ("Why the CLI boundary is locked") and the RPC parts of `docs/specs/2026-10-28-remote-hosts-design.md`.
 
 ## Why
@@ -13,7 +13,7 @@ ompweb's live features ride omp's RPC mode, and every gap or regression there is
 
 `runner/` is a Bun package pinned to one `andrebrait/oh-my-pi` integration release (`runner/omp-build.json`): `runner/scripts/use-omp-build.ts` unzips that release's npm tarballs into `runner/vendor/`, and `runner/package.json` installs every `@oh-my-pi/*` package and native leaf from there (`file:` dependencies and overrides, sha512-pinned in `bun.lock`). `runner/src/cli.ts` stands in for omp's own entry (worker-host declaration, SQLite lock shim, postmortem handlers) and runs omp's `runCli` with two changes passed to `runRootCommand`: a session factory that connects every session to the host (`runner/src/launch.ts`, a copy of upstream's to keep in step on every bump) and, under `--headless`, a `runSessionHost` hook that hands the finished session to `runner/src/headless.ts` instead of the TUI. `runSessionHost` is an upstream PR that is not released yet; the integration build carries it. Every ompweb (pre)release re-pins to the newest `integration-release` build; pin bumps on `main` are manual (`bun scripts/use-omp-build.ts <tag>`). Everything else (settings, auth, models, extensions, MCP, plugins, the TUI itself) is upstream omp, unpatched.
 
-- It is compiled per platform like omp's release binary (`ompweb-omp-<os>-<arch>`, `runner/scripts/build-binary.ts`, `.github/workflows/omp-runner.yml`) and replaces the user's installed `omp` for everything ompweb starts (`OMP_WEB_OMP_BIN` points at it).
+- It is compiled per platform like omp's release binary (`ompweb-omp-<os>-<arch>`, `runner/scripts/build-binary.ts`, `.github/workflows/omp-runner.yml`) and ships with every ompweb release for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and windows-x64: beside the single binary, and as the `@kahme247/ompweb-omp-<os>-<arch>` optional dependency of the npm package. ompweb starts it for every session (`lib/omp/omp-cli.ts`); `OMP_WEB_OMP_BIN` overrides it with another runner build.
 - People can run it as their normal omp. A TUI started from it connects to the local `ompweb host` (R3), so the web sees and drives that same live session.
 - Upstream API drift breaks `tsc` on the pin bump instead of breaking the web at runtime. The fragile points are `runCli`, the `commands` table, `runRootCommand`'s injectable dependencies and the copied launch command.
 
@@ -36,7 +36,7 @@ The runner wraps the tool UI context the TUI (or the headless mode) hands the se
 
 ### R4. ompweb passes dialogs through
 
-The server passes the runner's `ui_request`, `ui_end` and `ui` frames through unchanged, with no `extension_ui_*` translation layer. The browser renders each omp dialog method (`select`, `confirm`, `input`, `editor`, `askDialog`, `formDialog`, `approve`) from its `args` and answers `ui_response` with omp's own return value for that method. The process layer (`lib/omp/rpc-process.ts`) tracks which requests are open and the daemon (`lib/hosts/daemon-channels.ts`) reads identity, pending requests and lifecycle from the new frames. The host link protocol is unchanged: the daemon still forwards child lines.
+The server passes the runner's `ui_request`, `ui_end` and `ui` frames through unchanged, with no `extension_ui_*` translation layer. The browser renders each omp dialog method (`select`, `confirm`, `input`, `editor`, `askDialog`, `formDialog`, `approve`) from its `args` and answers `ui_response` with omp's own return value for that method. The process layer (`lib/omp/rpc-process.ts`) tracks which requests are open and the daemon (`lib/hosts/daemon-channels.ts`) reads identity, pending requests and lifecycle from the new frames. The daemon still forwards child lines over the host link, but their meaning changed, so link protocol 11 drops v4–v10 (`MIN_LINK_PROTOCOL_VERSION` = `LINK_PROTOCOL_VERSION` = 11): an older peer is refused at the link instead of hanging on frames it cannot read.
 
 Removed: v1/v2 negotiation, `rpc_chunk`, `set_ask_dialog`, the session-edit extension (`edit_message` is a native command), and skill diagnostics (they existed only in an unmerged omp PR that the pinned release lacks).
 
@@ -46,7 +46,7 @@ There is no RPC fallback. An ompweb host runs only with a runner built for the c
 
 ## Residual omp names
 
-omp's own enums and settings still say `rpc`: extension mode `rpc`, `goal.continuationModes: rpc`, `refreshRpcHostTools`, input source `rpc`, protocol defaults. omp 18.19.0 has no other value for them, so the runner uses them where omp's API asks for one. No RPC mode and no RPC code runs.
+omp's own enums and settings still say `rpc`: extension mode `rpc`, `goal.continuationModes: rpc`, `refreshRpcHostTools`, input source `rpc`, protocol defaults. The pinned omp build has no other value for them, so the runner uses them where omp's API asks for one. No RPC mode and no RPC code runs.
 
 ## Security
 
@@ -55,5 +55,4 @@ The channel can prompt the agent, and the agent runs shell commands. The socket 
 ## Open
 
 - Windows: named pipe with a current-user ACL instead of the Unix socket.
-- Release distribution of the per-platform runner binaries beside ompweb's own.
 - Whether `set_model` should keep RPC's behaviour of saving the model as the user's default role.

@@ -26,7 +26,7 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 
 ## Requirements
 
-- Nothing else for omp: ompweb ships its own [omp](https://github.com/can1357/oh-my-pi) build, `ompweb-omp` (beside the single binary, or as the `@kahme247/ompweb-omp-<os>-<arch>` optional dependency of the npm package). It reads your `~/.omp` settings, auth and sessions. `OMP_WEB_OMP_BIN` points ompweb at another one
+- Nothing else for omp: ompweb ships its own [omp](https://github.com/can1357/oh-my-pi) build, `ompweb-omp` (beside the single binary, or as the `@kahme247/ompweb-omp-<os>-<arch>` optional dependency of the npm package). It reads your `~/.omp` settings, auth and sessions. It is built for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and windows-x64; on any other platform (Linux on musl, Windows on Arm, FreeBSD) ompweb installs without it and cannot start sessions
 - Node.js `>= 24`. The server runs on [Bun](https://bun.sh), which installs automatically as a dependency of the npm package (a Bun on your `PATH` is used if the bundled one is missing)
 
 The **Steer**, **Delete** and **Edit** actions on a queued message are commands of the `ompweb-omp` channel (`promote_queued_message`, `remove_queued_message`). Deletion is confirmed by omp before the chip disappears; editing recalls text only after cancellation succeeds. A message that is no longer pending leaves the queue unchanged and displays a notice; ompweb does not send a duplicate steering message.
@@ -653,9 +653,9 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 ## Run sessions on another machine
 
 One ompweb can start and watch omp sessions on other machines. Each machine keeps
-its own `omp` install, `~/.omp/agent` directory, sessions, and credentials (unless you
+its own ompweb (with its `ompweb-omp`), `~/.omp/agent` directory, sessions, and credentials (unless you
 [share the server's provider logins](#use-the-servers-provider-logins-on-a-host));
-ompweb only routes. The remote machine needs `omp` and either Node 24 (for `npx`) or
+ompweb only routes. The remote machine needs either Node 24 (for `npx`) or
 the [single binary](#single-binary), and must be able to reach the ompweb server over
 HTTP(S). It dials out, so it can sit behind NAT.
 
@@ -679,15 +679,14 @@ HTTP(S). It dials out, so it can sit behind NAT.
    The host shows **online** in Settings → Hosts, the sidebar gets a group for it,
    and the new-session screen gets a host picker.
 
-**Settings → Hosts** also shows each machine's ompweb daemon and OMP runtime
-versions, available updates and update actions, including **This machine**.
+**Settings → Hosts** also shows each machine's ompweb daemon and omp versions,
+available updates and update actions, including **This machine**.
 Checks and installations run on the selected host, not on the web server. A host
 update whose link protocol is incompatible with the current web app stays visible
 but is blocked with a reason; update the web server first. An unverifiable target
-protocol is blocked too. OMP updates are independent of the link protocol.
+protocol is blocked too. omp is part of each ompweb release and updates with it.
 Before updating a daemon, close its session processes: the updater refuses to
-interrupt sessions or subagents. Updating OMP leaves existing processes on their
-loaded version until they restart. **Settings → System** keeps the web server's
+interrupt sessions or subagents. **Settings → System** keeps the web server's
 own application update and service settings.
 Hosts need a daemon build that supports these update operations; older builds
 show an unsupported message and need one manual update first. If the daemon
@@ -936,7 +935,7 @@ Stop it with `Stop-ScheduledTask ompweb-host`, then end the running host with
 | `OMP_WEB_NO_OPEN` | Set to `1` to prevent auto-opening browser | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
 | `OMP_WEB_NAME` | Name shown in browser tabs and installed-app names. `url`, `host` or `domain` (any case) uses the hostname the browser connected to, without port; localhost and IP addresses keep `omp web`. Any other value is used as-is. Restart after changing | `omp web` |
-| `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
+| `OMP_WEB_OMP_BIN` | Path to an `ompweb-omp` build to use instead of the bundled one (for example `runner/release/ompweb-omp-<os>-<arch>` from a source checkout). A stock `omp` does not work: it does not speak ompweb's channel | _the bundled `ompweb-omp`_ |
 | `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL. Leave unset to transcribe with `OMP_WEB_STT_MODEL` through omp's own credentials | _None_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
@@ -1059,10 +1058,13 @@ addresses you list in `set_real_ip_from`:
 git clone https://github.com/kahme247/ompweb.git
 cd ompweb
 npm install
+npx bun runner/scripts/use-omp-build.ts && (cd runner && npx bun install --frozen-lockfile)
+npx bun runner/scripts/build-binary.ts   # ompweb's omp build for this machine: runner/release/ompweb-omp-<os>-<arch>
 npm run dev
 ```
 
-The dev server runs at [http://127.0.0.1:30178](http://127.0.0.1:30178).
+The dev server runs at [http://127.0.0.1:30178](http://127.0.0.1:30178). It finds the runner in
+`runner/release/` by itself; `npm test` and `npm run build:binary` need the runner set up too.
 
 A dev server does not take over the local daemon: only the production web
 server writes the daemon's `host.json`, so "This machine" shows offline in dev

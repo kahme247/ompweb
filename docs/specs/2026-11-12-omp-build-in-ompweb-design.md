@@ -1,12 +1,14 @@
 # ompweb ships the omp integration build — design
 
-Date: 2026-11-12, final 2026-11-13. Branch: `ci/omp-build` (on `feat/omp-runner`, PR #460).
+Date: 2026-11-12, final 2026-11-13. ompweb side: PR #473 (`feat/omp-runner`).
 Supersedes: `andrebrait/integration-ci` `docs/specs/2026-11-11-omp-auto-integration-design.md` (the round moves into the fork) and its §3 (omp-web's **Custom** omp update source, never built). §3b (ompweb pre-release channel) and §3c (GitHub token) are unaffected.
-Depends on: #460 (`runner/`, `ompweb-omp`); can1357/oh-my-pi#19075 (`runSessionHost`) and the user's `feat/configurable-update-source` (`ef93b0ad`, `PI_UPDATE_REPO`), both carried in the integration build.
+Depends on: PR #473's runner (`runner/`, `ompweb-omp`); can1357/oh-my-pi#19075 (`runSessionHost`) and the fork owner's `feat/configurable-update-source` (`ef93b0ad`, `PI_UPDATE_REPO`), both carried in the integration build.
 
 ## Why
 
-ompweb ships its own omp build (`ompweb-omp`, `runner/`), compiled today against npm `@oh-my-pi/pi-coding-agent@18.19.0` plus a Bun patch (`runner/patches/`) that back-ports `runSessionHost`. The omp the user runs (`/opt/omp-patched`) comes from integration-ci's hourly integration of upstream releases plus the user's carried PRs, released on `andrebrait/oh-my-pi`. This design moves that round into the fork itself, makes fork binaries update from fork releases, and makes `ompweb-omp` compile against the fork's own packages.
+Before this design, ompweb's own omp build (`ompweb-omp`, `runner/`) compiled against npm `@oh-my-pi/pi-coding-agent@18.19.0` plus a Bun patch that back-ported `runSessionHost`, and the omp deployed on the build host came from integration-ci's hourly integration of upstream releases plus the carried PRs, released on `andrebrait/oh-my-pi`. This design moves that round into the fork itself, makes fork binaries update from fork releases, and makes `ompweb-omp` compile against the fork's own packages.
+
+Current state: `runner/omp-build.json` pins the fork release `v18.20.0-int.202611130808.gfd57e86`, the runner installs only that release's packages, and the Bun patch and `runner/patches/` are gone. Every ompweb (pre)release re-pins to the newest `integration-release` build (W2). Progress per task is in `docs/plans/2026-11-12-omp-build-in-ompweb.md`.
 
 ## Three places
 
@@ -40,7 +42,7 @@ In every job the fork's code is checked out at the workspace root with an explic
 What the default-branch switch changes:
 
 - **Upstream's workflows in the fork** run today: `CI` and `Warm bun store cache` on pushes to `main` (every mirror sync), `OMP Nix` on its schedule and on every `v*` tag (each `-int.` release starts a Nix build), `os-session-tests`, `windows-rename-probe`, `Windows EPIPE regression`, `Copilot`. All are disabled (decided, F2).
-- **`gh pr create`** from `/root/git/oh-my-pi` keeps targeting upstream (`gh repo set-default can1357/oh-my-pi`). A PR opened inside the fork defaults to base `fork-ci`; pass `--base main`. `sync_fork_base` already passes `--base`.
+- **`gh pr create`** from the local oh-my-pi checkout keeps targeting upstream (`gh repo set-default can1357/oh-my-pi`). A PR opened inside the fork defaults to base `fork-ci`; pass `--base main`. `sync_fork_base` already passes `--base`.
 - **"Sync fork" / `gh repo sync`** act on the default branch: sync the mirror with `integration` or `gh repo sync andrebrait/oh-my-pi -b main`, never the bare command or the web button. The `fork-ci` README says so. Only the user's own GitHub UI clicks are affected (decided acceptable).
 - Clones check out `fork-ci`; `origin/HEAD` moves. The script uses explicit refs everywhere.
 - 60 days without repository activity disables the fork's schedules; releases are frequent, so no keep-alive (decided).
@@ -105,7 +107,7 @@ Push with `GITHUB_TOKEN` first, then retry once with `OMP_FORK_TOKEN` (fine-grai
 - `escalate` uses `GITHUB_TOKEN` with `permissions: issues: write` on the fork itself, label `omp-auto`; body adds `inputs: <sha256>`. Issues are enabled (done). Issue text is public.
 - The Apple SDK step reads `https://github.com/$GITHUB_REPOSITORY/releases/download/apple-sdk/<sha256>.pkg`; release `apple-sdk` is created on the fork (`--latest=false`) with `d55351824fd17742fd6e1e7a252fa1028698f32147ee48be9a6b75442bf30575.pkg` (70,553,676 bytes) from integration-ci's release. No workflow change.
 
-### F8. Local `integration` and `/opt/omp-patched`
+### F8. Local `integration` and the deployed omp
 
 The script stays only in integration-ci. Changes there (also used by the round through `tools/`):
 
@@ -113,9 +115,9 @@ The script stays only in integration-ci. Changes there (also used by the round t
 - `CI_CONFIG_REF` (default `origin/main`): the ref `ci_build` fetches and diffs the config and `.github` against before dispatching (today hard-coded `origin main`).
 - Tests in `integration.test.sh` for both.
 
-Host wiring (ai-dev): worktree `/root/git/oh-my-pi-fork-ci` of `fork-ci`. `~/.config/integration` becomes a directory: per-file symlinks into `integration-ci/config` for graphify, superpowers, ompweb, the pin scripts, `fixups/root--git--ompweb` and the `.retired-*` dirs; `root--git--oh-my-pi.sh` and `fixups/root--git--oh-my-pi` link into the `fork-ci` worktree. `ci_build` resolves the config's repository through `readlink -f`, so it diffs that worktree against `origin/fork-ci`.
+Host wiring (the build host): a worktree of `fork-ci`. `~/.config/integration` becomes a directory: per-file symlinks into `integration-ci/config` for graphify, superpowers, ompweb, the pin scripts, `fixups/root--git--ompweb` and the `.retired-*` dirs; `root--git--oh-my-pi.sh` and `fixups/root--git--oh-my-pi` link into the `fork-ci` worktree. `ci_build` resolves the config's repository through `readlink -f`, so it diffs that worktree against `origin/fork-ci`.
 
-`integration build` for oh-my-pi dispatches `omp.yml` on the fork; the reuse lookup reads `project: oh-my-pi` from `fork-ci`'s `omp.yml` and finds zips in the fork's rolling `oh-my-pi` release. `DEPLOY_CMD` is unchanged. Deploying an auto round: `git -C /root/git/oh-my-pi fetch origin && git -C /root/git/oh-my-pi branch -f integration origin/integration-release && integration build && integration deploy`. The first such deploy after F9 is the bootstrap install on ai-dev.
+`integration build` for oh-my-pi dispatches `omp.yml` on the fork; the reuse lookup reads `project: oh-my-pi` from `fork-ci`'s `omp.yml` and finds zips in the fork's rolling `oh-my-pi` release. `DEPLOY_CMD` is unchanged. Deploying an auto round, in the local oh-my-pi checkout: `git fetch origin && git branch -f integration origin/integration-release && integration build && integration deploy`. The first such deploy after F9 is the bootstrap install on the build host.
 
 ### F9. Fork versions, tags and `omp update`
 
@@ -163,7 +165,7 @@ rel="v$version-int.$stamp.g${SHA:0:7}"
 - **Smoke.** `bin/omp --version` must print `omp/$VERSION`; the linux-x64 binary must contain `andrebrait/oh-my-pi` (fails the build if the update-source PR dropped out).
 - **Rolling `oh-my-pi` release** (manual `integration build`): same `version` job and define.
 - **Old-format tags.** `v<base>-int.<sha7>` tags (`v18.19.0-int.77d6529`, `v18.20.0-int.d2c2eff`, …) sort above new ones of the same base when the sha has a letter. Cut-over deletes every old-format release and tag; `release` and prune only handle the new format, so the old one is never reused.
-- **Bootstrap.** Existing fork binaries report the plain base version and update from Stencil: `omp update` or `update.auto` would move them to upstream's binary on upstream's next release. The first stamped build is installed by hand; on ai-dev the `/opt/omp-patched` deploy (F8) does that. After that, updates come from fork releases.
+- **Bootstrap.** Existing fork binaries report the plain base version and update from Stencil: `omp update` or `update.auto` would move them to upstream's binary on upstream's next release. The first stamped build is installed by hand; on the build host the deploy (F8) does that. After that, updates come from fork releases.
 - **Still upstream:** npm/bun installs (npm), Homebrew `can1357/tap/omp`, mise `github:can1357/oh-my-pi`. Unauthenticated GitHub API: 60 requests per hour per IP.
 
 ## ompweb
@@ -193,7 +195,7 @@ rel="v$version-int.$stamp.g${SHA:0:7}"
 
 ### W3. The omp row follows ompweb
 
-Today (#460) the omp row runs `omp update` through `resolveOmpBin()`, i.e. `ompweb-omp update`, which on a compiled binary replaces it with upstream's `omp` [INFERENCE from upstream `update-cli.ts` `replaceBinaryForUpdate`; not run]. `ompweb-omp`'s own build sets no `PI_UPDATE_REPO`.
+Before W3 the omp row ran `omp update` through `resolveOmpBin()`, i.e. `ompweb-omp update`, which on a compiled binary replaces it with upstream's `omp` [INFERENCE from upstream `update-cli.ts` `replaceBinaryForUpdate`; not run]. `ompweb-omp`'s own build sets no `PI_UPDATE_REPO`.
 
 - `lib/omp/updates.ts`: `runOmpUpdate`, `checkOmpUpdate`, the cached check and `parseOmpUpdateStatus` deleted.
 - `lib/self-update.ts`: `Kind` is `"app"` only.
@@ -212,16 +214,16 @@ After one green scheduled round in the fork and one green ompweb pre-release on 
 2. Fork: Environment `omp-round`; push orphan `fork-ci` (no `schedule` yet); `apple-sdk` release; default branch → `fork-ci`; dispatch `fork-guard.yml`.
 3. Disable integration-ci's `omp-auto.yml`.
 4. Delete the fork's old-format releases and tags. Dispatch the fork's `omp-auto.yml` with `force=true`: a promoted release `v<base>-int.<stamp>.g<sha7>` carrying #19075 and the update-source PR, neither #18646 nor #18668, with `omp-packages-<version>.zip`; its binaries print that version.
-5. Host rewiring (F8); `integration build && integration deploy` for `/opt/omp-patched` (bootstrap). Other machines on older fork binaries get the same release installed by hand once.
-6. ompweb PR B (W1, W2) with integration-ci's fetch line for `ompweb.yml`/config; ompweb PR C (W3).
+5. Host rewiring (F8); `integration build && integration deploy` for the build host's omp (bootstrap). Other machines on older fork binaries get the same release installed by hand once.
+6. ompweb W1, W2 and W3 (shipped together in PR #473) with integration-ci's fetch line for `ompweb.yml`/config.
 7. Add the `schedule` to `fork-ci`'s `omp-auto.yml`.
 8. integration-ci cleanup.
 
-Rollback before step 8: default branch back to `main`, re-enable integration-ci's `omp-auto.yml`, restore the `~/.config/integration` symlink, copy new `fork-ci` fixups back to integration-ci. Fork releases stay valid. ompweb PRs revert independently.
+Rollback before step 8: default branch back to `main`, re-enable integration-ci's `omp-auto.yml`, restore the `~/.config/integration` symlink, copy new `fork-ci` fixups back to integration-ci. Fork releases stay valid. Reverting PR #473 reverts the ompweb side.
 
 ## Risks
 
-- Cross-target `bun install --os/--cpu` with fork leaves and cross-target runner builds were not exercised by the spike (only linux-x64); the first PR B CI run is the test.
+- Cross-target `bun install --os/--cpu` with fork leaves and cross-target runner builds were not exercised by the spike (only linux-x64); PR #473's `omp-runner.yml` runs were the first test.
 - Which writes `GITHUB_TOKEN` is refused is inferred; the PAT retry covers it, and its log shows whether it ever fires.
 - A new upstream workflow can run once on the push that adds it before F2 disables it (no secrets).
 - Every (pre)release follows `integration-release`, so an hourly round can fail the next ompweb (pre)release until the runner is adapted.

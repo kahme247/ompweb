@@ -26,14 +26,12 @@
 
 ## 环境要求
 
-- 已安装 [omp](https://github.com/can1357/oh-my-pi) 且在 `PATH` 中（或通过 `OMP_WEB_OMP_BIN` 指定路径）
+- 无需另行安装 omp：ompweb 自带其 [omp](https://github.com/can1357/oh-my-pi) 构建 `ompweb-omp`（单一可执行文件版本中位于同一目录，npm 包中作为可选依赖 `@kahme247/ompweb-omp-<os>-<arch>`）。它直接使用 `~/.omp` 中的设置、认证和会话。支持的平台为 linux-x64、linux-arm64、darwin-x64、darwin-arm64 和 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上安装时不含 `ompweb-omp`，无法启动会话
 - Node.js `>= 24`。服务器运行在 [Bun](https://bun.sh) 上，Bun 会作为 npm 包的依赖自动安装（找不到随包安装的 Bun 时使用 `PATH` 中的 Bun）
 
-将排队的后续消息转为 **Steer** 需要 omp 运行时支持 `promote_queued_message` RPC 命令（omp 18.1.16 尚不支持）。旧版运行时会返回错误，消息仍作为后续消息排队；ompweb 不会重复发送一条引导消息。
+排队消息的 **Steer**、**Delete** 和 **Edit** 操作是 `ompweb-omp` 通道的命令（`promote_queued_message`、`remove_queued_message`）。只有 omp 确认取消后才会移除消息；编辑时也必须先取消成功，再将文本恢复到输入框。消息已不在队列中时，界面保留队列并显示提示；ompweb 不会重复发送一条引导消息。
 
-队列中的 **Delete** 和 **Edit** 还需要支持 `remove_queued_message`。只有 OMP 确认取消后才会移除消息；编辑时也必须先取消成功，再将文本恢复到输入框。运行时不支持该命令或消息已不在队列中时，界面保留队列并显示提示。
-
-队列面板显示 omp 自身的队列（`get_state` 中的 `queuedMessages` 和 `queue_update` 事件，需 omp 18.4.4 或更高版本），因此查看同一会话的所有设备都会看到相同的排队消息。**Stop** 会将仍在队列中等待的消息文本放回输入框，而不是让智能体运行它们；但模型已通过实时引导接收的引导消息仍会运行。更早版本的 omp 不显示队列面板，Stop 也无法取回排队消息。
+队列面板显示 omp 自身的队列（`get_state` 中的 `queuedMessages` 和 `queue_update` 事件），因此查看同一会话的所有设备都会看到相同的排队消息。**Stop** 会将仍在队列中等待的消息文本放回输入框，而不是让智能体运行它们；但模型已通过实时引导接收的引导消息仍会运行。
 
 ## 快速开始
 
@@ -60,6 +58,7 @@ ompweb
 ompweb --port 8080                         # 自定义端口
 ompweb --hostname 0.0.0.0                  # 监听网络地址
 ompweb hash-password                      # 输出 OMP_WEB_PASSWORD_HASH 的值
+ompweb preflight                          # 像新会话一样启动一次 omp 并等待其 hello；失败时说明原因并以 1 退出
 ompweb --no-open                           # 不自动打开浏览器
 ```
 
@@ -122,7 +121,7 @@ Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置�
 | `OMP_WEB_NO_OPEN` | 设为 `1` 时禁止自动打开浏览器 | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | 设为 `1` 时禁用更新检查和应用内更新；修改后需重启 | `0` |
 | `OMP_WEB_NAME` | 浏览器标签页和已安装应用中显示的名称。设为 `url`、`host` 或 `domain`（不区分大小写）时使用浏览器所连接的主机名（不含端口），localhost 和 IP 地址仍显示 `omp web`；其他值按原样使用。修改后需重启 | `omp web` |
-| `OMP_WEB_OMP_BIN` | `omp` 二进制路径（未在 PATH 时使用） | _自动检测_ |
+| `OMP_WEB_OMP_BIN` | 用于替代自带版本的 `ompweb-omp` 构建路径（例如源码检出中的 `runner/release/ompweb-omp-<os>-<arch>`）。普通的 `omp` 不支持 ompweb 的通道，无法使用 | _自带的 `ompweb-omp`_ |
 | `PI_CODING_AGENT_DIR` | 自定义 omp agent 目录 | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI 兼容的语音转文字接口 URL。不设置时使用 `OMP_WEB_STT_MODEL` 通过 omp 自身的凭据转录 | _无_ |
 | `OMP_WEB_STT_KEY` | STT 接口对应的 API Key | _无_ |
@@ -136,10 +135,12 @@ Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置�
 git clone https://github.com/kahme247/ompweb.git
 cd ompweb
 npm install
+npx bun runner/scripts/use-omp-build.ts && (cd runner && npx bun install --frozen-lockfile)
+npx bun runner/scripts/build-binary.ts   # 为本机构建 ompweb 的 omp：runner/release/ompweb-omp-<os>-<arch>
 npm run dev
 ```
 
-本地开发服务器运行在 [http://127.0.0.1:30178](http://127.0.0.1:30178)。
+本地开发服务器运行在 [http://127.0.0.1:30178](http://127.0.0.1:30178)。它会自动找到 `runner/release/` 中的 runner；`npm test` 和 `npm run build:binary` 也需要先准备好 runner。
 
 `npm run dev` 以 Bun 热重载方式运行服务器。`npm run build` 将浏览器端应用打包到 `dist/`，`npm start` 在 30177 端口提供该产物（可用 `npm run smoke` 检查结果）。`npm run dev:lan` 会将开发服务器绑定到所有网络接口。
 

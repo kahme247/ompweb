@@ -26,14 +26,12 @@
 
 ## 系統需求
 
-- 已安裝 [omp](https://github.com/can1357/oh-my-pi) 並設定於系統 `PATH` 中（或透過 `OMP_WEB_OMP_BIN` 指定路徑）
+- 無需另行安裝 omp：ompweb 隨附其 [omp](https://github.com/can1357/oh-my-pi) 建置版本 `ompweb-omp`（單一二進位檔版本中位於同一資料夾，npm 套件中則為選用相依套件 `@kahme247/ompweb-omp-<os>-<arch>`）。它直接使用 `~/.omp` 中的設定、認證與對話。支援的平台為 linux-x64、linux-arm64、darwin-x64、darwin-arm64 與 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上安裝時不含 `ompweb-omp`，無法啟動對話
 - Node.js `>= 24`。伺服器運作於 [Bun](https://bun.sh) 上，Bun 會作為 npm 套件的相依套件自動安裝（找不到隨套件安裝的 Bun 時會使用 `PATH` 中的 Bun）
 
-針對佇列中待傳送後續訊息執行的**引導（Steer）**操作，需搭配支援 `promote_queued_message` RPC 指令的 omp 執行階段（omp 18.1.16 尚未支援）。較舊版本會回報錯誤並保留訊息在佇列中作為普通後續訊息；ompweb 不會重複傳送引導訊息。
+佇列中訊息的**引導（Steer）**、**刪除（Delete）**與**編輯（Edit）**操作皆為 `ompweb-omp` 通道的指令（`promote_queued_message`、`remove_queued_message`）。刪除操作會先經 omp 確認後，標籤才會自畫面消失；編輯操作則在成功取消佇列後，才會將文字取回輸入框。若該訊息已不再處於等待狀態，佇列將維持原狀並顯示提示；ompweb 不會重複傳送引導訊息。
 
-佇列的**刪除（Delete）**與**編輯（Edit）**額外需要 `remove_queued_message` 支援。刪除操作會先經 OMP 確認後，標籤才會自畫面消失；編輯操作則在成功取消佇列後，才會將文字取回輸入框。若執行階段不支援或該訊息已不再處於等待狀態，佇列將維持原狀並顯示提示。
-
-佇列面板會顯示 omp 自身的佇列狀態（需 omp 18.4.4 或更新版本，支援 `get_state` 中的 `queuedMessages` 與 `queue_update` 事件），因此所有檢視該對話的裝置皆能看到一致的排隊訊息。點選**停止（Stop）**會將仍在佇列中等待的訊息文字退回輸入框，而非任由代理繼續執行；但若模型已經透過即時引導接收了該操作，該次引導仍會繼續執行。較舊的 omp 執行階段不會顯示佇列面板，且停止時無法取回排隊中的訊息。
+佇列面板會顯示 omp 自身的佇列狀態（`get_state` 中的 `queuedMessages` 與 `queue_update` 事件），因此所有檢視該對話的裝置皆能看到一致的排隊訊息。點選**停止（Stop）**會將仍在佇列中等待的訊息文字退回輸入框，而非任由代理繼續執行；但若模型已經透過即時引導接收了該操作，該次引導仍會繼續執行。
 
 ## 在密碼保護下安裝應用程式（PWA）
 
@@ -42,8 +40,6 @@
 其 192×192 與 512×512 PNG 圖示直接以內嵌方式包含在打包資源中，因為 Android 原生安裝程式在抓取一般圖示網址時不會攜帶驗證 Cookie。安裝後應用程式仍會於 `/` 啟動，作用範圍（scope）為 `/`。其 `theme_color` 與 `background_color` 來自清單連結的 `?theme=` 參數：Chrome 在重新整理已安裝應用程式的清單時不會附帶 Cookie，因此伺服器會將所選主題的色彩（記錄於 `omp-theme-color` Cookie 中）渲染至該連結。Chrome 153 及更新版本在下次檢查清單更新後，會據此為已安裝應用程式的 Android 導覽列著色。
 
 請保持 Cloudflare Access 與應用程式驗證處於啟用狀態；無需為 manifest 設定公開存取例外或 Access 略過規則。此機制並未加入離線支援。本機 Chromium 驗證已涵蓋受 Cookie 保護的中繼資料並封鎖 HTTP 圖示網址的情境（未產生任何安裝性錯誤）。專案維護者亦確認在 Cloudflare Access 保護下，實體手機安裝皆可正常運作。
-
-技能啟動提示需搭配支援 `get_skill_diagnostics`、`set_skill_startup_diagnostics` 與 `skill_diagnostics_update` 的 OMP 執行階段。衝突與多餘重複安裝的項目會在該 OMP 對話啟動時顯示於訊息輸入框上方；開啟空白的新對話頁面不會單純為了診斷而啟動 OMP。點選**詳細資訊**可檢視解析出的預設項目、不同版本、完全相同的副本、實際檔案路徑、來源以及選取原因。點選 **×** 按鈕可在該對話中隱藏該提示，直到診斷報告有所變更為止。點選**關閉**以及前往**設定 → 介面與行為 → 技能啟動提示**會直接變更 OMP 持久化的 `skills.showStartupDiagnostics` 偏好設定，而非瀏覽器獨立設定。即使提示已關閉，在已選取的執行中對話內仍可透過**設定 → 擴充功能與工具 → 技能 → 檢視技能診斷資訊**進行查閱。檢視診斷不會重新接續已停止的對話。若缺乏執行階段支援或沒有執行中的對話，將顯示為無法使用，而非無問題的正常結果。
 
 ## 通知功能
 
@@ -54,7 +50,7 @@
 - 若在具備安全環境但未支援推播的環境下，只要 omp-web 分頁保持開啟，系統通知依然有效。若在非 localhost 位址透過純 HTTP 連線，瀏覽器會禁止所有系統通知：此時僅會保留在操作 omp-web 時顯示的應用程式內浮動提示。
 - 桌面瀏覽器會透過作業系統的通知中心顯示通知。若要接收背景推播，需保持瀏覽器處理程序執行中。
 
-完成通知採用 omp 的 `prompt_result` 與 `session_settled` RPC 訊框（需 omp 18.3.1 或更新版本）。
+完成通知採用 `ompweb-omp` 通道的 `prompt_result` 與 `session_settled` 訊框。
 
 ## 快速開始
 
@@ -86,6 +82,7 @@ ompweb
 ompweb --port 8080                         # 自訂連接埠
 ompweb --hostname 0.0.0.0                  # 監聽網路介面
 ompweb hash-password                       # 輸出供 OMP_WEB_PASSWORD_HASH 使用的雜湊值
+ompweb preflight                           # 如同新對話般啟動一次 omp 並等待其 hello；失敗時說明原因並以 1 結束
 ompweb --no-open                           # 不自動開啟瀏覽器
 ompweb --install-tray                      # 安裝 Windows 系統匣服務與桌面捷徑
 ompweb --uninstall-tray                    # 解除安裝 Windows 系統匣服務與捷徑
@@ -140,7 +137,7 @@ ompweb 透過一個輕量的守護行程 `ompweb host` 來執行這台機器的 
 每個[發行版本](https://github.com/kahme247/ompweb/releases/latest)亦提供編譯完成的單一執行檔，隨附其所提供服務的相關檔案：
 `ompweb-linux-x64.tar.gz`、`ompweb-linux-arm64.tar.gz`、`ompweb-darwin-x64.tar.gz`、
 `ompweb-darwin-arm64.tar.gz` 以及 `ompweb-windows-x64.zip`。無需安裝 Node、npm
-或 Bun；僅需安裝 omp。x64 建置版本採用 Bun 的基準執行階段，因此亦可在不具備 AVX2 指令集的 CPU 上運作。每個封存檔皆於 `licenses/` 包含其打包內容的授權條款。`main` 分支上通過 CI 的每次提交亦會發布為以建置時間命名的[預先發行版（prerelease）](https://github.com/kahme247/ompweb/releases)（例如 `2026-11-01T10:30:00Z`），同樣包含上述五種封存檔。
+或 Bun，也無需安裝 omp：它隨附的 omp 建置版本 `ompweb-omp` 就在同一資料夾中。x64 建置版本採用 Bun 的基準執行階段，因此亦可在不具備 AVX2 指令集的 CPU 上運作。每個封存檔皆於 `licenses/` 包含其打包內容的授權條款。`main` 分支上通過 CI 的每次提交亦會發布為以建置時間命名的[預先發行版（prerelease）](https://github.com/kahme247/ompweb/releases)（例如 `2026-11-01T10:30:00Z`），同樣包含上述五種封存檔。
 
 ```bash
 tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # 解壓縮出 ompweb-linux-x64/
@@ -148,11 +145,11 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # 解壓縮出 ompweb-linux
 ~/.local/share/ompweb-linux-x64/ompweb host          # 本機守護行程，於第二個終端機執行
 ```
 
-- **將 `ompweb` 保留在其資料夾內。** 它會從所在目錄提供 `dist/`、`public/` 與其他檔案（在系統 `PATH` 中建立指向它的符號連結可正常運作），若設定了 `OMP_WEB_PACKAGE_DIR` 則從該路徑提供。
+- **將 `ompweb` 保留在其資料夾內。** 它會執行 `ompweb-omp`，並從所在目錄提供 `dist/`、`public/` 與其他檔案（在系統 `PATH` 中建立指向它的符號連結可正常運作），若設定了 `OMP_WEB_PACKAGE_DIR` 則從該路徑提供。
 - **macOS** 會對下載檔案加上隔離屬性（quarantine）：首次啟動前請先執行一次 `xattr -dr com.apple.quarantine ompweb-darwin-arm64`。
 - **macOS 15 或更新版本** 在應用程式存取區域網路前會先詢問權限。若 Mac 上的 `ompweb host` 對區網上的伺服器回報 `ECONNREFUSED`，但 `curl` 卻能正常連線，請前往「系統設定 → 隱私權與安全性 → 區域網路」允許你的終端機（或 `ompweb`）。透過 Tailscale 等 VPN 連線的伺服器，或從 SSH 工作階段啟動的 host 則不受影響。
 - **不提供系統匣、服務安裝程式或應用程式內更新。** 若要更新，請停止 `ompweb` 與 `ompweb host`，以新發行版本替換該目錄，然後再次啟動兩者；當有新版本釋出時，**設定 → 系統** 會提供發行頁面連結。你的對話與設定皆儲存於 `~/.omp`，不在該目錄中。
-- **作為 systemd 使用者服務**，請自行編寫這兩個單元（請調整路徑；將 omp 所在目錄加入 `PATH`，或設定 `OMP_WEB_OMP_BIN`）：
+- **作為 systemd 使用者服務**，請自行編寫這兩個單元（請調整路徑）：
 
 ```ini
 # ~/.config/systemd/user/ompweb.service
@@ -301,7 +298,7 @@ npx --yes --package=@kahme247/ompweb@latest ompweb-tray --uninstall    # 移除�
 
 ## 在其他機器上執行對話
 
-單一 ompweb 可以啟動並監看其他機器上的 omp 對話。每台機器保留其各自的 `omp` 安裝、`~/.omp/agent` 目錄、對話與認證資訊；ompweb 僅負責路由。遠端機器需要安裝 `omp` 以及 Node 24（用於 `npx`）或[單一二進位檔](#單一二進位檔)，並且必須能透過 HTTP(S) 連線至 ompweb 伺服器。遠端機器向外連線，因此可以位於 NAT 後方。
+單一 ompweb 可以啟動並監看其他機器上的 omp 對話。每台機器保留其各自的 ompweb（及其 `ompweb-omp`）、`~/.omp/agent` 目錄、對話與認證資訊；ompweb 僅負責路由。遠端機器需要 Node 24（用於 `npx`）或[單一二進位檔](#單一二進位檔)，並且必須能透過 HTTP(S) 連線至 ompweb 伺服器。遠端機器向外連線，因此可以位於 NAT 後方。
 
 ### 透明主機集區
 
@@ -329,7 +326,7 @@ npx --yes --package=@kahme247/ompweb@latest ompweb-tray --uninstall    # 移除�
 
    主機會在「設定 → 主機」中顯示為**線上**，側邊欄會為其建立群組，而在新對話畫面中也會出現主機選取器。
 
-**設定 → 主機**也會顯示每台機器的 ompweb 守護行程與 OMP 執行階段版本、可用更新與更新操作（包含**本機**）。檢查與安裝會在所選主機上執行，而非在網頁伺服器上執行。若某個主機更新的連線協定與目前的網頁應用程式不相容，該更新仍會顯示，但會被封鎖並說明原因；請先更新網頁伺服器。無法驗證目標連線協定的更新同樣會被封鎖。OMP 更新則與連線協定無關。在更新守護行程之前，請先關閉其對話行程：更新程式拒絕中斷執行中的對話或子代理。更新 OMP 後，現有行程在重新啟動前仍會維持已載入的舊版本。**設定 → 系統**則保留網頁伺服器自身的應用程式更新與服務設定。主機需要支援這些更新操作的守護行程版本；較舊的版本會顯示不支援訊息，需先手動更新一次。若守護行程與網頁伺服器共用同一個安裝目錄，請先更新伺服器，再使用主機的「僅重新啟動」更新。不支援的服務封裝程式與偵測到的外部重新啟動指令碼會顯示需手動更新的原因。更新前景執行的守護行程前，請先停止外部的自動重新啟動迴圈。
+**設定 → 主機**也會顯示每台機器的 ompweb 守護行程與 omp 版本、可用更新與更新操作（包含**本機**）。檢查與安裝會在所選主機上執行，而非在網頁伺服器上執行。若某個主機更新的連線協定與目前的網頁應用程式不相容，該更新仍會顯示，但會被封鎖並說明原因；請先更新網頁伺服器。無法驗證目標連線協定的更新同樣會被封鎖。omp 隨附於每個 ompweb 發行版本，並隨之一起更新。在更新守護行程之前，請先關閉其對話行程：更新程式拒絕中斷執行中的對話或子代理。**設定 → 系統**則保留網頁伺服器自身的應用程式更新與服務設定。主機需要支援這些更新操作的守護行程版本；較舊的版本會顯示不支援訊息，需先手動更新一次。若守護行程與網頁伺服器共用同一個安裝目錄，請先更新伺服器，再使用主機的「僅重新啟動」更新。不支援的服務封裝程式與偵測到的外部重新啟動指令碼會顯示需手動更新的原因。更新前景執行的守護行程前，請先停止外部的自動重新啟動迴圈。
 
 守護行程更新是由主機上獨立的更新程式行程執行。它會停止守護行程、替換為新發行版並再次啟動；若失敗則會還原先前的發行版。若該更新程式在停止守護行程後本身遭到強制終止（例如重新開機或記憶體不足 OOM 終止），將不會有任何程序重新啟動主機，主機便會維持離線。在主機上手動復原方式：在包含安裝目錄的資料夾中，`.ompweb-backup-<id>` 即為先前的發行版。若該目錄存在，請將目前的安裝目錄移開，並將備份重新命名回原本的安裝目錄名稱，然後再次啟動 `ompweb host`（或其服務）。「設定 → 主機」會將該次更新回報為已中斷。
 
@@ -361,7 +358,7 @@ npx @kahme247/ompweb@latest host --allow-http
 
 以下方式皆以主機模式執行[單一二進位檔](#單一二進位檔)。在 Linux 上，服務可在登出與重新開機後持續維持連線；Windows 排程工作會在使用者登入後啟動，因此重新開機後必須先登入；在 macOS 上，則透過指令碼在終端機中保持執行（原因詳見下方）。請先解壓縮適用於該機器的發行版，接著依照步驟 2 執行一次 `ompweb host login --url …` 以儲存連線資訊（將 `npx @kahme247/ompweb@latest` 替換為二進位檔路徑）。每種設定都會在 `ompweb host` 失敗 10 秒後重新啟動，但結束代碼為 `0` 時不會重新啟動：那代表有使用相同權杖的較新連線取代了它，若重新啟動會導致每 10 秒互相搶奪連線。若伺服器網址為純 `http://`，請在 `host` 後方加上 `--allow-http`；若儲存連線資訊時有設定 `PI_CODING_AGENT_DIR`，請在服務中也一併設定。獨立主機可同時連結至多台伺服器，並在伺服器支援連線協定 v7 時共用即時對話：請從每台額外的伺服器取得權杖，並執行 `ompweb host login --add --url <server>`。請勿在同一台機器上同時執行本機 ompweb 網頁伺服器，因為它會為自己的守護行程寫入同一個連線設定檔。若要更新，請先停止服務、替換發行版目錄，然後重新啟動服務。撤銷主機後，請停止並移除其服務，否則它會持續重試。
 
-**Linux（systemd 使用者服務）。** 建立 `~/.config/systemd/user/ompweb-host.service`（請調整發行版路徑，並將 omp 所在目錄加入 `PATH` 或設定 `OMP_WEB_OMP_BIN`）：
+**Linux（systemd 使用者服務）。** 建立 `~/.config/systemd/user/ompweb-host.service`（請調整發行版路徑）：
 
 ```ini
 [Unit]
@@ -472,7 +469,7 @@ Start-ScheduledTask ompweb-host
 | `OMP_WEB_NO_OPEN` | 設為 `1` 可防止自動開啟瀏覽器 | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | 設為 `1` 可停用更新檢查與應用程式內更新；變更後需重新啟動 | `0` |
 | `OMP_WEB_NAME` | 顯示於瀏覽器分頁與已安裝應用程式的名稱。若設為 `url`、`host` 或 `domain`（不分大小寫），則採用瀏覽器連線的主機名稱（不含連接埠）；localhost 與 IP 位址仍會保持 `omp web`。其他任何值將原樣採用。變更後需重新啟動 | `omp web` |
-| `OMP_WEB_OMP_BIN` | 當 `omp` 二進位檔未在 `PATH` 中時指定的路徑 | _自動偵測_ |
+| `OMP_WEB_OMP_BIN` | 用於取代隨附版本的 `ompweb-omp` 建置版本路徑（例如原始碼檢出中的 `runner/release/ompweb-omp-<os>-<arch>`）。一般的 `omp` 不支援 ompweb 的通道，無法使用 | _隨附的 `ompweb-omp`_ |
 | `PI_CODING_AGENT_DIR` | 自訂 omp 代理目錄 | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | 相容於 OpenAI 的語音轉文字（STT）端點網址。若保留未設定，則會透過 omp 自身的憑證搭配 `OMP_WEB_STT_MODEL` 進行轉錄 | _無_ |
 | `OMP_WEB_STT_KEY` | STT 端點的選用 API 金鑰 | _無_ |
@@ -556,10 +553,12 @@ proxy_set_header X-Omp-Web-Auth $ompweb_auth;
 git clone https://github.com/kahme247/ompweb.git
 cd ompweb
 npm install
+npx bun runner/scripts/use-omp-build.ts && (cd runner && npx bun install --frozen-lockfile)
+npx bun runner/scripts/build-binary.ts   # 為本機建置 ompweb 的 omp：runner/release/ompweb-omp-<os>-<arch>
 npm run dev
 ```
 
-開發伺服器將執行於 [http://127.0.0.1:30178](http://127.0.0.1:30178)。
+開發伺服器將執行於 [http://127.0.0.1:30178](http://127.0.0.1:30178)。它會自動找到 `runner/release/` 中的 runner；`npm test` 與 `npm run build:binary` 也需要先準備好 runner。
 開發伺服器不會接管本機守護行程：只有正式環境的網頁伺服器會寫入守護行程的 `host.json`，因此「本機」在開發環境中會顯示為離線，而守護行程會保持與您已安裝的 ompweb 連結。
 
 `npm run dev` 以 Bun 熱重載（hot reload）方式執行伺服器。`npm run build` 將瀏覽器端應用打包至 `dist/`，`npm start` 則在 30177 連接埠提供該產物（可用 `npm run smoke` 檢查結果）。`npm run dev:lan` 會將開發伺服器繫結至所有網路介面。`npm run build:binary` 會將適用於本機的[單一二進位檔](#單一二進位檔)建置到 `release/`（可使用 `-- --target bun-linux-arm64` 等參數為其他平台建置；`npm run smoke -- --binary release/ompweb-linux-x64/ompweb` 進行檢查）。

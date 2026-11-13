@@ -5,12 +5,16 @@ Thanks for your interest in contributing!
 ## Setup
 
 - Node.js 24 or newer (the server runs on [Bun](https://bun.sh), which `npm install` provides)
-- The [omp](https://github.com/can1357/oh-my-pi) binary on your `PATH` (or set `OMP_WEB_OMP_BIN`)
 
 ```bash
 npm install
+npx bun runner/scripts/use-omp-build.ts && (cd runner && npx bun install --frozen-lockfile)   # ompweb's omp build; npm test needs it too
 npm run dev   # http://127.0.0.1:30178, Bun hot reload
 ```
+
+For live sessions, build the runner for this machine with `npx bun runner/scripts/build-binary.ts`: ompweb finds
+`runner/release/ompweb-omp-<os>-<arch>` by itself (`OMP_WEB_OMP_BIN` overrides it). A stock `omp` does not
+speak ompweb's channel.
 
 The repository tracks a [graphify](https://github.com/Graphify-Labs/graphify) code
 graph in `graphify-out/graph.json`. To keep it current, install the graphify release
@@ -62,9 +66,9 @@ The jsdom dependency stays on 29.x for now; moving to a newer major is a separat
   icons come from `lucide-react`.
 - **i18n**: every user-facing string needs entries in all four dictionaries:
   `lib/i18n/locales/{en,zh-CN,zh-TW,ja}.json`.
-- **Architecture**: omp-web never imports `@oh-my-pi/*` or `@earendil-works/*`
-  packages (Bun-only). Live agent features go through the `omp` child process
-  via RPC; see `DESIGN.md` and `AGENTS.md` for the full contract.
+- **Architecture**: the ompweb server and daemon never import `@oh-my-pi/*` or `@earendil-works/*`
+  packages (Bun-only). Live agent features go through the `ompweb-omp` child process
+  (`runner/`) over ompweb's channel; see `DESIGN.md` and `AGENTS.md` for the full contract.
 
 ## Pull requests
 
