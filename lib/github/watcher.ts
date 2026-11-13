@@ -3,7 +3,7 @@ import { loadWebServerSettings } from "../web-settings";
 import { fetchSnapshot } from "./api";
 import { diffSnapshot, formatUpdate, updateEntryId } from "./events";
 import { checkGh, defaultGhRunner, formatTarget, GhUnavailableError, parseGithubTarget, type GhRunner } from "./gh";
-import { closeWatchStore, commitUpdate, getPending, listWatches, postedIds, removeSessionWatches, renameSession, setPending, type PendingUpdate, type Watch } from "./watch-store";
+import { closeWatchStore, commitUpdate, getPending, isPosting, listWatches, postedIds, removeSessionWatches, renameSession, setPending, type PendingUpdate, type Watch } from "./watch-store";
 
 /**
  * Server-only poller: every watched item is fetched once per interval (items
@@ -12,7 +12,8 @@ import { closeWatchStore, commitUpdate, getPending, listWatches, postedIds, remo
  * and the cursor save replay the same entry id.
  */
 
-export type Delivery = "ok" | "gone" | "retry";
+/** `rejected`: a refusal retrying cannot fix, as "<status> <code>". */
+export type Delivery = "ok" | "gone" | "retry" | { rejected: string };
 
 export interface WatcherDeps {
   run?: GhRunner;
@@ -23,6 +24,10 @@ export interface WatcherDeps {
 }
 
 const INTERVAL_MS = 60_000;
+/** At most one snapshot per 1.5 s, about 2400 GraphQL points an hour of the login's 5000. */
+const ITEM_SPACING_MS = 1500;
+/** Below this many points left, polling waits for the reset so the user's own `gh` keeps working. */
+const BUDGET_FLOOR = 200;
 
 interface Outage {
   message: string;
@@ -36,6 +41,10 @@ interface WatcherState {
   cancels: Set<() => void>;
   inFlight: Set<string>;
   failing: Set<string>;
+  /** Watches whose refused update was logged ("session\0item"). */
+  refused: Set<string>;
+  /** Epoch ms of the GraphQL budget reset polling waits for. */
+  budgetResetAt?: number;
   outage?: Outage;
   detachMove?: () => void;
   stopped: boolean;
@@ -49,11 +58,19 @@ async function defaultDeliver(sessionId: string, id: string, message: string): P
   try {
     // Lazy: message-outbox pulls in rpc-manager, which will load the agent tools that load this module.
     const { runOutboxCommand, outboxScope } = await import("../message-outbox");
-    const response = await runOutboxCommand(sessionId, { type: "outbox_add", id, scope: outboxScope(), mode: "prompt", message }, false, "omp-web:github-watch");
-    return response.ok ? "ok" : response.status === 404 ? "gone" : "retry";
+    return await deliveryOf(await runOutboxCommand(sessionId, { type: "outbox_add", id, scope: outboxScope(), mode: "prompt", message }, false, "omp-web:github-watch"));
   } catch {
     return "retry";
   }
+}
+
+/** 404: the session is gone. 429 (outbox full) and 5xx pass; any other 4xx would refuse the same entry forever. */
+export async function deliveryOf(response: Response): Promise<Delivery> {
+  if (response.ok) return "ok";
+  if (response.status === 404) return "gone";
+  if (response.status === 429 || response.status >= 500) return "retry";
+  const code: unknown = await response.json().then((body: { code?: unknown } | null) => body?.code, () => undefined);
+  return { rejected: typeof code === "string" ? `${response.status} ${code}` : String(response.status) };
 }
 
 const defaultSchedule: Required<WatcherDeps>["schedule"] = (fn, ms) => {
@@ -64,11 +81,21 @@ const defaultSchedule: Required<WatcherDeps>["schedule"] = (fn, ms) => {
 
 const warn = (what: string, error: unknown) => console.warn(`[omp-web] github watcher: ${what}: ${error instanceof Error ? error.message : String(error)}`);
 
-/** Delivers a stored update; `ok` saves its cursor, `gone` ends the session's watches, `retry` leaves the row for the next poll. */
+/**
+ * Delivers a stored update; `ok` saves its cursor, `gone` ends the session's watches, `retry` leaves the row for the next poll.
+ * `rejected` drops the update but saves its cursor, so the watch goes on instead of retrying a refusal forever.
+ */
 async function deliverPending(state: WatcherState, sessionId: string, itemKey: string, pending: PendingUpdate): Promise<void> {
   const outcome = await state.deps.deliver(sessionId, pending.entryId, pending.message);
-  if (outcome === "ok") commitUpdate(sessionId, itemKey, pending.cursor, pending.final);
-  else if (outcome === "gone") removeSessionWatches(sessionId);
+  if (outcome === "gone") removeSessionWatches(sessionId);
+  else if (outcome !== "retry") {
+    const watchKey = `${sessionId}\0${itemKey}`;
+    if (outcome !== "ok" && !state.refused.has(watchKey)) {
+      state.refused.add(watchKey);
+      console.warn(`[omp-web] github watcher: the outbox of ${sessionId} refused an update for ${itemKey} (${outcome.rejected}); dropped it`);
+    }
+    commitUpdate(sessionId, itemKey, pending.cursor, pending.final);
+  }
 }
 
 /** Same id for the same session, kind and minute, so a repeat after a crash collapses in the outbox. */
@@ -113,6 +140,8 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
       else fresh.push(watch);
     }
     if (!fresh.length) return;
+    // A low GraphQL budget waits for its reset; stored updates above cost no GitHub call.
+    if (state.deps.now() < (state.budgetResetAt ?? 0)) return;
 
     const target = parseGithubTarget(itemKey);
     // Ids every watch already knows: paging stops there, so a lagging watch still sees what came after its own cursor.
@@ -132,6 +161,13 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
     }
     state.failing.delete(itemKey);
     await announceResumed(state);
+    const budget = snapshot.rateLimit;
+    if (budget && budget.remaining < BUDGET_FLOOR && state.deps.now() >= (state.budgetResetAt ?? 0)) {
+      state.budgetResetAt = Date.parse(budget.resetAt) || state.deps.now() + INTERVAL_MS;
+      console.warn(`[omp-web] github watcher: GraphQL budget low (${budget.remaining} points left); polling paused until ${budget.resetAt}`);
+    }
+    // An agent post to this item may be in the snapshot before its id is recorded: the next poll diffs it.
+    if (isPosting(itemKey)) return;
 
     const posted = postedIds(itemKey);
     for (const watch of fresh) {
@@ -173,14 +209,15 @@ function cycle(state: WatcherState): void {
     }, ms);
     state.cancels.add(cancel);
   };
-  // First, so a failing read below cannot end the chain.
-  track(() => cycle(state), INTERVAL_MS);
+  let items: string[] = [];
   try {
-    const items = loadWebServerSettings().agentToolsEnabled ? itemsOf() : [];
-    items.forEach((itemKey, index) => track(() => void pollItem(state, itemKey), Math.floor((index * INTERVAL_MS) / items.length)));
+    items = loadWebServerSettings().agentToolsEnabled ? itemsOf() : [];
   } catch (error) {
-    warn("watches could not be read", error);
+    warn("watches could not be read", error); // the next cycle is still scheduled below
   }
+  const interval = Math.max(INTERVAL_MS, items.length * ITEM_SPACING_MS);
+  track(() => cycle(state), interval);
+  items.forEach((itemKey, index) => track(() => void pollItem(state, itemKey), Math.floor((index * interval) / items.length)));
 }
 
 export function startGithubWatcher(deps: WatcherDeps = {}): void {
@@ -190,6 +227,7 @@ export function startGithubWatcher(deps: WatcherDeps = {}): void {
     cancels: new Set(),
     inFlight: new Set(),
     failing: new Set(),
+    refused: new Set(),
     stopped: false,
   };
   globalThis.__ompGithubWatcher = state;
