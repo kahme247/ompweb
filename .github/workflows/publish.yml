@@ -31,10 +31,9 @@ jobs:
 
       - run: npm install --global npm@^11.5.1
       - run: npm ci
-      - run: npm test
-      - run: npm run build
       # The omp the runners compile against: the fork's newest integration build, not runner/omp-build.json's pin
-      # (not committed back). No such release or a runner that fails tsc against it fails the release.
+      # (not committed back). No such release or a runner that fails tsc against it fails the release. Pinned before
+      # the tests: they import the runner (lib/hosts/omp-socket.test.mjs), and must run against the omp that ships.
       - name: Find the newest omp integration build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,6 +50,8 @@ jobs:
       # Without GH_TOKEN: bun install runs the omp packages' scripts.
       - name: Pin the runner to it
         run: npx bun runner/scripts/use-omp-build.ts "$OMP_TAG" && (cd runner && npx bun x tsc -p .)
+      - run: npm test
+      - run: npm run build
       # Builds the omp runners too, which the source smoke spawns from runner/release/.
       - name: Build the release binaries
         run: sh scripts/build-release-binaries.sh
