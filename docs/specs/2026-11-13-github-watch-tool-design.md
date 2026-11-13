@@ -68,7 +68,7 @@ If `gh` stops working while watches exist (logged out, uninstalled), polling fai
 
 ### Who may use the server's login
 
-The tools act as the web-server machine's `gh` account, which may reach private repositories. The rules follow `new_session`'s host rule (`startsUnasked` in `lib/agent-tools.ts`):
+The tools act as the web-server machine's `gh` account, which may reach private repositories. The rules follow `new_session`'s host rule (`startsUnasked` in `lib/agent-tool-hosts.ts`):
 
 - **Reads and watches** (`watch_github`, `unwatch_github`, `github_read`) from a session on this machine run without asking. From a session on another host they ask the calling session's user once per session and repository (`ctx.confirm`: "Let this session on <host> read OWNER/REPO through the server's GitHub login?") unless that host has **Let agents start sessions here** (`allowAgentStart`) on. The answer is remembered for the session's lifetime in the web server; a declined call returns an error saying the user declined.
 - **Writes** (`github_comment`, `github_resolve_thread`) ask every time, from any host, showing the target and the first lines of the body, unless the new web setting **Allow agent GitHub writes without asking** (`githubWritesUnasked`, `lib/web-settings.ts`, off by default, Settings → System beside **Agent tools**) is on.
