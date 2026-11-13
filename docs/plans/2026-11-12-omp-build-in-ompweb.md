@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** the omp round runs in `andrebrait/oh-my-pi` from an orphan default branch `fork-ci` (RPC dropped, also triggered by carried-PR changes, escalating on the fork, releases with npm tarballs); ompweb's `runner/` compiles against such a release and every ompweb (pre)release re-pins to the newest `integration-release` build; the omp row follows ompweb; integration-ci's omp process is deleted.
+**Goal:** the omp round runs in `andrebrait/oh-my-pi` from an orphan default branch `fork-ci` (fork binaries stamped `<upstream>-int.<YYYYMMDDHHMM>.<sha7>` and updating from fork releases, RPC dropped, also triggered by carried-PR changes, escalating on the fork, releases with npm tarballs); ompweb's `runner/` compiles against such a release and every ompweb (pre)release re-pins to the newest `integration-release` build; the omp row follows ompweb; integration-ci's omp process is deleted.
 
 **Spec:** `docs/specs/2026-11-12-omp-build-in-ompweb-design.md` (F1–F8, W1–W3, cleanup). Read it first. Open questions Q1–Q4 there; tasks use the spec's defaults and say where an answer changes them.
 
@@ -23,7 +23,8 @@
 2. A finished round does not retrigger; a push to one carried PR branch triggers the next; a failed round with an open issue for the same inputs is not retried hourly. (Tasks 3, 5)
 3. A push refused for the `workflows` permission retries with `OMP_FORK_TOKEN`; every other write uses `GITHUB_TOKEN`. (Tasks 2, 5)
 4. Prune never deletes the release ompweb `main` pins. (Task 6)
-5. An ompweb pre-release ships the build `integration-release` names, with no secret; `ompweb-omp --version` prints a plain semver; the omp row has no update button. (Tasks 9–11)
+5. The stamp comes from one `version` job (commit time), so all six binaries and the tag agree; old-format tags are gone before the first stamped release. (Tasks 6b, 7)
+6. An ompweb pre-release ships the build `integration-release` names, with no secret; `ompweb-omp --version` prints the release tag without `v`; the omp row has no update button. (Tasks 9–11)
 
 ---
 
@@ -33,6 +34,7 @@
 - [ ] Copy ompweb `runner/` to `/tmp/spike/runner`; drop `patchedDependencies`; `overrides` map each `@oh-my-pi/*` to `http://127.0.0.1:<port>/<tgz>`; `bun install`.
 - [ ] Verify: `bun.lock` has the URLs with integrity for transitive entries; one copy of each in `node_modules/@oh-my-pi`; `bun scripts/build-binary.ts linux-x64` resolves everything (only `runSessionHost` type errors expected).
 - [ ] If transitive overrides do not take, Task 9 uses spec W1's fallback; note it in the spec.
+- [ ] Spec Q5 check: `bun -e 'console.log(Bun.semver.order("18.20.0-int.202611130355.0123456","18.20.0-int.202611130356.abcdef1"), Bun.semver.satisfies("18.20.0-int.202611130355.0123456","*"))'` and omp's `compareVersions` on the same pair; record the result under Q5.
 
 ### Task 2: spike — what `GITHUB_TOKEN` may write (scratch repository)
 
@@ -81,19 +83,33 @@
 - [ ] `omp-auto.yml` `release`: download `omp-packages`, upload each `.tgz` and `omp-packages.json`. Prune: read the pinned tag from `gh api repos/kahme247/ompweb/contents/runner/package.json` (the `releases/download/<tag>/` segment; none → nothing extra) and skip it.
 - [ ] Verify: `actionlint`. Commit `ci: attach the npm packages to each integration release`.
 
+### Task 6b: fork versions and update source (spec F9)
+
+**Files:** `.github/workflows/omp.yml`, `.github/workflows/omp-auto.yml`, `.github/workflows/publish.yml` on `fork-ci`; `config/root--git--oh-my-pi.sh` comment.
+
+- [ ] Check the update-source PR is carried: open upstream from `feat/configurable-update-source` (`4a7bb87e`), or add it to `EXTRA_PRS` as a fork-qualified PR until it is; `integration heads` lists it.
+- [ ] `omp.yml` job `version` (first; no fork code; `contents: read`; blobless clone of `inputs.repo` at `inputs.sha`): `base=$(jq -r .version packages/utils/package.json)`; `stamp=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M "$SHA")`; output `version=$base-int.$stamp.${SHA:0:7}`; also a `workflow_call` output `version`. `binaries`, `pack`, `smoke` need it.
+- [ ] `binaries` "Build release binary": the spec F9 snippet (`PI_UPDATE_REPO: ${{ github.repository }}`, `jq` rewrite of `packages/utils/package.json` to `$VERSION`). `pack` applies the same rewrite before packing.
+- [ ] `smoke`: `bin/omp --version` (and `omp.exe`) must print `omp/$VERSION`; linux-x64 job: `grep -c andrebrait/oh-my-pi bin/omp` > 0.
+- [ ] `omp-auto.yml` `release`: tag `v${{ needs.build.outputs.version }}`; fail unless it matches `^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.[0-9a-f]{7}$` and its base equals the round's tag without `v`; skip when a release whose tag ends `.<sha7>` exists; create with `--latest` (never `--prerelease`/`--draft`). Prune only tags of that format.
+- [ ] `publish.yml` callers pass the same `version` (rolling release zips carry the stamped binary).
+- [ ] Verify: `actionlint`; Task 7's round. Commit `ci: stamp fork versions and update fork binaries from fork releases`.
+
 ### Task 7: fork setup and cut-over round (operational; user is admin)
 
 - [ ] User: Environment `omp-round` on `andrebrait/oh-my-pi`, deployment branches `fork-ci` only, secrets `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OMP_FORK_TOKEN` (fine-grained, this repository, Contents + Workflows write; omit if Task 2 showed no refusals).
 - [ ] `git -C /root/git/oh-my-pi-fork-ci push origin fork-ci`; `gh api -X PATCH repos/andrebrait/oh-my-pi -f default_branch=fork-ci` (Q3).
 - [ ] `gh release download apple-sdk -R andrebrait/integration-ci -D /tmp/sdk && gh release create apple-sdk -R andrebrait/oh-my-pi --latest=false --title "Apple SDK mirror" --notes "SHA256-named Apple SDK packages for the bazel darwin toolchain" /tmp/sdk/*.pkg`.
 - [ ] `gh workflow run fork-guard.yml -R andrebrait/oh-my-pi`; `gh workflow list -R andrebrait/oh-my-pi` shows only `fork-ci`'s workflows active (Q2).
+- [ ] Delete every old-format release and tag: `gh release list -R andrebrait/oh-my-pi --limit 100 --json tagName --jq '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9a-f]{7}$' | xargs -r -n1 gh release delete -R andrebrait/oh-my-pi --cleanup-tag --yes` (spec F9).
 - [ ] `gh workflow disable omp-auto.yml -R andrebrait/integration-ci`.
-- [ ] `gh workflow run omp-auto.yml -R andrebrait/oh-my-pi -f force=true`; watch (cold bazel cache, up to ~2 h). Expected: a promoted release listing #19075 and neither #18646 nor #18668, with `omp-packages.json` and the `.tgz` files; no `OMP Nix` run on its tag.
+- [ ] `gh workflow run omp-auto.yml -R andrebrait/oh-my-pi -f force=true`; watch (cold bazel cache, up to ~2 h). Expected: a promoted, Latest release `v<base>-int.<stamp>.<sha7>` whose stamp is the integration commit's committer minute (UTC), listing #19075 and the update-source PR and neither #18646 nor #18668, with `omp-packages.json` and the `.tgz` files; every binary's `--version` prints the tag without `v`; no `OMP Nix` run on its tag.
 
 ### Task 8: host rewiring and `/opt/omp-patched` (spec F8)
 
 - [ ] Replace the `~/.config/integration` symlink with a directory: per-file symlinks into `/root/git/integration-ci/config` for every file and fixups dir there except the omp ones; `root--git--oh-my-pi.sh` → `/root/git/oh-my-pi-fork-ci/config/root--git--oh-my-pi.sh`, `fixups/root--git--oh-my-pi` → `/root/git/oh-my-pi-fork-ci/config/fixups/root--git--oh-my-pi`. Keep the `.retired-*` dirs linked.
 - [ ] `cd /root/git/oh-my-pi && git fetch origin && git branch -f integration origin/integration-release && integration build && integration deploy`; `readlink /opt/omp-patched/current` names the release sha; `/opt/omp-patched/current/omp --version` runs.
+- [ ] Bootstrap check (spec F9): `/opt/omp-patched/current/omp --version` prints the stamped version, and `omp update --check` (with `HOME` pointed at a scratch dir) asks `api.github.com/repos/andrebrait/oh-my-pi` and reports up to date. Other machines on older fork binaries get the same release installed by hand once.
 - [ ] `integration build` for graphify, superpowers and ompweb still finds its config (`integration prs` dry check in each repo).
 
 ### Task 9: ompweb — runner against the fork release (spec W1)
@@ -101,7 +117,7 @@
 **Files:** `runner/package.json`, `runner/bun.lock`; delete `runner/patches/`; create `runner/scripts/use-omp-build.ts`; doc comment in `runner/scripts/build-binary.ts`; pin paragraph in `docs/specs/2026-11-12-omp-runner-design.md`.
 
 - [ ] `use-omp-build.ts <tag>`: fetch the release's `omp-packages.json`; set the overrides (or Task 1's fallback); drop stale `@oh-my-pi/*` overrides and `patchedDependencies`; write `package.json`; `bun install` in `runner/`; fail when a `@oh-my-pi/*` dependency has no entry.
-- [ ] Run it with Task 7's tag; delete `runner/patches/`; `bun x tsc -p runner`, `bun test` in `runner/`, `bun runner/scripts/build-binary.ts linux-x64`, `runner/release/ompweb-omp-linux-x64 --version` (plain semver) and `--smoke-test` pass.
+- [ ] Run it with Task 7's tag; delete `runner/patches/`; `bun x tsc -p runner`, `bun test` in `runner/`, `bun runner/scripts/build-binary.ts linux-x64`, `runner/release/ompweb-omp-linux-x64 --version` (the tag without `v`) and `--smoke-test` pass.
 - [ ] Verify: Verify PR and `omp-runner.yml` green; `integration build-sha <sha>` with the ompweb config builds in integration-ci's `ompweb.yml`.
 - [ ] Commit `feat(runner): compile ompweb-omp against the omp integration build`.
 
@@ -119,7 +135,7 @@
 **Files:** `lib/omp/updates.ts`, `lib/self-update.ts`, `app/api/omp-update/route.ts`, `lib/hosts/update-types.ts`, `lib/hosts/updates.ts`, `lib/hosts/daemon.ts`, `components/HostUpdates.tsx`, the Settings omp update card and its i18n keys (en, ja, zh-CN, zh-TW); tests `lib/hosts/updates.test.mjs`, `lib/hosts/host-updates-route.test.mjs`, `lib/self-update.test.mjs`, `components/SettingsConfig.updates.test.mjs`; `CHANGELOG.md`.
 
 - [ ] Before editing, `xd://lsp` references for `checkOmpUpdate`, `runOmpUpdate`, `HostUpdateTarget`, `OmpUpdateStatus` and the `omp` `Kind`; add any caller missing above.
-- [ ] Implement spec W3. Tests: `omp` target rejected; no omp `canUpdate`; Settings card has no update button. Delete tests of removed behaviour.
+- [ ] Implement spec W3. Tests: `omp` target rejected; the stamped version form is accepted and shown (spec W3 test line); no omp `canUpdate`; Settings card has no update button. Delete tests of removed behaviour.
 - [ ] Verify: `npm run typecheck`, `npm run lint`, `bun test --parallel lib/hosts lib/self-update.test.mjs components/SettingsConfig.updates.test.mjs`.
 - [ ] CHANGELOG: "omp updates with ompweb: the omp row no longer runs `omp update`." Commit `feat(hosts): omp updates with ompweb`. Open PR C.
 

@@ -96,7 +96,7 @@ All `rpc-*` paths are `packages/coding-agent/test/rpc-*.test.ts`; 10 occurrences
 
 ### F6. Releases carry npm tarballs
 
-`omp.yml` gets a job `pack` (needs `natives`; fork code; `contents: read`; no secrets): `bun install --frozen-lockfile`, natives into `packages/natives/native`, every public workspace package packed as upstream would publish it (`scripts/ci-release-publish.ts`'s manifest rewrite and `bun pm pack`, not published), plus one `@oh-my-pi/pi-natives-<os>-<arch>` leaf (`packages/natives/scripts/gen-npm-packages.ts`) for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`. Versions stay the base release's (plain semver for `ompweb-omp --version` and `HOST_VERSION_PATTERN`). Artifact `omp-packages`: the `.tgz` files and `omp-packages.json` (`{ "<npm name>": "<file>.tgz" }`).
+`omp.yml` gets a job `pack` (needs `natives` and `version`; fork code; `contents: read`; no secrets): `bun install --frozen-lockfile`, natives into `packages/natives/native`, F9's version rewrite of `packages/utils/package.json`, every public workspace package packed as upstream would publish it (`scripts/ci-release-publish.ts`'s manifest rewrite and `bun pm pack`, not published), plus one `@oh-my-pi/pi-natives-<os>-<arch>` leaf (`packages/natives/scripts/gen-npm-packages.ts`) for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`. Only `pi-utils` carries the fork version (F9); every other package keeps the base release's, and the runner's overrides map by name, so the mismatch does not matter. `ompweb-omp --version` therefore prints the fork version, the same string as the release tag without `v`. Artifact `omp-packages`: the `.tgz` files and `omp-packages.json` (`{ "<npm name>": "<file>.tgz" }`).
 
 `omp-auto.yml` `release` (no fork code) attaches each `.tgz` and `omp-packages.json` beside the binaries and `SHA256SUMS.txt`; notes unchanged. Pruning keeps the newest 10 `-int.` releases plus the one ompweb `main` pins (read from `kahme247/ompweb` `runner/package.json`, public). Releases before F6 have no tarballs.
 
@@ -116,7 +116,47 @@ The script stays only in integration-ci. Changes there (also used by the round t
 
 Host wiring (ai-dev): worktree `/root/git/oh-my-pi-fork-ci` of branch `fork-ci` (remote `origin` = the fork). `~/.config/integration` stops being a symlink to `integration-ci/config` and becomes a directory: per-file symlinks into `integration-ci/config` for graphify, superpowers, ompweb, the pin scripts and `fixups/root--git--ompweb`; `root--git--oh-my-pi.sh` and `fixups/root--git--oh-my-pi` link into the `fork-ci` worktree. `ci_build` resolves the config's repository from the symlink target (it already uses `readlink -f`), so it diffs the fork-ci worktree against `origin/fork-ci`.
 
-`integration build` for oh-my-pi dispatches `omp.yml` on `andrebrait/oh-my-pi`; its reuse lookup reads `project: oh-my-pi` from `fork-ci`'s `omp.yml` and finds zips in the fork's rolling `oh-my-pi` release (`publish.yml`, unchanged). `DEPLOY_CMD` is unchanged. Deploying an auto round: `git -C /root/git/oh-my-pi fetch origin && git -C /root/git/oh-my-pi branch -f integration origin/integration-release && integration build && integration deploy`.
+`integration build` for oh-my-pi dispatches `omp.yml` on `andrebrait/oh-my-pi`; its reuse lookup reads `project: oh-my-pi` from `fork-ci`'s `omp.yml` and finds zips in the fork's rolling `oh-my-pi` release (`publish.yml`, unchanged). `DEPLOY_CMD` is unchanged. Deploying an auto round: `git -C /root/git/oh-my-pi fetch origin && git -C /root/git/oh-my-pi branch -f integration origin/integration-release && integration build && integration deploy`. The first such deploy after F9 is the bootstrap install of a fork-updating binary on ai-dev.
+
+### F9. Fork versions, tags and `omp update`
+
+Fork binaries update from fork releases. This needs the user's upstream-able PR `feat/configurable-update-source` (pushed to `andrebrait/oh-my-pi` at `4a7bb87e`; carried like the user's other PRs once it is open upstream): with `PI_UPDATE_REPO=<owner>/<repo>`, a compiled omp's startup check, `omp update`, the binary takeover and `update.auto` read `https://api.github.com/repos/<repo>/releases/latest` (an exact version: `releases/tags/v<version>`) instead of `build.stencil.so`, and verify each download against the asset's GitHub `digest` (sha256). `packages/coding-agent/scripts/compile-binary.ts` bakes it in through `define` only when the build environment sets it.
+
+Release contract the fork's workflows meet:
+
+1. Binaries are compiled with `PI_UPDATE_REPO=andrebrait/oh-my-pi` in the environment of `bun run ci:release:build-binaries`.
+2. Version `<upstream version>-int.<YYYYMMDDHHMM>.<sha7>`, e.g. `18.20.0-int.202611130355.d2c2eff`, written into `packages/utils/package.json` (the only source of `VERSION`; natives check their own package version and are unaffected). The numeric stamp makes same-base builds sort (checked with omp's `compareVersions` and `Bun.semver.order` by the PR's author).
+3. **Stamp** = the integration commit's committer time in UTC, `TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M "$SHA"` (decided). It is computed once, in a first job `version` of `omp.yml` (no fork code; blobless clone of the sha), and passed as a job output to every matrix job (`binaries`, `pack`, `smoke`) and, as a `workflow_call` output, to `omp-auto.yml` `release`. No job uses its own clock, so six matrix jobs and the tag cannot straddle a minute. Every round makes a new integration commit, so stamps grow round by round.
+4. **Tag** = `v` + exactly what `omp --version` reports (`omp/<version>`); upstream's post-install check requires equality or restores the old binary. `release` builds the tag from the `version` output only and checks `<upstream version>` equals the round's upstream tag without `v`.
+5. **Assets** keep upstream's names: `omp-linux-x64`, `omp-linux-arm64`, `omp-darwin-x64`, `omp-darwin-arm64`, `omp-windows-x64.exe`, `omp-windows-arm64.exe`. GitHub's per-asset digest is what omp verifies; `SHA256SUMS.txt` stays for humans and ompweb. No musl assets: musl hosts get a clear error.
+6. **Latest.** Every promoted `-int.` release is a full release (never prerelease or draft) created with `--latest`; `releases/latest` ignores prereleases and drafts. `apple-sdk` and the rolling `oh-my-pi` release are `--latest=false`.
+
+Build step (each `binaries` matrix job):
+
+```yaml
+         - name: Build release binary
+           shell: bash
+           env:
+              RELEASE_TARGETS: ${{ matrix.target }}
+              PI_UPDATE_REPO: ${{ github.repository }}
+              VERSION: ${{ needs.version.outputs.version }}
+           run: |
+              set -euo pipefail
+              jq --arg v "$VERSION" '.version = $v' packages/utils/package.json > "$RUNNER_TEMP/utils.json"
+              mv "$RUNNER_TEMP/utils.json" packages/utils/package.json
+              bun run ci:release:build-binaries
+```
+
+`version` job: `base=$(jq -r .version packages/utils/package.json)`, `stamp=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M "$SHA")`, output `version=$base-int.$stamp.${SHA:0:7}`.
+
+- **Idempotence.** A build of an sha that already has an `-int.` release (tag ending `.<sha7>`) is not released again. A re-dispatch of the same sha computes the same stamp anyway (committer time), so tag and binaries would agree.
+- **Smoke.** The `smoke` job asserts `bin/omp --version` equals `omp/<version>`, and the linux-x64 binary contains the string `andrebrait/oh-my-pi` (fails the build if the update-source PR dropped out of the integration).
+- **Rolling `oh-my-pi` release** (`publish.yml`, manual `integration build`): the same `version` job and define.
+- **Old-format tags.** `v<base>-int.<sha7>` tags (`v18.19.0-int.77d6529`, `v18.20.0-int.d2c2eff`, …) sort **above** new ones of the same base when the sha has a letter (alphanumeric identifiers outrank numeric ones), so a fork binary at `18.20.0-int.<stamp>.<sha7>` would be offered the old build. The cut-over deletes every old-format `-int.` release and its tag on the fork (`gh release delete <tag> --cleanup-tag --yes`); `release` refuses to create a tag that does not match `^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.[0-9a-f]{7}$`, and prune only considers that format, so the old format is never reused. Old binaries are unaffected (they report the plain base version and ask Stencil).
+- **Bootstrap.** Existing fork binaries (`v18.20.0-int.d2c2eff` and older) report the plain base version and still update from Stencil, so `omp update` or `update.auto` moves them to upstream's binary on upstream's next release and drops the carried patches. The first stamped build is installed by hand; on ai-dev the `/opt/omp-patched` deploy (F8) does that. After that, updates come from fork releases.
+- **What still goes upstream.** npm/bun installs (startup check and `omp update` ask npm), Homebrew `can1357/tap/omp`, mise `github:can1357/oh-my-pi`. Unauthenticated GitHub API calls are limited to 60 per hour per IP.
+
+ompweb: fork versions now have the form `X.Y.Z-int.<YYYYMMDDHHMM>.<sha7>`. `HOST_VERSION_PATTERN` (`lib/hosts/update-worker.ts`) already accepts it (prerelease identifiers joined by `.`, leading zeros allowed), and `lib/version-compare.ts` `parseVersion` accepts any `-…` suffix. No ompweb validator of the old `X.Y.Z-int.<sha7>` form exists (the Custom source that would have had one was never built). W3 adds tests that the omp row and `ompSharesCredentials` accept the new form. `ompweb-omp`'s own build (`runner/scripts/build-binary.ts`) does not set `PI_UPDATE_REPO`; W3 removes ompweb's path to `omp update`.
 
 ## ompweb
 
@@ -132,7 +172,7 @@ Host wiring (ai-dev): worktree `/root/git/oh-my-pi-fork-ci` of branch `fork-ci` 
 
 `prerelease.yml` and `publish.yml`, before `sh scripts/build-release-binaries.sh`:
 
-1. `sha=$(gh api repos/andrebrait/oh-my-pi/commits/integration-release --jq .sha)`; `tag` = the fork release ending `-int.${sha:0:7}`. `GITHUB_TOKEN` reads public repositories; no secret.
+1. `sha=$(gh api repos/andrebrait/oh-my-pi/commits/integration-release --jq .sha)`; `tag` = the fork release whose tag matches `^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.${sha:0:7}$` (F9; exactly one per sha). `GITHUB_TOKEN` reads public repositories; no secret.
 2. `npx bun runner/scripts/use-omp-build.ts "$tag"`, then `(cd runner && npx bun x tsc -p .)`.
 3. Notes gain `omp: andrebrait/oh-my-pi <tag>`.
 
@@ -147,6 +187,7 @@ Today (#460) the omp row still runs `omp update` through `resolveOmpBin()`, i.e.
 - `app/api/omp-update/route.ts`: only `restart` remains.
 - `lib/hosts/update-types.ts`/`updates.ts`/`daemon.ts`: `HostUpdateTarget` is `"ompweb"`; `HostUpdateInfo.omp` is `{ currentVersion }`; `startHostUpdate("omp")` is `invalid_target`.
 - `components/HostUpdates.tsx` and the Settings omp card: version plus "Updated with ompweb", no button; i18n en/ja/zh-CN/zh-TW.
+- Tests: the omp row shows `18.20.0-int.202611130355.d2c2eff` (and an all-digit sha such as `0123456`); `HOST_VERSION_PATTERN` and `ompSharesCredentials("omp/18.20.0-int.202611130355.d2c2eff")` accept it (F9).
 
 ## integration-ci cleanup
 
@@ -157,8 +198,8 @@ After one green scheduled round in the fork and one green ompweb pre-release on 
 1. integration-ci: `integration heads` and `CI_CONFIG_REF` with tests (harmless to today's round).
 2. Fork setup (user is admin): Environment `omp-round` limited to `fork-ci` with `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OMP_FORK_TOKEN`; push orphan `fork-ci` (F1, F4–F7 content, no `schedule` in `omp-auto.yml` yet); create `apple-sdk`; switch the default branch to `fork-ci`; dispatch `fork-guard.yml`.
 3. Disable integration-ci's `omp-auto.yml` schedule.
-4. Dispatch the fork's `omp-auto.yml` with `force=true`: a promoted release carrying #19075, neither #18646 nor #18668, with tarballs.
-5. Host rewiring (F8); `integration build && integration deploy` for `/opt/omp-patched`.
+4. Delete the fork's old-format `v*-int.<sha7>` releases and tags (F9). Dispatch the fork's `omp-auto.yml` with `force=true`: a promoted release `v<base>-int.<stamp>.<sha7>` carrying #19075 and the update-source PR, neither #18646 nor #18668, with tarballs; its binaries print that version.
+5. Host rewiring (F8); `integration build && integration deploy` for `/opt/omp-patched` — the bootstrap install of the first fork-updating binary on ai-dev (F9). Other machines running older fork binaries need the same one-time manual install.
 6. ompweb PR B (W1 + W2), PR C (W3).
 7. Add the `schedule` to `fork-ci`'s `omp-auto.yml`.
 8. Cleanup in integration-ci.
@@ -177,6 +218,9 @@ Rollback before step 8: switch the fork's default branch back to `main`, `gh wor
 - Dropping #18668/#18646 can invalidate later resolution patches.
 - Rounds also run on carried-PR pushes: more builds, ~25 min each warm. The fork's bazel caches start cold (first round up to ~2 h).
 - The round reads the `integration` script from integration-ci `main` unpinned, as today.
+- Until the first F9 binary is installed by hand, fork binaries with `update.auto` on can be replaced by upstream's binary on upstream's next release (F9 bootstrap).
+- The F9 build depends on the update-source PR staying in the integration; the smoke check fails the build if it drops out.
+- A sha7 of seven digits starting with `0` (about 1 in 160 builds) is a numeric prerelease identifier with a leading zero, which strict semver rejects; how `Bun.semver.order` treats it is unverified (Q5).
 - Escalation issues and repair notes are public on the fork.
 
 ## Open questions for the user
@@ -185,6 +229,7 @@ Rollback before step 8: switch the fork's default branch back to `main`, `gh wor
 2. **Upstream's workflows in the fork:** disable all of them (this design: `CI`, `Warm bun store cache`, `OMP Nix` — which today builds each `-int.` tag —, `os-session-tests`, `windows-rename-probe`, `Windows EPIPE regression`, `Copilot`, and any future one), or keep some running (e.g. `OMP Nix` on `-int.` tags)? A kept one runs upstream's code on mirror syncs and tags, without the round's secrets.
 3. **`fork-ci` as the fork's default branch** changes the fork's web UI defaults ("Sync fork" targets `fork-ci`, in-fork PRs default to base `fork-ci`, clones check out `fork-ci`). Acceptable?
 4. **Inactivity:** if no round runs for 60 days, GitHub disables the fork's schedules. Accept and re-enable by hand, or have `fork-guard.yml` make a monthly no-op commit to `fork-ci`?
+5. **All-digit sha7 with a leading zero** (e.g. `…-int.202611130355.0123456`) is invalid strict semver. Accept the risk (comparison is decided by the stamp before it; verify `Bun.semver.order` in the plan's spike), or prefix the sha (`…-int.<stamp>.g<sha7>`)?
 
 ## Decisions recorded (2026-11-13)
 
@@ -195,3 +240,4 @@ Rollback before step 8: switch the fork's default branch back to `main`, `gh wor
 - Pin bumps are manual (`use-omp-build.ts`); each (pre)release re-pins for what it ships (W1, W2).
 - The `integration` script exists only in integration-ci; the round checks it out from there (F1).
 - The omp row is read-only, "Updated with ompweb" (W3).
+- Fork binaries are compiled with `PI_UPDATE_REPO=andrebrait/oh-my-pi` (`feat/configurable-update-source`, `4a7bb87e`) and versioned `<upstream>-int.<YYYYMMDDHHMM>.<sha7>`; the stamp is the integration commit's committer time in UTC, computed once and shared by every job and the tag; release tags are `v` + that version exactly; old-format `-int.<sha7>` releases are deleted and never reused (F9).
