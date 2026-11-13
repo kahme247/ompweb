@@ -272,3 +272,60 @@ test("Needs attention lists a waiting session under its workspace above Workspac
     window.matchMedia = original.matchMedia;
   }
 });
+
+// One workspace "/l"; `running`/`runningSessions` feed the running channel the way /api/sessions does.
+async function attentionScenario(body, { sessions = [], running = [], runningSessions = [] }) {
+  const original = { fetch: globalThis.fetch, Worker: globalThis.Worker, SharedWorker: globalThis.SharedWorker, matchMedia: window.matchMedia };
+  globalThis.Worker = FakeWorker;
+  globalThis.SharedWorker = undefined;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/projects") return Response.json({ projects: [{ path: "/l" }] });
+    if (url.pathname === "/api/sessions") return Response.json({ sessions, runningSessionIds: running, runningSessions });
+    return Response.json({});
+  };
+  const props = { selectedSessionId: null, skipInitialProjectSelection: true, onSelectSession() {}, addProjectOpen: false, setAddProjectOpen() {}, usageVisible: false };
+  try {
+    render(React.createElement(SessionSidebar, props));
+    await body();
+  } finally {
+    cleanup();
+    localStorage.removeItem("omp-web:expanded-projects");
+    globalThis.fetch = original.fetch;
+    globalThis.Worker = original.Worker;
+    globalThis.SharedWorker = original.SharedWorker;
+    window.matchMedia = original.matchMedia;
+  }
+}
+const attentionSection = () => document.querySelector(`section[aria-label="${translate("sessionSidebar.needsAttention")}"]`);
+const attentionSession = (id, name, extra) => ({ id, path: `/l/${id}.jsonl`, cwd: "/l", created: "2026-11-13T09:00:00.000Z", modified: "2026-11-13T09:00:00.000Z", messageCount: 2, firstMessage: "hi", name, ...extra });
+const attentionMarker = { reason: "Pick one", at: "2026-11-13T09:00:00.000Z" };
+
+test("Needs attention lists a running session with an open dialog and no marker", async () => {
+  await attentionScenario(async () => {
+    await waitFor(() => assert.ok(attentionSection()));
+    assert.deepEqual([...attentionSection().querySelectorAll(".session-item-button")].map((row) => row.textContent), ["Asking"]);
+  }, { sessions: [attentionSession("dlg", "Asking")], running: ["dlg"], runningSessions: [{ id: "dlg", cwd: "/l", awaitingInput: true }] });
+});
+
+test("Needs attention leaves out a running session's marker, and its row shows no reason", async () => {
+  await attentionScenario(async () => {
+    const expand = await screen.findByLabelText(translate("projects.expandProject", { name: "l" }));
+    fireEvent.click(expand);
+    await waitFor(() => assert.ok(document.querySelector("[title^='Marked']")));
+    assert.equal(attentionSection(), null);
+    assert.equal(document.querySelector("[title^='Marked']").getAttribute("title"), "Marked");
+  }, { sessions: [attentionSession("m", "Marked", { attention: attentionMarker })], running: ["m"], runningSessions: [{ id: "m", cwd: "/l" }] });
+});
+
+test("Needs attention lists every waiting session of a workspace without a show-more button", async () => {
+  const names = Array.from({ length: 7 }, (_, i) => `Chat ${i}`);
+  await attentionScenario(async () => {
+    await waitFor(() => assert.ok(attentionSection()));
+    const rows = [...attentionSection().querySelectorAll(".session-item-button")].map((row) => row.textContent);
+    assert.deepEqual(rows.toSorted(), names);
+    const showMore = names.map((_, i) => translate("projects.showMoreSessions", { count: i + 1 }));
+    assert.equal([...attentionSection().querySelectorAll("button")].some((button) => showMore.includes(button.textContent)), false);
+  }, { sessions: names.map((name, i) => attentionSession(`s${i}`, name, { attention: attentionMarker })) });
+});

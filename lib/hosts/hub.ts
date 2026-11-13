@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
 import { readBodyWithinLimit } from "../bounded-form-data";
+import { ATTENTION_REASON_MAX } from "../omp/session-files";
 import type { RpcTransport } from "../omp/rpc-transport";
 import type { ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
@@ -1072,15 +1073,15 @@ const nullableString = (value: unknown) => value === null || typeof value === "s
 function sessionEntry(value: unknown): SessionInfo | null {
   if (!isRecord(value)) return null;
   const { path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch, attention } = value;
-  const mark = attention === undefined ? undefined
-    : isRecord(attention) && typeof attention.reason === "string" && typeof attention.at === "string" ? { reason: attention.reason, at: attention.at }
-    : null;
+  // Optional: a malformed marker drops only the marker, never the session.
+  const mark = isRecord(attention) && typeof attention.reason === "string" && typeof attention.at === "string"
+    ? { reason: attention.reason.slice(0, ATTENTION_REASON_MAX), at: attention.at }
+    : undefined;
   if (
     typeof path !== "string" || typeof id !== "string" || !isValidSessionId(id) || typeof cwd !== "string"
     || typeof created !== "string" || typeof modified !== "string" || typeof firstMessage !== "string"
     || typeof messageCount !== "number" || !Number.isFinite(messageCount)
     || ![name, lastMessageAt, parentSessionId, projectRoot, projectKey, worktreeBranch].every(optionalString)
-    || mark === null
   ) return null;
   return {
     path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch,

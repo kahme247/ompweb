@@ -805,7 +805,10 @@ interface TailMessage {
   role?: string;
   stopReason?: string;
   content?: unknown;
+  synthetic?: unknown;
 }
+
+const hasToolCall = (content: unknown) => Array.isArray(content) && content.some((block) => isRecord(block) && block.type === "toolCall");
 
 function statusFromTailMessage(message: TailMessage): SessionStatus {
   switch (message.role) {
@@ -818,10 +821,7 @@ function statusFromTailMessage(message: TailMessage): SessionStatus {
         case "length":
           return "interrupted";
       }
-      const content = message.content;
-      if (Array.isArray(content) && content.some((block) => isRecord(block) && block.type === "toolCall")) {
-        return "interrupted";
-      }
+      if (hasToolCall(message.content)) return "interrupted";
       return "complete";
     }
     case "toolResult":
@@ -845,8 +845,9 @@ interface TailScan {
 }
 
 /** The tail window's last message entry (lifecycle status plus its timestamp), and the newest attention marker
- * written after the newest user message. Entries are appended in time order, so a marker in the window with no user
- * message after it is newer than every user message, including those before the window. */
+ * written after the newest real user message with no assistant tool call after it. Entries are appended in time order,
+ * so a marker in the window with no user message after it is newer than every user message, including those before
+ * the window. A tool call after the marker means the agent kept working, so no marker counts. */
 function scanTailMessage(suffix: string): TailScan {
   const result: TailScan = { status: "unknown" };
   if (!suffix) return result;
@@ -857,9 +858,6 @@ function scanTailMessage(suffix: string): TailScan {
     // Every persisted entry starts with "{" — cheaply skips blank lines and
     // the leading partial fragment of the tail window.
     if (line.charCodeAt(0) !== 123) continue;
-    // Past the newest message only user messages and markers matter: skip parsing everything else. A quote inside a
-    // JSON string is escaped, so string content never matches these raw substrings.
-    if (sawMessage && !line.includes('"role":"user"') && !line.includes(`"${ATTENTION_ENTRY_TYPE}"`)) continue;
     let entry: { type?: string; customType?: unknown; data?: { reason?: unknown }; timestamp?: unknown; message?: TailMessage };
     try {
       entry = JSON.parse(line);
@@ -867,17 +865,27 @@ function scanTailMessage(suffix: string): TailScan {
       continue;
     }
     if (entry.type === "message" && entry.message) {
+      const message = entry.message;
       if (!sawMessage) {
         sawMessage = true;
         const at = typeof entry.timestamp === "string" ? new Date(entry.timestamp) : undefined;
-        result.status = statusFromTailMessage(entry.message);
+        result.status = statusFromTailMessage(message);
         result.lastMessageAt = at && !Number.isNaN(at.getTime()) ? at : undefined;
       }
-      if (entry.message.role === "user") break;
-    } else if (entry.type === "custom" && entry.customType === ATTENTION_ENTRY_TYPE && !result.attention && typeof entry.timestamp === "string") {
+      // A real user message clears every older marker; omp's synthetic user-role messages do not.
+      if (message.role === "user" && message.synthetic !== true) break;
+      // An assistant tool call settles the walk: newer than any marker still ahead (the agent kept working, so none
+      // counts), or older than the marker already found (the call that requested attention), which it leaves alone.
+      if (message.role === "assistant" && hasToolCall(message.content)) break;
+    } else if (entry.type === "custom" && entry.customType === ATTENTION_ENTRY_TYPE && !result.attention) {
       const reason = entry.data?.reason;
-      result.attention = { reason: typeof reason === "string" ? reason.slice(0, ATTENTION_REASON_MAX) : "", at: entry.timestamp };
+      result.attention = {
+        reason: typeof reason === "string" ? reason.slice(0, ATTENTION_REASON_MAX) : "",
+        at: typeof entry.timestamp === "string" ? entry.timestamp : "",
+      };
     }
+    // The newest marker is found and the status is known: nothing older changes either.
+    if (sawMessage && result.attention) break;
   }
   return result;
 }

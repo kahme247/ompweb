@@ -1719,7 +1719,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
       {/* Needs attention: every session blocked on the user, A→Z; scrolls on its own so Workspaces stays reachable */}
       {attentionEntries.length > 0 && (
-        <section aria-label={t("sessionSidebar.needsAttention")} style={{ flexShrink: 0, maxHeight: "40%", display: "flex", flexDirection: "column" }}>
+        <section aria-label={t("sessionSidebar.needsAttention")} style={{ flexShrink: 0, maxHeight: "40%", display: "flex", flexDirection: "column", paddingBottom: 4, borderBottom: "1px solid var(--border)" }}>
           <div style={{ flexShrink: 0, minHeight: 32, boxSizing: "border-box", padding: "4px 10px 2px", display: "flex", alignItems: "center" }}>
             <span style={SECTION_HEADING_STYLE}>{t("sessionSidebar.needsAttention")}</span>
           </div>

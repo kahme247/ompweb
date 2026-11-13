@@ -11,7 +11,7 @@ import { isMacPlatform, navigateShortcutHint, NAVIGATION_HISTORY_MAX_ENTRIES } f
 import { useMobileSidebarGestures } from "@/hooks/useMobileSidebarGestures";
 import { SessionSidebar } from "./SessionSidebar";
 import type { SearchMatchTarget } from "./SessionSearchMatches";
-import type { WorktreeContext } from "./SessionSidebar-helpers";
+import { workspaceLabel, type WorktreeContext } from "./SessionSidebar-helpers";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
 import { notificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
@@ -2604,7 +2604,7 @@ export function AppShell({ appName }: { appName: string }) {
                         <option value={newSessionWorkspaceValue}>{projectLabel(effectiveNewSessionCwd)}</option>
                       )}
                       {hostProjects.map((project) => {
-                        const name = project.alias ?? project.name ?? projectLabel(project.path);
+                        const name = workspaceLabel(project);
                         // A member's pinned project: its option names the node.
                         const node = !project.poolId && projectTargetId(project, pools) !== (project.hostId ?? LOCAL_HOST_ID) ? hosts?.find((host) => host.id === (project.hostId ?? LOCAL_HOST_ID)) : undefined;
                         return (

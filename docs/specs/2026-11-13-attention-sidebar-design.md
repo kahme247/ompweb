@@ -54,8 +54,13 @@ omp process is gone), web server restarts and daemon restarts.
 
 `scanTailMessage` (`lib/omp/session-files.ts`) already walks the tail window
 backwards to the newest message entry. It continues backwards until the newest
-`role: "user"` message; an `omp-web-attention` custom entry found before that
-sets `attention: { reason, at }` (`at` is the entry's timestamp). Only the
+real `role: "user"` message; an `omp-web-attention` custom entry found before
+that sets `attention: { reason, at }` (`at` is the entry's timestamp, `""` when
+missing). User-role messages omp marks `synthetic: true` do not count as the
+user answering, so they neither stop the walk nor clear the marker. An
+assistant message with a tool call newer than the marker means the agent kept
+working, so the marker is ignored; the call that requested attention is older
+than its marker and does not cancel it. Only the
 32 KiB tail window is scanned; a marker followed by more than 32 KiB of later
 entries without a user message is not found (accepted: the agent calls the tool
 as its last act).
