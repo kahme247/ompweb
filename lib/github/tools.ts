@@ -5,8 +5,8 @@ import { startsUnasked, type AgentToolHost } from "../agent-tool-hosts";
 import { loadWebServerSettings } from "../web-settings";
 import { baselineCursor, capName } from "./events";
 import { checkGh, defaultGhRunner, formatTarget, parseGithubTarget, type GhRunner, type GithubTarget } from "./gh";
-import { fetchSnapshot, fetchThread, postComment, readItem, resolveThread, type ReadPart } from "./api";
-import { MAX_WATCHES_PER_SESSION, addWatch, grantRead, hasReadGrant, itemKeyOf, recordPosted, removeWatch, repoKeyOf, whilePosting } from "./watch-store";
+import { fetchSnapshot, fetchThread, findOwnComment, postComment, readItem, resolveThread, type ReadPart } from "./api";
+import { MAX_WATCHES_PER_SESSION, addWatch, grantRead, hasReadGrant, itemKeyOf, postedIds, recordPosted, removeWatch, repoKeyOf, whilePosting } from "./watch-store";
 
 /**
  * The five GitHub agent tools (docs/specs/2026-11-13-github-watch-tool-design.md),
@@ -128,9 +128,10 @@ async function allowRead(ops: GithubToolOps, ctx: AgentToolContext, t: GithubTar
   grantRead(ctx.sourceSessionId, repoKey);
 }
 
+/** Last step before a write: a cancelled call (host_tool_cancel) must not post after the agent moved on. */
 async function allowWrite(ops: GithubToolOps, ctx: AgentToolContext, title: string): Promise<void> {
-  if (ops.writesUnasked()) return;
-  if (!(await ctx.confirm(title))) throw new Error("The user declined to post on GitHub.");
+  if (!ops.writesUnasked() && !(await ctx.confirm(title))) throw new Error("The user declined to post on GitHub.");
+  if (ctx.signal?.aborted) throw new Error("The tool call was cancelled; nothing was posted to GitHub.");
 }
 
 /** validate → gh check → permission → act. */
@@ -156,7 +157,7 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
     if (body.length > MAX_COMMENT_CHARS) throw new Error(`Agent tool argument "body" exceeds ${MAX_COMMENT_CHARS} characters.`);
     const replyTo = args.replyTo === undefined || args.replyTo === null ? undefined : stringArg(args, "replyTo");
     if (replyTo !== undefined && !/^(PRRT_[A-Za-z0-9_-]+|\d+)$/.test(replyTo)) throw new Error("replyTo must be a review comment id or a review thread id.");
-    await checkGh(ops.run);
+    const { login } = await checkGh(ops.run);
     const item = itemKeyOf(t);
     if (replyTo?.startsWith("PRRT_")) {
       const thread = await fetchThread(ops.run, replyTo);
@@ -167,7 +168,16 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
     const what = replyTo === undefined ? `Post on ${label}` : `Reply in review thread ${replyTo} on ${label}`;
     await allowWrite(ops, ctx, `${what} as the server's GitHub account?\n${preview}${cut > 0 ? `\n… (+${cut} more characters)` : ""}`);
     return whilePosting(item, async () => {
-      const posted = await postComment(ops.run, t, body, replyTo);
+      // A minute back covers clock skew between this machine and GitHub.
+      const since = new Date(Date.now() - 60_000).toISOString();
+      let posted;
+      try {
+        posted = await postComment(ops.run, t, body, replyTo);
+      } catch (error) {
+        // gh can fail after GitHub took the post (timeout, lost answer); unrecorded, the watcher would deliver it back as news.
+        posted = await findOwnComment(ops.run, t, { login, body, since, review: replyTo !== undefined, skip: postedIds(item) }).catch(() => undefined);
+        if (!posted) throw error;
+      }
       recordPosted(item, posted.id);
       return posted;
     });
