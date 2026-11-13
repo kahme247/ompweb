@@ -403,7 +403,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
         if (args.force !== undefined && typeof args.force !== "boolean") throw new HostOpError(400, "invalid_request", "force must be a boolean");
         return checkHostUpdates(updateCompatibility(args.compatibility), args.force === true);
       case "updateSoftware":
-        if ((args.target !== "ompweb" && args.target !== "omp") || typeof args.version !== "string") throw new HostOpError(400, "invalid_request", "Invalid host update");
+        if (args.target !== "ompweb" || typeof args.version !== "string") throw new HostOpError(400, "invalid_request", "Invalid host update");
         return startHostUpdate(args.target, args.version, updateCompatibility(args.compatibility));
       case "preparePoolProject": {
         if (getHostUpdateOperation()?.state === "running") throw new HostUpdateError("host_updating", "This host is updating; new project preparation must wait");

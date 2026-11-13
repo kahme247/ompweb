@@ -56,7 +56,6 @@ function runWorker(t, { npmExit = 0, startExit = 0, activeExit = 0, candidate = 
     "--manager", "npm",
     "--manager-path", "npm",
     "--target", "0.6.0",
-    "--kind", "app",
     "--systemd-unit", "ompweb.service",
     "--systemd-user", "1",
   ], { env, timeout: 60000 });

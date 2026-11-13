@@ -1,7 +1,7 @@
 import type { NpmUpdateStatus } from "../npm-update";
-import type { OmpUpdateStatus } from "../omp/updates";
 
-export type HostUpdateTarget = "ompweb" | "omp";
+/** omp is not a target: it updates with ompweb, whose release ships its runner. */
+export type HostUpdateTarget = "ompweb";
 
 /** The running web server's supported daemon protocol range. Supplied by the hub, never by the browser. */
 export interface HostUpdateCompatibility {
@@ -21,7 +21,8 @@ export interface HostSoftwareUpdate {
 
 export interface HostUpdateOperation {
   id: string;
-  target: HostUpdateTarget;
+  /** "omp": an `omp update` a host recorded before omp updated with ompweb. */
+  target: HostUpdateTarget | "omp";
   version: string;
   state: "running" | "succeeded" | "failed";
   error?: string;
@@ -29,6 +30,6 @@ export interface HostUpdateOperation {
 
 export interface HostUpdateInfo {
   ompweb: HostSoftwareUpdate & Pick<NpmUpdateStatus, "installMethod"> & { protocolVersion: number | null };
-  omp: HostSoftwareUpdate & Pick<OmpUpdateStatus, "updatesDisabled">;
+  omp: { currentVersion: string | null };
   operation: HostUpdateOperation | null;
 }

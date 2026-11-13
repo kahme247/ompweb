@@ -27,7 +27,6 @@ const target = arg("--target");
 const from = arg("--from");
 const launcherPid = Number(arg("--launcher-pid"));
 const serverPid = Number(arg("--server-pid"));
-const kind = arg("--kind") || "app";
 // Set when the server runs as this systemd unit; systemd stops and starts it.
 const systemdUnit = arg("--systemd-unit");
 const systemctlScope = arg("--systemd-user") === "1" ? ["--user"] : [];
@@ -168,19 +167,6 @@ function preflightCandidate() {
 
 async function runManagerGate() {
   updateStatus({ stage: "installing" });
-  if (kind === "omp") {
-    // Run omp update
-    const bin = process.env.OMP_WEB_OMP_BIN || "omp";
-    // Try resolve via packageDir/../?
-    await new Promise((resolve) => {
-      const child = cp.spawn(bin, ["update"], { timeout: 5 * 60 * 1000, windowsHide: true, env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" } });
-      child.on("close", () => resolve());
-      child.on("error", () => resolve());
-      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} resolve(); }, 5 * 60 * 1000 + 1000);
-    });
-    return;
-  }
-  // App update via npm/bun
   const cmd = manager === "bun" ? (managerPath || "bun") : (managerPath || "npm");
   const args = manager === "bun" ? ["add", "-g", `@kahme247/ompweb@${target}`] : ["install", "-g", `@kahme247/ompweb@${target}`];
   if (Array.isArray(managerPrefix) && managerPrefix.length) args.unshift(...managerPrefix);
@@ -272,10 +258,8 @@ async function main() {
 
   let svcInfo = { launchd: false, tray: false };
   try {
-    if (kind !== "omp") {
-      preflightCandidate();
-      svcInfo = await stopOriginalProcesses();
-    }
+    preflightCandidate();
+    svcInfo = await stopOriginalProcesses();
     await runManagerGate();
     try {
       const pkgPath = path.join(packageDir, "package.json");
@@ -286,7 +270,7 @@ async function main() {
         }
       }
     } catch {}
-    if (kind !== "omp") await restartServices(svcInfo);
+    await restartServices(svcInfo);
     await sleep(500);
     updateStatus({ state: "succeeded", stage: "finalizing", finishedAt: new Date().toISOString(), cleanupReady: true });
     // write complete marker
