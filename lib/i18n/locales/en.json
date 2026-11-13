@@ -617,6 +617,8 @@
   "subagentTranscript.taskLabel": "Task",
   "subagentTranscript.modelLabel": "model",
   "subagentTranscript.effortLabel": "effort",
+  "subagentTranscript.agentLabel": "agent",
+  "subagentTranscript.fileLabel": "file",
   "subagentTranscript.showTranscript": "Show transcript",
   "subagentTranscript.hideTranscript": "Hide transcript",
   "subagentTranscript.resultLabel": "Result",

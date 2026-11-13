@@ -19,7 +19,7 @@ test("attaches todo plan and subagent roster with live states", () => {
   const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
     todoPhases: [{ name: "Implementation", tasks: [{ content: "Wire panels", status: "in_progress" }] }],
     subagents: [
-      { id: "s1", agent: "scout", status: "started", task: "Map the surface", index: 0 },
+      { id: "SurfaceMap", agent: "scout", status: "started", task: "Map the surface", index: 0 },
       { id: "s2", agent: "worker", status: "completed", task: "Write the code", index: 1 },
     ],
     onSelectSubagent: noop,
@@ -30,6 +30,7 @@ test("attaches todo plan and subagent roster with live states", () => {
   assert.match(html, /Wire panels/);
   assert.match(html, /Subagents/);
   assert.match(html, /scout/);
+  assert.match(html, />SurfaceMap</);
   assert.match(html, /Map the surface/);
   assert.match(html, /worker/);
   assert.match(html, /aria-label="1 running · 2 total"/);

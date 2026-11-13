@@ -600,6 +600,8 @@
   "subagentTranscript.taskLabel": "タスク",
   "subagentTranscript.modelLabel": "モデル",
   "subagentTranscript.effortLabel": "思考",
+  "subagentTranscript.agentLabel": "エージェント",
+  "subagentTranscript.fileLabel": "ファイル",
   "subagentTranscript.showTranscript": "トランスクリプトを表示",
   "subagentTranscript.hideTranscript": "トランスクリプトを隠す",
   "subagentTranscript.resultLabel": "結果",
