@@ -106,6 +106,14 @@ export async function register(): Promise<void> {
     console.warn(`[omp-web] message outbox not started: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // GitHub watches post their updates through that outbox, so they start after it (lib/github/watcher.ts).
+  try {
+    const { startGithubWatcher } = await import("@/lib/github/watcher");
+    startGithubWatcher();
+  } catch (error) {
+    console.warn(`[omp-web] github watcher not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Crash/stall journal: a long-running server that dies or wedges while the
   // user is away leaves no trace in a terminal that no longer exists (CLI runs
   // are killed with their terminal; pages then show endless loading until the
