@@ -1,6 +1,6 @@
 # GitHub agent tools: watch, read and reply
 
-Status: draft for approval, 2026-11-13.
+Status: approved, 2026-11-13.
 
 ## Intent
 
