@@ -58,7 +58,7 @@ Every description begins: "Requires the GitHub CLI (`gh`) on the PATH of the omp
 
 ### `gh` availability
 
-Every call first checks `gh auth status` (run through `project-command-env.ts`'s environment, without omp-web's secrets; the result is cached for 60 s). Errors returned to the agent:
+Every call first checks that `gh` works and is logged in, with `gh api user` (run through `project-command-env.ts`'s environment, without omp-web's secrets; the result is cached for 60 s). Errors returned to the agent:
 
 - `gh` not found: "`gh` (GitHub CLI) is not installed on the omp-web server machine. Ask the user to install it and run `gh auth login` there."
 - not logged in: "`gh` is not logged in on the omp-web server machine. Ask the user to run `gh auth login` there."
