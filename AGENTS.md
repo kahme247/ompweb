@@ -176,6 +176,13 @@ lib/
     update-types.ts    shared per-host software status and operation contract
     updates.ts         daemon-side version checks, compatibility gate and durable update state
     update-worker.ts   host-only install/restart helper; never starts or stops the web-server service
+  github/              GitHub agent tools (server only; spec `docs/specs/2026-11-13-github-watch-tool-design.md`)
+    gh.ts              the server's `gh` runner: `GhRunner`, `checkGh` (60 s login cache), target parsing; env from `createChildProcessEnvironment`
+    api.ts             GitHub data over `gh api`: metadata snapshots; `readItem` is the one path that returns GitHub text
+    events.ts          pure diff of a snapshot against a watch's cursor; words metadata-only updates
+    watch-store.ts     `<agent dir>/omp-web/github-watches.sqlite` (WAL): watches, cursors, pending updates, posted comment ids, read grants
+    watcher.ts         60 s poller: pending row, then a `prompt` outbox add, then the cursor on acceptance
+    tools.ts           the five tools (`GITHUB_TOOL_NAMES`, `GITHUB_REPLAY_SAFE_TOOLS`), run after agent-tools' enabled and rate checks
   provider-accounts.ts distinct omp accounts per provider from `omp usage` reports (Models → provider detail)
   agent-client.ts      agent commands from the tab: POST /api/agent/[id], or the worker's browser link in the `ws` transport; records each command's `action` sample
   agent-command.ts     `runAgentCommand`: the one command path behind POST /api/agent/[id] and a browser link's `cmd`
@@ -1340,6 +1347,16 @@ during the wait.
   no gap. A follow-up or steer becomes omp's queue chip. Stream connections
   opened for held messages (`connectEvents(sid, "connected")`) talk to omp only
   after `connected`, since any command would start a wrapper.
+
+### GitHub agent tools (lib/github/, docs/specs/2026-11-13-github-watch-tool-design.md)
+- **Server login only.** Every GitHub call is `gh` run on the web server with `createChildProcessEnvironment`, so omp-web's own secrets stay out of it. omp-web never reads, stores or forwards a GitHub token. A missing or logged-out `gh` returns a tool error that tells the user to install it or run `gh auth login` on the server.
+- **Updates are metadata only.** A watch update is a `prompt`-mode outbox entry that names `OWNER/REPO#N` and the URL. It carries no title, body, branch name or comment text; check names are capped at 100 characters. Only `readItem`, behind the explicit `github_read` tool, returns GitHub text.
+- **Crash idempotency.** The poller stores each update as a pending row (`setPending`) before the outbox add, with a deterministic entry id (`updateEntryId`). A crash replays the same id, which the outbox collapses. The cursor advances (`commitUpdate`) only after the outbox accepts; `gone` ends the session's watches, `retry` keeps the row for the next poll.
+- **Own posts.** `github_comment` records each posted comment id against its item (`recordPosted`). The watcher skips exactly those ids and nothing else, so the user's own comments from the same account still arrive.
+- **Confirmations.** Reads from a local session never ask. A remote session's read asks once per session and repository (`hasReadGrant`/`grantRead`) unless that host's `allowAgentStart` is on. Writes (`github_comment`, `github_resolve_thread`) ask every time, from any host, unless `githubWritesUnasked` is on.
+- **Replay after a restart.** Only `GITHUB_REPLAY_SAFE_TOOLS` (`watch_github`, `unwatch_github`, `github_read`) and `list_sessions` run again when a session replays its host tool calls. The two writes get the unknown-outcome error instead, because the post may already have happened.
+- **Limits.** At most 20 watches per session (`MAX_WATCHES_PER_SESSION`). The poll runs every 60 s, with a session's items spread across the interval.
+- **Agent tools off pauses watches.** The poller checks `agentToolsEnabled` each cycle. With **Agent tools** off, polling stops and watches are kept; turning it back on resumes from the stored cursors, so what happened meanwhile is delivered then.
 
 ### Live event stream: one socket per browser (`/api/events`)
 - Browsers cap HTTP/1.1 at **6 connections per host across all tabs**, and an
