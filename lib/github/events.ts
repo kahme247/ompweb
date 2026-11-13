@@ -10,13 +10,13 @@ import type { GithubActor, ItemSnapshot } from "./api";
 /** Id lists keep the newest of each, so a long-lived watch stays bounded. */
 const KEPT = 2000;
 const NAME_LIMIT = 100;
+const FAILED_NAMES_SHOWN = 10;
 const FAILED = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure", "error"]);
 const REVIEW_STATES: Record<string, string> = {
   APPROVED: "approved",
   CHANGES_REQUESTED: "changes requested",
   COMMENTED: "commented",
   DISMISSED: "dismissed",
-  PENDING: "pending",
 };
 
 type Head = NonNullable<ItemSnapshot["head"]>;
@@ -50,9 +50,9 @@ const unseen = <T extends { id: string }>(items: T[], known: string[], posted: R
   return items.filter((item) => !seen.has(item.id) && !posted.has(item.id));
 };
 
-// Check names come from workflow files a fork controls: one line, bounded length.
-function capName(name: string): string {
-  const chars = Array.from(name.replace(/\s+/g, " "));
+// Check names and file paths come from what a fork controls: one line, no control or format characters, bounded length.
+export function capName(name: string): string {
+  const chars = Array.from(name.replace(/\s+/g, " ").replace(/\p{C}/gu, ""));
   return chars.length > NAME_LIMIT ? `${chars.slice(0, NAME_LIMIT - 1).join("")}…` : chars.join("");
 }
 
@@ -147,7 +147,7 @@ function describe(event: GithubEvent): string {
       return `- review (${state}, ${inline}) by ${who(event.author)}. id ${event.id}, url ${event.url}`;
     }
     case "thread_comment": {
-      const path = event.path.replace(/\s+/g, " ");
+      const path = capName(event.path);
       const place = event.line === null ? path : `${path}:${event.line}`;
       return `- inline review comment on ${place} (thread ${event.threadId}) by ${who(event.author)}. id ${event.id}, url ${event.url}`;
     }
@@ -156,7 +156,8 @@ function describe(event: GithubEvent): string {
         .sort()
         .map((conclusion) => `${event.counts[conclusion]} ${conclusion}`)
         .join(", ");
-      const failed = event.failed.length > 0 ? `; failed: ${event.failed.join(", ")}` : "";
+      const more = event.failed.length - FAILED_NAMES_SHOWN;
+      const failed = event.failed.length > 0 ? `; failed: ${[...event.failed.slice(0, FAILED_NAMES_SHOWN), ...(more > 0 ? [`+${more} more`] : [])].join(", ")}` : "";
       return `- CI result for head ${event.sha}: ${counts}${failed}. url ${event.url}`;
     }
     case "merged":

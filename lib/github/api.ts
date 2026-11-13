@@ -28,6 +28,8 @@ export interface ItemSnapshot {
   threadComments: { id: string; url: string; author: GithubActor; threadId: string; path: string; line: number | null }[];
   /** Checks are lower-cased: `conclusion` "success" | "failure" | ..., `status` "completed" | "in_progress" | ... Commit statuses map to the same words. */
   head?: { sha: string; checks: { name: string; conclusion: string | null; status: string }[] };
+  /** The login's GraphQL points left after the last snapshot request, and when they refill. */
+  rateLimit?: { remaining: number; resetAt: string };
 }
 
 export type ReadPart = "summary" | "comments" | "reviews" | "threads" | "checks" | "files" | "diff";
@@ -52,7 +54,7 @@ interface GqlThread {
   id: string;
   path: string;
   line: number | null;
-  comments: { nodes: (GqlComment | null)[] };
+  comments: { nodes: ((GqlComment & { state: string }) | null)[] };
 }
 interface GqlPage<T> {
   pageInfo: { hasPreviousPage: boolean; startCursor: string | null };
@@ -110,7 +112,7 @@ const SNAPSHOT_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $c
         reviews(last: 100, before: $rc) @include(if: $wr) { pageInfo { hasPreviousPage startCursor } nodes { ${COMMENT} state comments { totalCount } } }
         reviewThreads(last: 100, before: $tc) @include(if: $wt) {
           pageInfo { hasPreviousPage startCursor }
-          nodes { id path line comments(last: 100) { nodes { ${COMMENT} } } }
+          nodes { id path line comments(last: 100) { nodes { ${COMMENT} state } } }
         }
         commits(last: 1) @include(if: $wh) {
           nodes { commit { oid statusCheckRollup { id contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes {
@@ -122,6 +124,7 @@ const SNAPSHOT_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $c
       }
     }
   }
+  rateLimit { remaining resetAt }
 }`;
 
 const CONTEXTS_QUERY = `query($id: ID!, $after: String) {
@@ -155,9 +158,11 @@ const present = <T>(nodes: (T | null)[]): T[] => nodes.filter((n): n is T => n !
  */
 export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?: ReadonlySet<string>): Promise<ItemSnapshot> {
   const vars = { owner: target.owner, repo: target.repo, number: target.number };
+  let rateLimit: ItemSnapshot["rateLimit"];
   const query = async (extra: Record<string, unknown>) => {
     const flags = { wc: false, wr: false, wt: false, wh: false, cc: null, rc: null, tc: null, ...extra };
-    const data = await graphql<{ repository: { issueOrPullRequest: GqlItem | null } | null }>(run, SNAPSHOT_QUERY, { ...vars, ...flags });
+    const data = await graphql<{ repository: { issueOrPullRequest: GqlItem | null } | null; rateLimit?: ItemSnapshot["rateLimit"] }>(run, SNAPSHOT_QUERY, { ...vars, ...flags });
+    rateLimit = data.rateLimit ?? rateLimit;
     const item = data.repository?.issueOrPullRequest;
     if (!item) throw new Error(`${target.owner}/${target.repo}#${target.number} was not found.`);
     return item;
@@ -180,16 +185,22 @@ export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?:
     collect<GqlThread>("reviewThreads", "wt", "tc", false),
   ]);
 
+  // A draft (pending) review and its comments are left out, so their submission is new later.
   const snapshot: ItemSnapshot = {
     kind: first.__typename === "PullRequest" ? "pull_request" : "issue",
     url: first.url,
     state: first.state === "MERGED" ? "merged" : first.state === "CLOSED" ? "closed" : "open",
     comments: comments.map((c) => ({ id: c.id, url: c.url, author: actorOf(c.author, c.authorAssociation) })),
-    reviews: reviews.map((r) => ({ id: r.id, url: r.url, author: actorOf(r.author, r.authorAssociation), state: r.state, commentCount: r.comments.totalCount })),
+    reviews: reviews
+      .filter((r) => r.state !== "PENDING")
+      .map((r) => ({ id: r.id, url: r.url, author: actorOf(r.author, r.authorAssociation), state: r.state, commentCount: r.comments.totalCount })),
     threadComments: threads.flatMap((t) =>
-      present(t.comments.nodes).map((c) => ({ id: c.id, url: c.url, author: actorOf(c.author, c.authorAssociation), threadId: t.id, path: t.path, line: t.line })),
+      present(t.comments.nodes)
+        .filter((c) => c.state !== "PENDING")
+        .map((c) => ({ id: c.id, url: c.url, author: actorOf(c.author, c.authorAssociation), threadId: t.id, path: t.path, line: t.line })),
     ),
   };
+  if (rateLimit) snapshot.rateLimit = rateLimit;
   // Issues closed before GitHub recorded a reason have none; they were closed as done.
   if (first.state === "CLOSED" && first.__typename === "Issue") snapshot.closedReason = first.stateReason === "NOT_PLANNED" ? "not_planned" : "completed";
 
@@ -385,6 +396,22 @@ const REPLY_MUTATION = `mutation($threadId: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id url } }
 }`;
 const RESOLVE_MUTATION = `mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }`;
+const THREAD_QUERY = `query($id: ID!) {
+  node(id: $id) { ... on PullRequestReviewThread { path line pullRequest { number repository { nameWithOwner } } } }
+}`;
+
+/** Where a review thread lives, so a write names it and lands on the item it claims. */
+export async function fetchThread(run: GhRunner, threadId: string): Promise<{ target: GithubTarget; path: string; line: number | null }> {
+  const data = await graphql<{ node: { path?: string; line?: number | null; pullRequest?: { number: number; repository: { nameWithOwner: string } } } | null }>(
+    run,
+    THREAD_QUERY,
+    { id: threadId },
+  );
+  const pr = data.node?.pullRequest;
+  if (!pr) throw new Error(`Review thread ${threadId} was not found.`);
+  const [owner, repo] = pr.repository.nameWithOwner.split("/");
+  return { target: { owner, repo, number: pr.number }, path: data.node?.path ?? "", line: data.node?.line ?? null };
+}
 
 /** The body always travels on stdin as JSON, never in argv. */
 export async function postComment(run: GhRunner, target: GithubTarget, body: string, replyTo?: string): Promise<{ id: string; url: string }> {

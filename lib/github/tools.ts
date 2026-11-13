@@ -1,10 +1,12 @@
 import type { HostToolDefinition } from "../pi-types";
 // Types only: agent-tools.ts imports this module for its tool names, so a runtime import back would be a cycle.
 import type { AgentToolContext } from "../agent-tools";
-import { baselineCursor } from "./events";
-import { checkGh, formatTarget, parseGithubTarget, type GhRunner, type GithubTarget } from "./gh";
-import { fetchSnapshot, postComment, readItem, resolveThread, type ReadPart } from "./api";
-import { MAX_WATCHES_PER_SESSION, addWatch, grantRead, hasReadGrant, itemKeyOf, recordPosted, removeWatch, repoKeyOf } from "./watch-store";
+import { startsUnasked, type AgentToolHost } from "../agent-tool-hosts";
+import { loadWebServerSettings } from "../web-settings";
+import { baselineCursor, capName } from "./events";
+import { checkGh, defaultGhRunner, formatTarget, parseGithubTarget, type GhRunner, type GithubTarget } from "./gh";
+import { fetchSnapshot, fetchThread, postComment, readItem, resolveThread, type ReadPart } from "./api";
+import { MAX_WATCHES_PER_SESSION, addWatch, grantRead, hasReadGrant, itemKeyOf, recordPosted, removeWatch, repoKeyOf, whilePosting } from "./watch-store";
 
 /**
  * The five GitHub agent tools (docs/specs/2026-11-13-github-watch-tool-design.md),
@@ -78,13 +80,17 @@ export const GITHUB_TOOL_DEFINITIONS: HostToolDefinition[] = [
   },
 ];
 
-/** What lib/rpc-manager supplies; fakes replace it in tests. */
+/** What lib/rpc-manager supplies through `createGithubToolOps`; tests replace `run`. */
 export interface GithubToolOps {
   run: GhRunner;
-  /** Whether the calling session's own host lets agents read without asking (`startsUnasked` on that host's record), and the host's label. */
-  hostReadsUnasked(sourceHostId: string): { label: string; allowed: boolean };
+  /** Every host; the calling session's own host record decides whether its reads ask (`startsUnasked`). */
+  listHosts(): AgentToolHost[];
   /** The `githubWritesUnasked` setting. */
   writesUnasked(): boolean;
+}
+
+export function createGithubToolOps(listHosts: () => AgentToolHost[]): GithubToolOps {
+  return { run: defaultGhRunner, listHosts, writesUnasked: () => loadWebServerSettings().githubWritesUnasked };
 }
 
 function stringArg(args: Record<string, unknown>, field: string): string {
@@ -114,9 +120,9 @@ async function allowRead(ops: GithubToolOps, ctx: AgentToolContext, t: GithubTar
   if (ctx.sourceHostId === "local") return;
   const repoKey = repoKeyOf(t);
   if (hasReadGrant(ctx.sourceSessionId, repoKey)) return;
-  const host = ops.hostReadsUnasked(ctx.sourceHostId);
-  if (host.allowed) return;
-  if (!(await ctx.confirm(`Let this session on ${host.label} read ${t.owner}/${t.repo} through the server's GitHub login?`))) {
+  const host = ops.listHosts().find((h) => h.id === ctx.sourceHostId);
+  if (host && startsUnasked(host, ctx.sourceHostId)) return;
+  if (!(await ctx.confirm(`Let this session on ${host?.label ?? ctx.sourceHostId} read ${t.owner}/${t.repo} through the server's GitHub login?`))) {
     throw new Error("The user declined GitHub access for this session.");
   }
   grantRead(ctx.sourceSessionId, repoKey);
@@ -133,7 +139,10 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
     const threadId = stringArg(args, "threadId");
     if (!/^PRRT_[A-Za-z0-9_-]{1,200}$/.test(threadId)) throw new Error('Agent tool argument "threadId" is not a review thread id (PRRT_...).');
     await checkGh(ops.run);
-    await allowWrite(ops, ctx, `Resolve review thread ${threadId} on GitHub as the server's account?`);
+    const thread = await fetchThread(ops.run, threadId);
+    await allowRead(ops, ctx, thread.target);
+    const place = `${formatTarget(thread.target)} ${capName(thread.path)}${thread.line === null ? "" : `:${thread.line}`}`;
+    await allowWrite(ops, ctx, `Resolve review thread ${threadId} on ${place} as the server's GitHub account?`);
     await resolveThread(ops.run, threadId);
     return { resolved: true };
   }
@@ -148,13 +157,20 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
     const replyTo = args.replyTo === undefined || args.replyTo === null ? undefined : stringArg(args, "replyTo");
     if (replyTo !== undefined && !/^(PRRT_[A-Za-z0-9_-]+|\d+)$/.test(replyTo)) throw new Error("replyTo must be a review comment id or a review thread id.");
     await checkGh(ops.run);
+    const item = itemKeyOf(t);
+    if (replyTo?.startsWith("PRRT_")) {
+      const thread = await fetchThread(ops.run, replyTo);
+      if (itemKeyOf(thread.target) !== item) throw new Error(`Review thread ${replyTo} is on ${formatTarget(thread.target)}, not ${label}.`);
+    }
     const preview = body.split("\n", 3).map((line) => line.slice(0, 200)).join("\n");
     const cut = body.length - preview.length;
     const what = replyTo === undefined ? `Post on ${label}` : `Reply in review thread ${replyTo} on ${label}`;
     await allowWrite(ops, ctx, `${what} as the server's GitHub account?\n${preview}${cut > 0 ? `\n… (+${cut} more characters)` : ""}`);
-    const posted = await postComment(ops.run, t, body, replyTo);
-    recordPosted(itemKeyOf(t), posted.id);
-    return posted;
+    return whilePosting(item, async () => {
+      const posted = await postComment(ops.run, t, body, replyTo);
+      recordPosted(item, posted.id);
+      return posted;
+    });
   }
 
   const include = name === "github_read" ? parseInclude(args.include) : [];

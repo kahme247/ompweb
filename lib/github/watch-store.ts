@@ -40,6 +40,8 @@ export function itemKeyOf(target: { owner: string; repo: string; number: number 
 
 declare global {
   var __ompGithubWatchStore: { path: string; db: Database } | undefined;
+  /** Agent posts in flight per item; process memory, shared across the Next bundles. */
+  var __ompGithubPosting: Map<string, number> | undefined;
 }
 
 const SCHEMA = `
@@ -186,6 +188,21 @@ export function getPending(sessionId: string, itemKey: string): PendingUpdate | 
 }
 
 // ---------------------------------------------------------------- posted comments
+
+/** Runs an agent post to `itemKey`; the watcher holds that item until it ends, so it never sees the post before its id is recorded. */
+export async function whilePosting<T>(itemKey: string, post: () => Promise<T>): Promise<T> {
+  const posting = (globalThis.__ompGithubPosting ??= new Map());
+  posting.set(itemKey, (posting.get(itemKey) ?? 0) + 1);
+  try {
+    return await post();
+  } finally {
+    const left = (posting.get(itemKey) ?? 1) - 1;
+    if (left > 0) posting.set(itemKey, left);
+    else posting.delete(itemKey);
+  }
+}
+
+export const isPosting = (itemKey: string): boolean => globalThis.__ompGithubPosting?.has(itemKey) === true;
 
 export function recordPosted(itemKey: string, commentId: string): void {
   db().prepare("INSERT OR IGNORE INTO posted (item_key, comment_id) VALUES (?, ?)").run(itemKey, commentId);
