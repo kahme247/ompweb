@@ -1386,7 +1386,7 @@
   "hostUpdates.unsupported": "This host daemon does not support updates. Upgrade it manually first.",
   "hostUpdates.confirmTitle": "Update {software} on {host}?",
   "hostUpdates.hostWarning": "Close all sessions and stop subagents on {host} first. This update restarts the host daemon; sessions will not resume automatically. Continue?",
-  "hostUpdates.ompWarning": "Update the omp runtime on {host}? Existing sessions keep using the old runtime until they restart. Sessions will not be restarted automatically.",
+  "hostUpdates.ompWithOmpweb": "Updated with ompweb",
   "hostUpdates.updating": "Updating {software} to {version}…",
   "hostUpdates.reconnecting": "Waiting for update status and host reconnection…",
   "hostUpdates.succeeded": "Update completed.",

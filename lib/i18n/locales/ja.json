@@ -1345,7 +1345,7 @@
   "hostUpdates.unsupported": "このホストデーモンは更新機能に対応していません。先に手動でアップグレードしてください。",
   "hostUpdates.confirmTitle": "{host} の {software} を更新しますか？",
   "hostUpdates.hostWarning": "先に {host} のすべてのセッションを閉じ、サブエージェントを停止してください。この更新ではホストデーモンを再起動します。セッションは自動では再開されません。続行しますか？",
-  "hostUpdates.ompWarning": "{host} の omp ランタイムを更新しますか？既存のセッションは再起動するまで旧ランタイムを使用します。セッションは自動では再起動されません。",
+  "hostUpdates.ompWithOmpweb": "ompweb と一緒に更新されます",
   "hostUpdates.updating": "{software} を {version} に更新中…",
   "hostUpdates.reconnecting": "更新状況とホストの再接続を待っています…",
   "hostUpdates.succeeded": "更新が完了しました。",
