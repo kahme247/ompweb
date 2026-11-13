@@ -16,7 +16,7 @@
 - `gh` missing: "`gh` (GitHub CLI) is not installed on the omp-web server machine. Ask the user to install it and run `gh auth login` there."
 - `gh` logged out: "`gh` is not logged in on the omp-web server machine. Ask the user to run `gh auth login` there."
 - `gh` runs with `createChildProcessEnvironment` (`lib/project-command-env.ts`): never omp-web's secrets. Never read or store a GitHub token.
-- Update messages start `GitHub update (omp-web): OWNER/REPO#N <URL>` and never contain text written on GitHub (no bodies, titles, branch names). Check names capped at 100 characters.
+- Update messages start `GitHub update (omp-web): OWNER/REPO#N <URL>` and never contain text written on GitHub (no bodies, titles, branch names). No check names (a fork controls its workflow files).
 - At most 20 watches per session. Poll interval 60 s. `gh auth status` result cached 60 s. `github_read` diff capped at 1 MiB with a truncation marker. `github_comment` body capped at 65 536 characters.
 - Store: `<agent dir>/omp-web/github-watches.sqlite`, WAL, busy timeout, closed with `close(true)`.
 - New setting `githubWritesUnasked` (default `false`), label **Allow agent GitHub writes without asking**, Settings → System beside **Agent tools**.

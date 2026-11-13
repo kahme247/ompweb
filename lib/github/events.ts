@@ -10,8 +10,6 @@ import type { GithubActor, ItemSnapshot } from "./api";
 /** Id lists keep the newest of each, so a long-lived watch stays bounded. */
 const KEPT = 2000;
 const NAME_LIMIT = 100;
-const FAILED_NAMES_SHOWN = 10;
-const FAILED = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure", "error"]);
 const REVIEW_STATES: Record<string, string> = {
   APPROVED: "approved",
   CHANGES_REQUESTED: "changes requested",
@@ -33,7 +31,7 @@ export type GithubEvent =
   | { kind: "comment"; id: string; url: string; author: GithubActor }
   | { kind: "review"; id: string; url: string; author: GithubActor; state: string; commentCount: number }
   | { kind: "thread_comment"; id: string; url: string; author: GithubActor; threadId: string; path: string; line: number | null }
-  | { kind: "ci"; id: string; url: string; sha: string; counts: Record<string, number>; failed: string[] }
+  | { kind: "ci"; id: string; url: string; sha: string; counts: Record<string, number> }
   | { kind: "merged"; id: string; url: string }
   | { kind: "closed"; id: string; url: string; reason?: "completed" | "not_planned" };
 
@@ -50,7 +48,7 @@ const unseen = <T extends { id: string }>(items: T[], known: string[], posted: R
   return items.filter((item) => !seen.has(item.id) && !posted.has(item.id));
 };
 
-// Check names and file paths come from what a fork controls: one line, no control or format characters, bounded length.
+// File paths come from what a fork controls: one line, no control or format characters, bounded length.
 export function capName(name: string): string {
   const chars = Array.from(name.replace(/\s+/g, " ").replace(/\p{C}/gu, ""));
   return chars.length > NAME_LIMIT ? `${chars.slice(0, NAME_LIMIT - 1).join("")}…` : chars.join("");
@@ -58,13 +56,11 @@ export function capName(name: string): string {
 
 function ciEvent(url: string, head: Head): GithubEvent {
   const counts: Record<string, number> = {};
-  const failed: string[] = [];
   for (const check of head.checks) {
     const conclusion = check.conclusion ?? "unknown";
     counts[conclusion] = (counts[conclusion] ?? 0) + 1;
-    if (check.conclusion && FAILED.has(check.conclusion)) failed.push(capName(check.name));
   }
-  return { kind: "ci", id: head.sha, url, sha: head.sha, counts, failed };
+  return { kind: "ci", id: head.sha, url, sha: head.sha, counts };
 }
 
 /** The current state as already reported, so a watch starts from what it sees now. */
@@ -156,9 +152,7 @@ function describe(event: GithubEvent): string {
         .sort()
         .map((conclusion) => `${event.counts[conclusion]} ${conclusion}`)
         .join(", ");
-      const more = event.failed.length - FAILED_NAMES_SHOWN;
-      const failed = event.failed.length > 0 ? `; failed: ${[...event.failed.slice(0, FAILED_NAMES_SHOWN), ...(more > 0 ? [`+${more} more`] : [])].join(", ")}` : "";
-      return `- CI result for head ${event.sha}: ${counts}${failed}. url ${event.url}`;
+      return `- CI result for head ${event.sha}: ${counts}. url ${event.url}`;
     }
     case "merged":
       return `- merged. url ${event.url}`;
@@ -169,7 +163,7 @@ function describe(event: GithubEvent): string {
   }
 }
 
-/** Header, then one line per event. Only logins, association, review states, file paths, line numbers, ids, URLs and check names come from GitHub. */
+/** Header, then one line per event. Only logins, association, review states, file paths, line numbers, ids and URLs come from GitHub. */
 export function formatUpdate(targetText: string, url: string, events: GithubEvent[]): string {
   return [`GitHub update (omp-web): ${targetText} ${url}`, ...events.map(describe)].join("\n");
 }
