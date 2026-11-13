@@ -1,6 +1,6 @@
 import type { HostToolDefinition } from "../pi-types";
-// agent-tools.ts imports this module for its tool names, so it must be evaluated first; this import is only called at run time.
-import { startsUnasked, type AgentToolContext, type AgentToolHost } from "../agent-tools";
+// Types only: agent-tools.ts imports this module for its tool names, so a runtime import back would be a cycle.
+import type { AgentToolContext } from "../agent-tools";
 import { baselineCursor } from "./events";
 import { checkGh, formatTarget, parseGithubTarget, type GhRunner, type GithubTarget } from "./gh";
 import { fetchSnapshot, postComment, readItem, resolveThread, type ReadPart } from "./api";
@@ -66,7 +66,7 @@ export const GITHUB_TOOL_DEFINITIONS: HostToolDefinition[] = [
       properties: {
         target,
         body: { type: "string", description: `Comment text, at most ${MAX_COMMENT_CHARS} characters.` },
-        replyTo: { type: "string", description: "A review comment id or review thread id from github_read, to reply in that thread." },
+        replyTo: { type: "string", description: "A review thread id (PRRT_…) from github_read or a watch update, or a numeric REST review comment id, to reply in that thread." },
       },
       required: ["target", "body"],
     },
@@ -81,7 +81,8 @@ export const GITHUB_TOOL_DEFINITIONS: HostToolDefinition[] = [
 /** What lib/rpc-manager supplies; fakes replace it in tests. */
 export interface GithubToolOps {
   run: GhRunner;
-  listHosts(): AgentToolHost[];
+  /** Whether the calling session's own host lets agents read without asking (`startsUnasked` on that host's record), and the host's label. */
+  hostReadsUnasked(sourceHostId: string): { label: string; allowed: boolean };
   /** The `githubWritesUnasked` setting. */
   writesUnasked(): boolean;
 }
@@ -113,9 +114,9 @@ async function allowRead(ops: GithubToolOps, ctx: AgentToolContext, t: GithubTar
   if (ctx.sourceHostId === "local") return;
   const repoKey = repoKeyOf(t);
   if (hasReadGrant(ctx.sourceSessionId, repoKey)) return;
-  const host = ops.listHosts().find((h) => h.id === ctx.sourceHostId);
-  if (host && startsUnasked(host, ctx.sourceHostId)) return;
-  if (!(await ctx.confirm(`Let this session on ${host?.label ?? ctx.sourceHostId} read ${t.owner}/${t.repo} through the server's GitHub login?`))) {
+  const host = ops.hostReadsUnasked(ctx.sourceHostId);
+  if (host.allowed) return;
+  if (!(await ctx.confirm(`Let this session on ${host.label} read ${t.owner}/${t.repo} through the server's GitHub login?`))) {
     throw new Error("The user declined GitHub access for this session.");
   }
   grantRead(ctx.sourceSessionId, repoKey);
@@ -145,8 +146,12 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
     if (typeof body !== "string" || !body.trim()) throw new Error('Agent tool argument "body" is required and must be a non-empty string.');
     if (body.length > MAX_COMMENT_CHARS) throw new Error(`Agent tool argument "body" exceeds ${MAX_COMMENT_CHARS} characters.`);
     const replyTo = args.replyTo === undefined || args.replyTo === null ? undefined : stringArg(args, "replyTo");
+    if (replyTo !== undefined && !/^(PRRT_[A-Za-z0-9_-]+|\d+)$/.test(replyTo)) throw new Error("replyTo must be a review comment id or a review thread id.");
     await checkGh(ops.run);
-    await allowWrite(ops, ctx, `Post on ${label} as the server's GitHub account?\n${body.split("\n", 3).map((line) => line.slice(0, 200)).join("\n")}`);
+    const preview = body.split("\n", 3).map((line) => line.slice(0, 200)).join("\n");
+    const cut = body.length - preview.length;
+    const what = replyTo === undefined ? `Post on ${label}` : `Reply in review thread ${replyTo} on ${label}`;
+    await allowWrite(ops, ctx, `${what} as the server's GitHub account?\n${preview}${cut > 0 ? `\n… (+${cut} more characters)` : ""}`);
     const posted = await postComment(ops.run, t, body, replyTo);
     recordPosted(itemKeyOf(t), posted.id);
     return posted;
