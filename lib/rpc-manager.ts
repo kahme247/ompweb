@@ -1487,7 +1487,10 @@ export class AgentSessionWrapper {
     this.dropServerUiRequests();
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
+    // Like forgetPendingUiRequest: a reload whose spawn then fails broadcasts nothing else.
+    if (this.pendingUiRequests.size === 0) return;
     this.pendingUiRequests.clear();
+    notifyRunningChange();
   }
 
   /** Settle every server dialog as declined and close it in attached tabs. */
