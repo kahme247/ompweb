@@ -156,8 +156,9 @@ function preflightCandidate() {
       console.warn(`ompweb ${target} has no preflight command; its omp was not checked`);
       return;
     }
-    // OMP_WEB_PACKAGE_DIR: the launcher set it to the running install, whose omp this must not check.
-    const result = cp.spawnSync(process.execPath, [path.join(release, "bin", "omp-web.js"), "preflight"], { cwd: prefix, timeout: 60 * 1000, windowsHide: true, env: { ...process.env, OMP_WEB_PACKAGE_DIR: release }, encoding: "utf8" });
+    // OMP_WEB_PACKAGE_DIR: the launcher set it to the running install, whose omp this must not check. 120 s: the
+    // preflight itself can take 30 s for the hello, 7 s to stop omp and 30 s for the version probe.
+    const result = cp.spawnSync(process.execPath, [path.join(release, "bin", "omp-web.js"), "preflight"], { cwd: prefix, timeout: 120 * 1000, windowsHide: true, env: { ...process.env, OMP_WEB_PACKAGE_DIR: release }, encoding: "utf8" });
     if (result.status !== 0) throw new Error(`the new release cannot start a session: ${((result.stderr || "").trim() || String(result.error || `exit ${result.status}`)).slice(-200)}`);
   } finally {
     // Best effort: a locked file (Windows) must not fail an update the check passed.

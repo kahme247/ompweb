@@ -413,7 +413,8 @@ async function preflightHostRelease(d: HostUpdateDescriptor, release: string): P
     return;
   }
   try {
-    await exec(binary ? entry : d.runtime, binary ? ["preflight"] : [entry, "preflight"], { cwd: release, timeout: 60000, env: workerEnvironment(), maxBuffer: 1024 * 1024, windowsHide: true });
+    // 120 s: the preflight itself can take 30 s for the hello, 7 s to stop omp and 30 s for the version probe.
+    await exec(binary ? entry : d.runtime, binary ? ["preflight"] : [entry, "preflight"], { cwd: release, timeout: 120000, env: workerEnvironment(), maxBuffer: 1024 * 1024, windowsHide: true });
   } catch (error) {
     const detail = String((error as { stderr?: unknown }).stderr ?? "").trim() || (error instanceof Error ? error.message : String(error));
     throw new Error(`The new host release cannot start a session: ${detail.slice(-500)}`);
