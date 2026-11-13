@@ -3,25 +3,33 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { TaskBlock, CompletionBlock, SubagentModel } = await import("./SubagentTranscriptDialog.tsx");
+const { TaskBlock, CompletionBlock, SubagentDetails } = await import("./SubagentTranscriptDialog.tsx");
 
 test("shows the provider-qualified model and reasoning effort split from the resolved model", () => {
-  const html = renderToStaticMarkup(React.createElement(SubagentModel, {
+  const html = renderToStaticMarkup(React.createElement(SubagentDetails, {
     resolvedModel: "anthropic/claude-sonnet-5-5:high",
   }));
   assert.match(html, /<dt[^>]*>model<\/dt><dd[^>]*>anthropic\/claude-sonnet-5-5<\/dd>/);
   assert.match(html, /<dt[^>]*>effort<\/dt><dd[^>]*>high<\/dd>/);
 });
 
+test("labels the agent and the full session file on rows of their own", () => {
+  const file = "/root/git/ai-harness-settings/ai-dev/omp/agent/sessions/long/0-Task.jsonl";
+  const html = renderToStaticMarkup(React.createElement(SubagentDetails, { agent: "task", resolvedModel: "p/m:medium", file }));
+  assert.match(html, /<dt[^>]*>agent<\/dt><dd[^>]*>task<\/dd>/);
+  assert.match(html, new RegExp(`<dt[^>]*>file</dt><dd[^>]*>${file}</dd>`));
+  assert.doesNotMatch(html, /ellipsis|nowrap/);
+});
+
 test("renders nothing when no resolved model is known", () => {
-  assert.equal(renderToStaticMarkup(React.createElement(SubagentModel, {})), "");
+  assert.equal(renderToStaticMarkup(React.createElement(SubagentDetails, {})), "");
 });
 
 test("splits the max effort level and keeps a non-effort suffix in the model id", () => {
-  const max = renderToStaticMarkup(React.createElement(SubagentModel, { resolvedModel: "m:max" }));
+  const max = renderToStaticMarkup(React.createElement(SubagentDetails, { resolvedModel: "m:max" }));
   assert.match(max, /<dt[^>]*>model<\/dt><dd[^>]*>m<\/dd>/);
   assert.match(max, /<dt[^>]*>effort<\/dt><dd[^>]*>max<\/dd>/);
-  const tagged = renderToStaticMarkup(React.createElement(SubagentModel, { resolvedModel: "p/m:free" }));
+  const tagged = renderToStaticMarkup(React.createElement(SubagentDetails, { resolvedModel: "p/m:free" }));
   assert.match(tagged, /<dt[^>]*>model<\/dt><dd[^>]*>p\/m:free<\/dd>/);
   assert.doesNotMatch(tagged, />effort</);
 });

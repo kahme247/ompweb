@@ -646,6 +646,8 @@
   "subagentTranscript.taskLabel": "任務",
   "subagentTranscript.modelLabel": "模型",
   "subagentTranscript.effortLabel": "推論投入度",
+  "subagentTranscript.agentLabel": "代理",
+  "subagentTranscript.fileLabel": "檔案",
   "subagentTranscript.showTranscript": "顯示逐字記錄",
   "subagentTranscript.hideTranscript": "隱藏逐字記錄",
   "subagentTranscript.resultLabel": "結果",

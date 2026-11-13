@@ -43,7 +43,7 @@ export function TaskResultPanel({ details }: { details: unknown }) {
     : progress.length > 0
       ? progress
       : asyncInfo && typeof asyncInfo.jobId === "string"
-        ? [{ id: asyncInfo.jobId, agent: "task", status: "started", task: asyncInfo.jobId } as TaskResultRowLike]
+        ? [{ id: asyncInfo.jobId, agent: "task", status: "started" } as TaskResultRowLike]
         : [];
   const totalTokens = rows.reduce((sum, row) => sum + (typeof row.tokens === "number" ? row.tokens : 0), 0);
   const totalCost = rows.reduce((sum, row) => sum + (typeof row.cost === "number" ? row.cost : 0), 0);
@@ -89,11 +89,16 @@ export function TaskResultPanel({ details }: { details: unknown }) {
         return (
           <div
             key={id}
-            aria-label={`${typeof row.agent === "string" ? row.agent : "subagent"}: ${t(`chatWindow.subagentState.${status}`)}${task ? ` — ${task}` : ""}`}
+            aria-label={`${typeof row.id === "string" ? `${row.id} ` : ""}(${typeof row.agent === "string" ? row.agent : "subagent"}): ${t(`chatWindow.subagentState.${status}`)}${task ? ` — ${task}` : ""}`}
             style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: 11.5 }}
           >
             <TaskResultStatusIcon status={status} />
-            <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", flexShrink: 0 }}>
+            {typeof row.id === "string" && (
+              <span title={row.id} style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", minWidth: 0, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {row.id}
+              </span>
+            )}
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>
               {typeof row.agent === "string" ? row.agent : "subagent"}
             </span>
             <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, color: "var(--text)" }}>
