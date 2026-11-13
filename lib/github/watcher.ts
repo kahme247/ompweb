@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { loadWebServerSettings } from "../web-settings";
 import { fetchSnapshot } from "./api";
 import { diffSnapshot, formatUpdate, updateEntryId } from "./events";
-import { defaultGhRunner, formatTarget, GhUnavailableError, parseGithubTarget, type GhRunner } from "./gh";
+import { checkGh, defaultGhRunner, formatTarget, GhUnavailableError, parseGithubTarget, type GhRunner } from "./gh";
 import { closeWatchStore, commitUpdate, getPending, listWatches, postedIds, removeSessionWatches, renameSession, setPending, type PendingUpdate, type Watch } from "./watch-store";
 
 /**
@@ -115,9 +115,12 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
     if (!fresh.length) return;
 
     const target = parseGithubTarget(itemKey);
-    const since = new Set(fresh.flatMap((w) => [...w.cursor.commentIds, ...w.cursor.reviewIds]));
+    // Ids every watch already knows: paging stops there, so a lagging watch still sees what came after its own cursor.
+    const known = fresh.map((w) => new Set([...w.cursor.commentIds, ...w.cursor.reviewIds]));
+    const since = new Set([...known[0]].filter((id) => known.every((ids) => ids.has(id))));
     let snapshot;
     try {
+      await checkGh(state.deps.run, state.deps.now); // gh missing or logged out arrives as GhUnavailableError only through here
       snapshot = await fetchSnapshot(state.deps.run, target, since);
     } catch (error) {
       if (error instanceof GhUnavailableError) await announcePaused(state, error.message);
@@ -170,9 +173,14 @@ function cycle(state: WatcherState): void {
     }, ms);
     state.cancels.add(cancel);
   };
-  const items = loadWebServerSettings().agentToolsEnabled ? itemsOf() : [];
-  items.forEach((itemKey, index) => track(() => void pollItem(state, itemKey), Math.floor((index * INTERVAL_MS) / items.length)));
+  // First, so a failing read below cannot end the chain.
   track(() => cycle(state), INTERVAL_MS);
+  try {
+    const items = loadWebServerSettings().agentToolsEnabled ? itemsOf() : [];
+    items.forEach((itemKey, index) => track(() => void pollItem(state, itemKey), Math.floor((index * INTERVAL_MS) / items.length)));
+  } catch (error) {
+    warn("watches could not be read", error);
+  }
 }
 
 export function startGithubWatcher(deps: WatcherDeps = {}): void {
@@ -190,7 +198,13 @@ export function startGithubWatcher(deps: WatcherDeps = {}): void {
   void import("../rpc-manager")
     .then(({ onSessionMove }) => {
       if (state.stopped) return;
-      state.detachMove = onSessionMove((from, to) => renameSession(from, to));
+      state.detachMove = onSessionMove((from, to) => {
+        try {
+          renameSession(from, to);
+        } catch (error) {
+          warn(`watches of ${from} did not follow the move`, error); // rpc-manager calls listeners unguarded
+        }
+      });
     })
     .catch((error) => warn("session moves are not followed", error));
   cycle(state);
@@ -203,6 +217,7 @@ export function stopGithubWatcher(): void {
   for (const cancel of state.cancels) cancel();
   state.cancels.clear();
   state.detachMove?.();
+  process.off("exit", stopGithubWatcher);
   globalThis.__ompGithubWatcher = undefined;
   closeWatchStore();
 }
