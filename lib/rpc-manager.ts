@@ -15,6 +15,7 @@ import {
   AGENT_TOOL_NAMES,
   AgentToolGuard,
   executeAgentTool,
+  startsUnasked,
   type AgentToolContext,
   type AgentToolDeliverInput,
   type AgentToolDeliverResult,
@@ -3368,7 +3369,14 @@ function createAgentToolOps(source: AgentToolContext, replaying: boolean): Agent
     ];
   };
   return {
-    github: { run: defaultGhRunner, listHosts: hosts, writesUnasked: () => loadWebServerSettings().githubWritesUnasked },
+    github: {
+      run: defaultGhRunner,
+      hostReadsUnasked(sourceHostId) {
+        const host = hosts().find((h) => h.id === sourceHostId);
+        return { label: host?.label ?? sourceHostId, allowed: host !== undefined && startsUnasked(host, sourceHostId) };
+      },
+      writesUnasked: () => loadWebServerSettings().githubWritesUnasked,
+    },
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
       const sessions = await listSessionsAllHosts();
