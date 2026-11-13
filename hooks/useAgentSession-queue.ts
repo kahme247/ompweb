@@ -31,6 +31,8 @@ export interface HeldMessage {
   message: string;
   images?: { type: "image"; data: string; mimeType: string }[];
   uploads?: string[];
+  /** Only on this browser's own entries (`local`): the upload proofs a retry needs to attach the same files. */
+  uploadProofs?: Record<string, string>;
   state: LocalOutboxEntry["state"] | Exclude<OutboxEntry["state"], "delivered">;
   error?: string;
   mayHaveBeenSent?: boolean;

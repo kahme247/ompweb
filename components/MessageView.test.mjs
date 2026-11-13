@@ -27,6 +27,26 @@ test("held messages name every delivery leg and only offer Delete before dispatc
   }
 });
 
+test("only a failed held message offers Retry, and one that may have reached omp asks first", async () => {
+  const base = { id: "held", mode: "prompt", message: "Again.", createdAt: Date.now(), local: false };
+  for (const state of ["sending", "waiting_host", "held", "delivering"]) {
+    assert.equal(renderToStaticMarkup(React.createElement(HeldMessageView, { held: { ...base, state }, onRetry() {} })).includes("Send this message again"), false, state);
+  }
+  const retried = [];
+  const plain = render(React.createElement(HeldMessageView, { held: { ...base, state: "failed" }, onRetry: (id) => retried.push(id) }));
+  await act(async () => { fireEvent.click(plain.getByRole("button", { name: "Send this message again" })); });
+  assert.deepEqual(retried, ["held"]);
+  assert.equal(plain.queryByRole("dialog"), null);
+  plain.unmount();
+  const uncertain = render(React.createElement(HeldMessageView, { held: { ...base, state: "failed", mayHaveBeenSent: true }, onRetry: (id) => retried.push(id) }));
+  await act(async () => { fireEvent.click(uncertain.getByRole("button", { name: "Send this message again" })); });
+  const dialog = await waitFor(() => uncertain.getByRole("dialog"));
+  assert.match(dialog.textContent, /run it twice/);
+  assert.deepEqual(retried, ["held"]);
+  await act(async () => { fireEvent.click(uncertain.getAllByRole("button", { name: "Retry" }).at(-1)); });
+  assert.deepEqual(retried, ["held", "held"]);
+});
+
 test("Delete confirmation never claims omp has not seen a message that may have been sent, nor cancellation", async () => {
   const base = { id: "held", mode: "prompt", message: "Keep this safe.", createdAt: Date.now(), local: false, state: "failed" };
   const dialogText = async (held) => {

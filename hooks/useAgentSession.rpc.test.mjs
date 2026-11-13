@@ -7806,6 +7806,28 @@ test("a 409 deleting a dispatched outbox message shows a notice and keeps the bu
   assert.equal(w.latest.heldMessages.some((held) => held.id === entry.id), true);
 });
 
+test("Retry holds an identical new message, then removes the failed one", async () => {
+  resetWorld();
+  const sid = "outbox-retry";
+  primeSession(sid, [userMsg("u0", "before")]);
+  const w = await mountSession(sid);
+  await act(async () => { await w.latest.handleSend("open channel"); });
+  world.outboxHold = true;
+  const entry = { id: "failed-once", sessionId: sid, mode: "followUp", message: "send me again", uploads: ["up-1"], state: "failed", error: "boom", createdAt: 1 };
+  await act(() => lastEs().emit({ type: "outbox_update", entries: [entry] }));
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "outbox_remove",
+    produce: async () => ({ status: 200, value: { success: true } }),
+  });
+  await act(async () => { await Promise.all([w.latest.retryHeldMessage(entry.id), w.latest.retryHeldMessage(entry.id)]); });
+  const copies = world.outbox.filter((held) => held.message === "send me again");
+  assert.equal(copies.length, 1, "a double click holds one copy");
+  const [copy] = copies;
+  assert.notEqual(copy.id, entry.id);
+  assert.deepEqual({ mode: copy.mode, message: copy.message, uploads: copy.uploads, sessionId: copy.sessionId }, { mode: "followUp", message: "send me again", uploads: ["up-1"], sessionId: sid });
+  assert.deepEqual(callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "outbox_remove").map((call) => call.body), [{ type: "outbox_remove", id: entry.id }]);
+});
+
 test("mounting a session with an outbox snapshot subscribes without starting omp and shows its held messages", async () => {
   resetWorld();
   const sid = "outbox-mount";
