@@ -6,7 +6,10 @@ const { cleanup, fireEvent, render } = await import("@testing-library/react/pure
 
 const { MarkdownBody } = await import("./MarkdownBody.tsx");
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "/");
+});
 
 function renderChat(markdown, opened = []) {
   return render(React.createElement(MarkdownBody, { cwd: "/home/me/project", onOpenFile: (file) => opened.push(file) }, markdown));
@@ -78,4 +81,48 @@ test("without a file panel (a remote host's session) a path link renders as its 
   const links = [...container.querySelectorAll("a")];
   assert.deepEqual(links.map((a) => a.getAttribute("href")), ["https://x.test"]);
   assert.match(container.textContent, /local:\/\/uploads\/a\.txt/);
+});
+
+test("session references navigate in the app rather than opening a filesystem root", () => {
+  const opened = [];
+  const { container } = renderChat(
+    "[root](/?session=one&left=0#message) [query](?session=two&right=0) [absolute](https://omp.test/?session=three#latest)",
+    opened,
+  );
+  const links = [...container.querySelectorAll("a")];
+  const hrefs = ["/?session=one&left=0#message", "/?session=two&right=0", "/?session=three#latest"];
+  assert.deepEqual(links.map((link) => link.getAttribute("href")), hrefs);
+  assert.ok(links.every((link) => !link.hasAttribute("target")));
+  for (const [index, link] of links.entries()) {
+    assert.equal(fireEvent.click(link, { button: 0 }), false);
+    assert.equal(window.location.pathname + window.location.search + window.location.hash, hrefs[index]);
+  }
+  assert.deepEqual(opened, []);
+});
+
+test("session references leave modified, middle and new-target clicks to the browser", () => {
+  const opened = [];
+  const { container } = renderChat("[session](/?session=other)", opened);
+  const link = container.querySelector("a");
+  assert.ok(link);
+  const initialUrl = window.location.href;
+  for (const modifier of ["ctrlKey", "metaKey", "shiftKey", "altKey"]) {
+    assert.equal(fireEvent.click(link, { button: 0, [modifier]: true }), true, modifier);
+  }
+  assert.equal(fireEvent(link, new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true })), true);
+  link.target = "_blank";
+  assert.equal(fireEvent.click(link, { button: 0 }), true);
+  assert.equal(window.location.href, initialUrl);
+  assert.deepEqual(opened, []);
+});
+
+test("foreign-origin session URLs keep their external link behavior", () => {
+  const opened = [];
+  const { container } = renderChat("[other server](https://else.test/?session=one)", opened);
+  const link = container.querySelector("a");
+  assert.equal(link.getAttribute("href"), "https://else.test/?session=one");
+  assert.equal(link.target, "_blank");
+  assert.equal(link.rel, "noopener noreferrer");
+  assert.equal(fireEvent.click(link, { button: 0 }), true);
+  assert.deepEqual(opened, []);
 });

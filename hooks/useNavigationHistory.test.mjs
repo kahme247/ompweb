@@ -2,102 +2,60 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
-
-// lib/navigation-history.test.mjs covers the pure stack arithmetic; this file
-// covers the React wrapper: recording from a view-change effect, the
-// peek/commit/drop choreography AppShell drives around dead sessions, and
-// that committing a step makes the subsequent re-record a no-op (that is
-// what keeps back/forward from pushing onto themselves).
-
 const { useNavigationHistory } = await import("./useNavigationHistory.ts");
+const { useRouter, useSearchParams } = await import("../lib/navigation.ts");
 
-const session = (id, cwd = "/repo") => ({ sessionId: id, cwd });
-const newChat = (cwd) => ({ sessionId: null, cwd });
-
-function renderNav() {
-  return renderHook(() => useNavigationHistory());
-}
+const renderNav = () => renderHook(() => ({
+  ...useNavigationHistory(), router: useRouter(), session: useSearchParams().get("session"),
+}));
+const traverse = async (action) => act(async () => {
+  const popped = new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+  action();
+  await popped;
+});
 
 afterEach(() => {
   cleanup();
+  window.history.replaceState(null, "", "/");
+  window.sessionStorage.clear();
 });
 
-test("starts with nothing navigable", () => {
+test("in-app controls stop at owned bounds while native traversal updates availability", async () => {
+  window.history.replaceState(null, "", "/?session=a");
   const { result } = renderNav();
+  act(() => result.current.back());
+  act(() => result.current.forward());
+  assert.equal(result.current.session, "a");
   assert.equal(result.current.canBack, false);
   assert.equal(result.current.canForward, false);
-  assert.equal(result.current.peekBack(), null);
-  assert.equal(result.current.peekForward(), null);
-});
-
-test("recording views tracks back/forward availability", () => {
-  const { result } = renderNav();
-  act(() => result.current.record(session("a")));
-  assert.equal(result.current.canBack, false);
-  act(() => result.current.record(session("b")));
+  act(() => result.current.router.push("/?session=b"));
+  act(() => result.current.router.push("/?session=c"));
+  await traverse(() => window.history.back());
+  assert.equal(result.current.session, "b");
   assert.equal(result.current.canBack, true);
-  assert.equal(result.current.canForward, false);
-  assert.equal(result.current.peekBack()?.sessionId, "a");
-});
-
-test("re-recording the same view changes nothing", () => {
-  const { result } = renderNav();
-  act(() => result.current.record(session("a")));
-  act(() => result.current.record(session("a")));
-  assert.equal(result.current.peekBack(), null);
-  assert.equal(result.current.canForward, false);
-});
-
-test("commitBack lands on the target and suppresses the re-record", () => {
-  const { result } = renderNav();
-  act(() => result.current.record(session("a")));
-  act(() => result.current.record(session("b")));
-  act(() => result.current.commitBack());
-  assert.equal(result.current.peekForward()?.sessionId, "b");
-  assert.equal(result.current.canBack, false);
-  // The view-change effect now re-records the entry we landed on: this must
-  // not push a duplicate or truncate the forward branch.
-  act(() => result.current.record(session("a")));
-  assert.equal(result.current.peekForward()?.sessionId, "b");
   assert.equal(result.current.canForward, true);
-});
-
-test("recording a new view after going back truncates the forward branch", () => {
-  const { result } = renderNav();
-  act(() => result.current.record(session("a")));
-  act(() => result.current.record(session("b")));
-  act(() => result.current.commitBack());
-  act(() => result.current.record(session("c")));
-  assert.equal(result.current.canForward, false);
-  assert.equal(result.current.peekBack()?.sessionId, "a");
-});
-
-test("dropping a peeked dead entry keeps the cursor on the live view", () => {
-  const { result } = renderNav();
-  act(() => result.current.record(session("a")));
-  act(() => result.current.record(session("dead")));
-  act(() => result.current.record(session("c")));
-  assert.equal(result.current.peekBack()?.sessionId, "dead");
-  act(() => result.current.dropPeekedBack());
-  assert.equal(result.current.peekBack()?.sessionId, "a");
+  await traverse(() => result.current.back());
+  assert.equal(result.current.session, "a");
+  assert.equal(result.current.canBack, false);
+  assert.equal(result.current.canForward, true);
+  act(() => result.current.back());
+  assert.equal(result.current.session, "a");
+  await traverse(() => result.current.forward());
+  await traverse(() => result.current.forward());
+  assert.equal(result.current.session, "c");
   assert.equal(result.current.canBack, true);
-});
-
-test("commitForward walks forward through recorded views", () => {
-  const { result } = renderNav();
-  act(() => result.current.record(newChat("/one")));
-  act(() => result.current.record(session("a")));
-  act(() => result.current.commitBack());
-  assert.equal(result.current.peekForward()?.sessionId, "a");
-  act(() => result.current.commitForward());
   assert.equal(result.current.canForward, false);
-  assert.equal(result.current.peekBack()?.cwd, "/one");
 });
 
-test("new-chat views with different cwds are distinct entries", () => {
+test("rapid in-app Back presses cannot traverse the synthetic root guard", async () => {
+  window.history.replaceState(null, "", "/?session=a");
   const { result } = renderNav();
-  act(() => result.current.record(newChat("/one")));
-  act(() => result.current.record(newChat("/two")));
-  assert.equal(result.current.canBack, true);
-  assert.equal(result.current.peekBack()?.cwd, "/one");
+  act(() => result.current.router.push("/?session=b"));
+  await traverse(() => {
+    result.current.back();
+    result.current.back();
+  });
+  assert.equal(result.current.session, "a");
+  assert.equal(result.current.canBack, false);
+  assert.equal(result.current.canForward, true);
 });

@@ -33,6 +33,20 @@ The **Steer**, **Delete** and **Edit** actions on a queued message are commands 
 
 The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs.
 
+## Shareable navigation
+
+Each session has a URL such as `/?session=<id>`. Session titles in the sidebar
+are links: use your browser's Copy link or open-in-new-tab controls. Session
+links in chat navigate within the app.
+
+Browser Back/Forward and the sidebar navigation buttons restore session changes
+and sidebar visibility (`&sidebar=open` or `&sidebar=closed`). New-chat URLs keep
+their workspace in `?cwd=...`, with `hostId` for another machine, or
+`?poolId=...&projectId=...&creationId=...` for a pooled creation. Reloading restores
+the URL's view; sidebar-only changes do not reset the composer. Frozen pooled
+initialization stays in this tab's session storage, not in shared URLs.
+Drafts remain separate from URLs, and leaving the app warns about unsent drafts.
+
 ## App installation behind authentication
 
 To install the web app, sign in first and use your browser's installation menu.

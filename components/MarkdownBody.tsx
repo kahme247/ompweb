@@ -5,6 +5,8 @@ import ReactMarkdown, { type Components, type UrlTransform } from "react-markdow
 import { remarkInlineCodeFileLinks, resolveLocalFileHref } from "@/lib/file-links";
 import { getFileApiUrl } from "@/lib/file-paths";
 import { WorkspaceFileContext } from "@/lib/workspace-file-context";
+import { useRouter } from "@/lib/navigation";
+import { sessionLinkHref } from "@/lib/session-links";
 import { AgentLinkContext, agentAwareUrlTransform, agentLinkIds, remarkAgentLinks } from "../lib/agent-links";
 import { GithubRepoContext, remarkGithubRefs } from "../lib/github-refs";
 import { normalizeDisplayMath, useMarkdownPlugins, type MarkdownPlugins } from "../lib/markdown";
@@ -52,6 +54,7 @@ export function useMarkdownBodyRendering({ children, isStreaming, cwd, sourceSes
     [baseRemarkPlugins, githubRepo, onOpenFile, cwd],
   );
   const openAgentLink = useContext(AgentLinkContext);
+  const router = useRouter();
 
   // Rebuilt only when its captured props change, not on every render.
   const components = useMemo<Components>(() => {
@@ -138,6 +141,18 @@ export function useMarkdownBodyRendering({ children, isStreaming, cwd, sourceSes
         const anchor = <a href={href} {...props} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{textParts}</a>;
         return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
       }
+      const sessionHref = sessionLinkHref(href);
+      if (sessionHref) {
+        const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+          if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          const target = event.currentTarget.getAttribute("target");
+          if (target && target !== "_self") return;
+          event.preventDefault();
+          router.push(sessionHref);
+        };
+        const anchor = <a href={sessionHref} {...props} onClick={handleClick}>{textParts}</a>;
+        return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
+      }
       const filePath = resolveLocalFileHref(href, cwd);
       if (filePath) {
         // Without a file panel (a remote host's session, a dialog) a path link has nowhere to go: show its text.
@@ -173,7 +188,7 @@ export function useMarkdownBodyRendering({ children, isStreaming, cwd, sourceSes
       );
     },
     };
-  }, [isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages, openAgentLink, autoCharts, fileSource]);
+  }, [isStreaming, cwd, sourceSessionId, onOpenFile, suppressImages, openAgentLink, autoCharts, fileSource, router]);
 
   return { markdown: normalizedMarkdown, remarkPlugins, rehypePlugins, components, urlTransform };
 }
