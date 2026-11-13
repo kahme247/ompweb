@@ -1,3 +1,5 @@
+// The "rpc" in this file's name (and in RpcProcess/RpcTransport, lib/omp/rpc-*.ts) is a leftover: sessions no
+// longer use omp's RPC mode. They run on ompweb's own omp runner channel (docs/specs/2026-11-12-omp-runner-design.md).
 import { createHash, randomUUID } from "crypto";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
