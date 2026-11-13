@@ -114,7 +114,7 @@ A session that no longer exists (deleted, and not archived: `outbox_add` answers
 
 ### Polling and storage
 
-- Each watched item is polled every 60 s with one `gh api graphql` request (state, comments, reviews, review threads, head commit status rollup), shared by every session watching it; items are spread across the interval rather than polled together.
+- Each watched item is polled once per interval with one `gh api graphql` request (state, comments, reviews, review threads, head commit status rollup), shared by every session watching it; items are spread across the interval rather than polled together. The interval is 60 s, stretched to 1.5 s per watched item past 40 items, and polling pauses until the reset time when fewer than 200 GraphQL points remain.
 - Watches, cursors (last seen comment/review/thread-comment ids, last reported head SHA), posted-comment ids and read confirmations live in SQLite in `<agent dir>/omp-web/github-watches.sqlite`, opened like the notification store (`bun:sqlite`, WAL, busy timeout, `close(true)`).
 - A cursor advances in the same transaction that records the outbox entry id it produced.
 - While **Agent tools** is off, polling stops and watches are kept; turning it back on resumes from the stored cursors, so what happened meanwhile is delivered then.
