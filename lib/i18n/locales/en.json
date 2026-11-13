@@ -683,7 +683,7 @@
   "heldMessage.deleteConfirmBody": "Remove this held message from the outbox list?",
   "heldMessage.deleteConfirmMayHaveBeenSent": "This message may already have reached omp, and omp may still run it. Deleting it only removes it from this list; it cannot cancel or undo anything omp has received or may still receive. Check the transcript first. Delete anyway?",
   "heldMessage.retry": "Retry",
-  "heldMessage.retryTitle": "Send this message again",
+  "heldMessage.retryTitle": "Retry sending this message",
   "heldMessage.retryConfirmMayHaveBeenSent": "This message may already have reached omp, and omp may still run it. Sending it again can make omp run it twice. Check the transcript first. Send it again anyway?",
   "errors.action_required": "An action is required",
   "errors.api_key_remove_unsupported": "omp-web cannot remove stored API keys. Run `omp` in a terminal and use /logout, or edit the provider config in ~/.omp/agent/models.yml.",

@@ -7828,6 +7828,43 @@ test("Retry holds an identical new message, then removes the failed one", async 
   assert.deepEqual(callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "outbox_remove").map((call) => call.body), [{ type: "outbox_remove", id: entry.id }]);
 });
 
+test("a Retry whose new copy is not stored keeps the failed message and removes nothing", async () => {
+  resetWorld();
+  const sid = "outbox-retry-refused";
+  primeSession(sid, [userMsg("u0", "before")]);
+  const w = await mountSession(sid);
+  await act(async () => { await w.latest.handleSend("open channel"); });
+  world.outboxHold = true;
+  const entry = { id: "failed-keep", sessionId: sid, mode: "prompt", message: "keep me", state: "failed", createdAt: 1 };
+  await act(() => lastEs().emit({ type: "outbox_update", entries: [entry] }));
+  world.outboxCommit = () => workerPort.onmessage({ data: { outboxAdded: world.lastOutboxAdd.n, error: "QuotaExceededError" } });
+  await act(async () => { await w.latest.retryHeldMessage(entry.id); });
+  assert.equal(callsTo("POST", `/api/agent/${sid}`).some((call) => call.body?.type === "outbox_remove"), false);
+  assert.equal(w.latest.heldMessages.some((held) => held.id === entry.id && held.state === "failed"), true);
+  assert.match(w.latest.notices.at(-1)?.message ?? "", /QuotaExceededError/);
+});
+
+test("Retry of this browser's failed message carries its images and upload proofs, then drops the old copy", async () => {
+  resetWorld();
+  const sid = "outbox-retry-local";
+  primeSession(sid, [userMsg("u0", "before")]);
+  const w = await mountSession(sid);
+  await act(async () => { await w.latest.handleSend("open channel"); });
+  world.outboxHold = true;
+  const images = [{ type: "image", data: "aGk=", mimeType: "image/png" }];
+  const local = { id: "local-failed", sessionId: sid, scope: "test-scope", mode: "steer", message: "with files", images, uploads: ["up-2"], uploadProofs: { "up-2": "proof-2" }, state: "failed", createdAt: 1 };
+  world.outbox = [local];
+  await act(async () => { workerPort.onmessage({ data: { outbox: [local] } }); });
+  let drops = 0;
+  world.outboxDrop = (commit) => { drops += 1; commit(); };
+  await act(async () => { await w.latest.retryHeldMessage(local.id); });
+  const copy = world.lastOutboxAdd.entry;
+  assert.notEqual(copy.id, local.id);
+  assert.deepEqual({ mode: copy.mode, message: copy.message, images: copy.images, uploads: copy.uploads, uploadProofs: copy.uploadProofs }, { mode: "steer", message: "with files", images, uploads: ["up-2"], uploadProofs: { "up-2": "proof-2" } });
+  assert.equal(drops, 1);
+  assert.equal(world.outbox.some((entry) => entry.id === local.id), false);
+});
+
 test("mounting a session with an outbox snapshot subscribes without starting omp and shows its held messages", async () => {
   resetWorld();
   const sid = "outbox-mount";
