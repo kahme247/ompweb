@@ -30,7 +30,7 @@ export interface WatchCursor {
 export type GithubEvent =
   | { kind: "comment"; id: string; url: string; author: GithubActor }
   | { kind: "review"; id: string; url: string; author: GithubActor; state: string; commentCount: number }
-  | { kind: "thread_comment"; id: string; url: string; author: GithubActor; threadId: string; path: string; line: number | null }
+  | { kind: "thread_comment"; id: string; url: string; author: GithubActor; threadId: string; line: number | null }
   | { kind: "ci"; id: string; url: string; sha: string; counts: Record<string, number> }
   | { kind: "merged"; id: string; url: string }
   | { kind: "closed"; id: string; url: string; reason?: "completed" | "not_planned" };
@@ -48,7 +48,7 @@ const unseen = <T extends { id: string }>(items: T[], known: string[], posted: R
   return items.filter((item) => !seen.has(item.id) && !posted.has(item.id));
 };
 
-// File paths come from what a fork controls: one line, no control or format characters, bounded length.
+// For a confirm the user reads (a thread's file path): one line, no control or format characters, bounded length.
 export function capName(name: string): string {
   const chars = Array.from(name.replace(/\s+/g, " ").replace(/\p{C}/gu, ""));
   return chars.length > NAME_LIMIT ? `${chars.slice(0, NAME_LIMIT - 1).join("")}…` : chars.join("");
@@ -101,7 +101,6 @@ export function diffSnapshot(
       url: t.url,
       author: t.author,
       threadId: t.threadId,
-      path: t.path,
       line: t.line,
     })),
   ];
@@ -143,9 +142,8 @@ function describe(event: GithubEvent): string {
       return `- review (${state}, ${inline}) by ${who(event.author)}. id ${event.id}, url ${event.url}`;
     }
     case "thread_comment": {
-      const path = capName(event.path);
-      const place = event.line === null ? path : `${path}:${event.line}`;
-      return `- inline review comment on ${place} (thread ${event.threadId}) by ${who(event.author)}. id ${event.id}, url ${event.url}`;
+      const place = event.line === null ? "" : ` at line ${event.line}`;
+      return `- inline review comment${place} (thread ${event.threadId}) by ${who(event.author)}. id ${event.id}, url ${event.url}`;
     }
     case "ci": {
       const counts = Object.keys(event.counts)
@@ -163,7 +161,7 @@ function describe(event: GithubEvent): string {
   }
 }
 
-/** Header, then one line per event. Only logins, association, review states, file paths, line numbers, ids and URLs come from GitHub. */
+/** Header, then one line per event. Only logins, association, review states, line numbers, ids and URLs come from GitHub; never check names or file paths, which a fork writes. */
 export function formatUpdate(targetText: string, url: string, events: GithubEvent[]): string {
   return [`GitHub update (omp-web): ${targetText} ${url}`, ...events.map(describe)].join("\n");
 }
