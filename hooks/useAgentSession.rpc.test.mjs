@@ -7806,7 +7806,12 @@ test("a 409 deleting a dispatched outbox message shows a notice and keeps the bu
   assert.equal(w.latest.heldMessages.some((held) => held.id === entry.id), true);
 });
 
-test("Retry holds an identical new message, then removes the failed one", async () => {
+/** The worker's report that the server stored (`outbox_add` 200) or refused for good the copy a Retry held. */
+const storeCopy = () => workerPort.onmessage({ data: { outboxStored: { ...world.lastOutboxAdd.entry, state: "held" } } });
+const refuseCopy = (error) => workerPort.onmessage({ data: { outbox: [{ ...world.lastOutboxAdd.entry, state: "failed", error }] } });
+const removeCalls = (sid) => callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "outbox_remove").map((call) => call.body);
+
+test("Retry holds an identical new message, then removes the failed one once the server stored the copy", async () => {
   resetWorld();
   const sid = "outbox-retry";
   primeSession(sid, [userMsg("u0", "before")]);
@@ -7819,13 +7824,80 @@ test("Retry holds an identical new message, then removes the failed one", async 
     match: (method, _url, body) => method === "POST" && body?.type === "outbox_remove",
     produce: async () => ({ status: 200, value: { success: true } }),
   });
-  await act(async () => { await Promise.all([w.latest.retryHeldMessage(entry.id), w.latest.retryHeldMessage(entry.id)]); });
+  let retry;
+  await act(async () => { retry = Promise.all([w.latest.retryHeldMessage(entry.id), w.latest.retryHeldMessage(entry.id)]); await sleep(20); });
   const copies = world.outbox.filter((held) => held.message === "send me again");
   assert.equal(copies.length, 1, "a double click holds one copy");
   const [copy] = copies;
   assert.notEqual(copy.id, entry.id);
   assert.deepEqual({ mode: copy.mode, message: copy.message, uploads: copy.uploads, sessionId: copy.sessionId }, { mode: "followUp", message: "send me again", uploads: ["up-1"], sessionId: sid });
-  assert.deepEqual(callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "outbox_remove").map((call) => call.body), [{ type: "outbox_remove", id: entry.id }]);
+  assert.deepEqual(removeCalls(sid), [], "the original stays until the server stored the copy");
+  await act(async () => { storeCopy(); await retry; });
+  assert.deepEqual(removeCalls(sid), [{ type: "outbox_remove", id: entry.id }]);
+});
+
+test("a Retry whose copy the server refuses (its files no longer attachable) keeps the failed original", async () => {
+  resetWorld();
+  const sid = "outbox-retry-server-refused";
+  primeSession(sid, [userMsg("u0", "before")]);
+  const w = await mountSession(sid);
+  await act(async () => { await w.latest.handleSend("open channel"); });
+  world.outboxHold = true;
+  const entry = { id: "failed-files", sessionId: sid, mode: "prompt", message: "with a file", uploads: ["up-9"], state: "failed", createdAt: 1 };
+  await act(() => lastEs().emit({ type: "outbox_update", entries: [entry] }));
+  let retry;
+  await act(async () => { retry = w.latest.retryHeldMessage(entry.id); await sleep(20); });
+  await act(async () => { refuseCopy("upload_missing"); await retry; });
+  assert.deepEqual(removeCalls(sid), []);
+  assert.equal(w.latest.heldMessages.some((held) => held.id === entry.id && held.state === "failed"), true);
+});
+
+test("after a Retry's removal fails, Retry again only removes the original and holds no second copy", async () => {
+  resetWorld();
+  const sid = "outbox-retry-remove-fails";
+  primeSession(sid, [userMsg("u0", "before")]);
+  const w = await mountSession(sid);
+  await act(async () => { await w.latest.handleSend("open channel"); });
+  world.outboxHold = true;
+  const entry = { id: "failed-sticky", sessionId: sid, mode: "prompt", message: "only once", state: "failed", createdAt: 1 };
+  await act(() => lastEs().emit({ type: "outbox_update", entries: [entry] }));
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "outbox_remove",
+    produce: async () => ({ status: 503, value: { error: "unavailable" } }),
+  });
+  let retry;
+  await act(async () => { retry = w.latest.retryHeldMessage(entry.id); await sleep(20); });
+  await act(async () => { storeCopy(); await retry; });
+  assert.equal(w.latest.heldMessages.some((held) => held.id === entry.id), true);
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "outbox_remove",
+    produce: async () => ({ status: 200, value: { success: true } }),
+  });
+  await act(async () => { await w.latest.retryHeldMessage(entry.id); });
+  assert.equal(world.outbox.filter((held) => held.message === "only once").length, 1, "the second Retry holds no new copy");
+  assert.deepEqual(removeCalls(sid), [{ type: "outbox_remove", id: entry.id }, { type: "outbox_remove", id: entry.id }]);
+});
+
+test("a Delete that wins the race with a Retry leaves the Retry nothing to remove and no error", async () => {
+  resetWorld();
+  const sid = "outbox-retry-delete-race";
+  primeSession(sid, [userMsg("u0", "before")]);
+  const w = await mountSession(sid);
+  await act(async () => { await w.latest.handleSend("open channel"); });
+  world.outboxHold = true;
+  const entry = { id: "failed-raced", sessionId: sid, mode: "prompt", message: "raced", state: "failed", createdAt: 1 };
+  await act(() => lastEs().emit({ type: "outbox_update", entries: [entry] }));
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "outbox_remove",
+    produce: async () => ({ status: 200, value: { success: true } }),
+  });
+  const notices = w.latest.notices.length;
+  let retry;
+  await act(async () => { retry = w.latest.retryHeldMessage(entry.id); await sleep(20); });
+  await act(async () => { await w.latest.deleteHeldMessage(entry.id); });
+  await act(async () => { storeCopy(); await retry; });
+  assert.deepEqual(removeCalls(sid), [{ type: "outbox_remove", id: entry.id }]);
+  assert.equal(w.latest.notices.length, notices);
 });
 
 test("a Retry whose new copy is not stored keeps the failed message and removes nothing", async () => {
@@ -7857,7 +7929,10 @@ test("Retry of this browser's failed message carries its images and upload proof
   await act(async () => { workerPort.onmessage({ data: { outbox: [local] } }); });
   let drops = 0;
   world.outboxDrop = (commit) => { drops += 1; commit(); };
-  await act(async () => { await w.latest.retryHeldMessage(local.id); });
+  let retry;
+  await act(async () => { retry = w.latest.retryHeldMessage(local.id); await sleep(20); });
+  assert.equal(drops, 0, "the old copy stays until the server stored the new one");
+  await act(async () => { storeCopy(); await retry; });
   const copy = world.lastOutboxAdd.entry;
   assert.notEqual(copy.id, local.id);
   assert.deepEqual({ mode: copy.mode, message: copy.message, images: copy.images, uploads: copy.uploads, uploadProofs: copy.uploadProofs }, { mode: "steer", message: "with files", images, uploads: ["up-2"], uploadProofs: { "up-2": "proof-2" } });
