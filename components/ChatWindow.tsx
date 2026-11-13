@@ -462,7 +462,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     sessionIdRef, messagesEndRef, scrollContainerRef, holdScrollPosition,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
     handleSteer, handleFollowUp, handleAbortCompaction, handleCompact,
-    heldMessages, deleteHeldMessage,
+    heldMessages, deleteHeldMessage, retryHeldMessage,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleThinkingLevelChange, handleFastModeChange, handleSlowModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
@@ -1340,7 +1340,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
 
             {/* After the live turn, in submission order: what omp does not have yet. */}
             {heldMessages.map((held) => (
-              <HeldMessageView key={held.id} held={held} hostLabel={hostLabel} onDelete={deleteHeldMessage} />
+              <HeldMessageView key={held.id} held={held} hostLabel={hostLabel} onDelete={deleteHeldMessage} onRetry={retryHeldMessage} />
             ))}
 
             <div ref={messagesEndRef} />

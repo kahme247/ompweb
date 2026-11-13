@@ -3273,7 +3273,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   /** Holds a message in the outbox (docs/specs/2026-11-04-message-outbox-design.md): true once this browser has
    * stored it, after which omp-web delivers it whatever this tab does next. It shows as a held bubble until omp has it. */
-  const holdMessage = useCallback(async (sid: string, mode: OutboxMode, message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => {
+  const holdMessage = useCallback(async (sid: string, mode: OutboxMode, message: string, images?: Pick<AttachedImage, "data" | "mimeType">[], uploads?: string[], uploadProofs?: Record<string, string>) => {
     try {
       await addToOutbox({
         id: newOutboxId(),
@@ -4406,6 +4406,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice, markOutboxRepresented]);
 
+  const heldRetriesRef = useRef(new Set<string>());
+  /** Retry of a failed held bubble: hold an identical new message, then delete the failed one. The new copy is held
+   * first, so a failed add leaves the original in place; a second click while it runs adds no third copy. */
+  const retryHeldMessage = useCallback(async (id: string) => {
+    const sid = sessionIdRef.current;
+    const held = heldMessagesRef.current.find((entry) => entry.id === id);
+    if (!sid || !held || held.state !== "failed" || editInFlightRef.current || heldRetriesRef.current.has(id) || heldDeletionsRef.current.has(id)) return;
+    heldRetriesRef.current.add(id);
+    try {
+      if (await holdMessage(sid, held.mode, held.message, held.images, held.uploads, held.uploadProofs)) await deleteHeldMessage(id);
+    } finally {
+      heldRetriesRef.current.delete(id);
+    }
+  }, [deleteHeldMessage, holdMessage]);
+
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
@@ -4882,7 +4897,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, handleFastModeChange, handleSlowModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handleAbortCompaction,
-    heldMessages, deleteHeldMessage,
+    heldMessages, deleteHeldMessage, retryHeldMessage,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, removeQueuedMessage, promoteQueuedToSteer, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
