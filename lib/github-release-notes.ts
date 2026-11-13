@@ -1,4 +1,6 @@
-const RELEASES_API_URL = "https://api.github.com/repos/kahme247/ompweb/releases/tags/";
+import { releaseRepo } from "./release-repo";
+
+const RELEASES_API_URL = `https://api.github.com/repos/${releaseRepo()}/releases/tags/`;
 const FETCH_TIMEOUT_MS = 5_000;
 export const MAX_BODY_BYTES = 64 * 1024;
 

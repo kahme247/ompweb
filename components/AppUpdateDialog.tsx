@@ -7,6 +7,7 @@ import { copyText } from "@/lib/clipboard";
 import { toast } from "@/components/ui/toast";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
+import { releaseRepo } from "@/lib/release-repo";
 import { MarkdownBody } from "./MarkdownBody";
 
 export type AppUpdatePhase = "idle" | "preparing" | "restarting" | "completed" | "failed";
@@ -70,7 +71,7 @@ function isSafeReleaseUrl(value: string, version: string): boolean {
       && url.password === ""
       && url.search === ""
       && url.hash === ""
-      && url.pathname === `/kahme247/ompweb/releases/tag/v${version}`;
+      && url.pathname === `/${releaseRepo()}/releases/tag/v${version}`;
   } catch {
     return false;
   }

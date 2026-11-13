@@ -134,9 +134,9 @@ function renderWithRepo(markdown, repo) {
 }
 
 test("links bare #N to the session repository and owner/repo#N to its own", () => {
-  const html = renderWithRepo("On PR #3460 (see can1357/oh-my-pi#12130).", "kahme247/ompweb");
+  const html = renderWithRepo("On PR #3460 (see can1357/oh-my-pi#12130).", "ompweb-dev/ompweb");
 
-  assert.match(html, /<a href="https:\/\/github\.com\/kahme247\/ompweb\/issues\/3460"[^>]*>#3460<\/a>/);
+  assert.match(html, /<a href="https:\/\/github\.com\/ompweb-dev\/ompweb\/issues\/3460"[^>]*>#3460<\/a>/);
   assert.match(html, /<a href="https:\/\/github\.com\/can1357\/oh-my-pi\/issues\/12130"[^>]*>can1357\/oh-my-pi#12130<\/a>/);
 });
 

@@ -127,7 +127,7 @@ push: iOS Safari revokes push permission for pushes that show nothing.
   removes it from any other. Over the cap, devices that are neither enabled nor
   subscribed are dropped first. omp-web instances sharing the agent directory
   see each other's devices and keys.
-- VAPID subject: `https://github.com/kahme247/ompweb` (Apple rejects subjects it
+- VAPID subject: `https://github.com/ompweb-dev/ompweb` (Apple rejects subjects it
   cannot resolve, such as `mailto:…@localhost`).
 - Only HTTPS push endpoints are accepted.
 - A push failing with HTTP 404 or 410 drops that subscription and keeps the

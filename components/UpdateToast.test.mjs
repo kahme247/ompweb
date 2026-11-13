@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { toast } from "./ui/toast";
 import { UpdateToastBody } from "./UpdateToast";
 
-const RELEASES = "https://github.com/kahme247/ompweb/releases/latest";
+const RELEASES = "https://github.com/ompweb-dev/ompweb/releases/latest";
 
 test("an update toast links the release page instead of showing it as a command", () => {
   const html = renderToStaticMarkup(createElement(UpdateToastBody, { currentVersion: "0.6.0", availableVersion: "0.7.0", target: RELEASES, link: true }));

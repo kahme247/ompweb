@@ -3,7 +3,7 @@
 Each release publishes two artifacts:
 
 - npm package: `@kahme247/ompweb`
-- GitHub Release: [kahme247/ompweb](https://github.com/kahme247/ompweb)
+- GitHub Release: [ompweb-dev/ompweb](https://github.com/ompweb-dev/ompweb)
 
 After the initial bootstrap release, publishing is performed by GitHub Actions
 with npm trusted publishing. No npm access token is stored in this repository
@@ -32,7 +32,7 @@ version.
 
 1. In npm, open the `@kahme247/ompweb` package settings and add a **GitHub Actions**
    trusted publisher with:
-   - Owner: `kahme247`
+   - Owner: `ompweb-dev`
    - Repository: `ompweb`
    - Workflow filename: `publish.yml`
    - Environment: `npm`
@@ -89,7 +89,7 @@ commit fields are valid, and later hot reloads keep the existing listener.
 ## Verify
 
 ```bash
-gh run list --repo kahme247/ompweb --workflow publish.yml --limit 1
+gh run list --repo ompweb-dev/ompweb --workflow publish.yml --limit 1
 npm view @kahme247/ompweb@<version> version --registry https://registry.npmjs.org/
 npm view @kahme247/ompweb@<version> --json --registry https://registry.npmjs.org/
 ```
