@@ -89,11 +89,16 @@ export function TaskResultPanel({ details }: { details: unknown }) {
         return (
           <div
             key={id}
-            aria-label={`${typeof row.agent === "string" ? row.agent : "subagent"}: ${t(`chatWindow.subagentState.${status}`)}${task ? ` — ${task}` : ""}`}
+            aria-label={`${typeof row.id === "string" ? `${row.id} ` : ""}(${typeof row.agent === "string" ? row.agent : "subagent"}): ${t(`chatWindow.subagentState.${status}`)}${task ? ` — ${task}` : ""}`}
             style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: 11.5 }}
           >
             <TaskResultStatusIcon status={status} />
-            <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", flexShrink: 0 }}>
+            {typeof row.id === "string" && (
+              <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", flexShrink: 0 }}>
+                {row.id}
+              </span>
+            )}
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>
               {typeof row.agent === "string" ? row.agent : "subagent"}
             </span>
             <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, color: "var(--text)" }}>
