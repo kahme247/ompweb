@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
 import { formatCost, formatDuration, formatTokens, fullModel, modelEffort } from "@/lib/subagent-format";
@@ -76,21 +76,24 @@ const BLOCK_LABEL_STYLE: React.CSSProperties = {
   color: "var(--text-dim)",
 };
 
-/** Model / reasoning-effort row under the dialog title (the title is the agent). */
-export function SubagentModel({ resolvedModel }: { resolvedModel?: string }) {
+/** Labeled rows under the dialog title (the title is the subagent's name):
+ * one row per value, each wrapping in full so nothing is cut at the modal's width. */
+export function SubagentDetails({ agent, resolvedModel, file }: { agent?: string; resolvedModel?: string; file?: string }) {
   const { t } = useI18n();
   const items = [
+    [t("subagentTranscript.agentLabel"), agent],
     [t("subagentTranscript.modelLabel"), fullModel(resolvedModel)],
     [t("subagentTranscript.effortLabel"), modelEffort(resolvedModel)],
+    [t("subagentTranscript.fileLabel"), file],
   ].filter((item): item is [string, string] => Boolean(item[1]));
   if (items.length === 0) return null;
   return (
-    <dl style={{ display: "flex", flexWrap: "wrap", gap: "2px 12px", margin: "2px 0", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+    <dl style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr)", gap: "2px 10px", margin: "4px 0", fontSize: 11, fontFamily: "var(--font-mono)" }}>
       {items.map(([label, value]) => (
-        <div key={label} style={{ display: "inline-flex", gap: 5, minWidth: 0 }}>
+        <Fragment key={label}>
           <dt style={{ color: "var(--text-dim)" }}>{label}</dt>
           <dd style={{ margin: 0, minWidth: 0, color: "var(--text-muted)", overflowWrap: "anywhere" }}>{value}</dd>
-        </div>
+        </Fragment>
       ))}
     </dl>
   );
@@ -403,18 +406,18 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
             <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 12 }}>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <DialogTitle style={{ marginBottom: 2, fontSize: 16, lineHeight: 1.3 }}>
-                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--accent)", fontSize: 14 }}>{subagent.id}</span>
-                  {agent && <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-dim)", fontSize: 12, marginLeft: 8 }}>{agent}</span>}
+                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--accent)", fontSize: 14, overflowWrap: "anywhere" }}>{subagent.id}</span>
                 </DialogTitle>
                 {description && (
-                  <div style={{ fontSize: 12.5, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 4 }}>
+                  <div style={{ fontSize: 12.5, color: "var(--text-muted)", overflowWrap: "anywhere", marginBottom: 4 }}>
                     {description}
                   </div>
                 )}
-                <SubagentModel resolvedModel={progress?.resolvedModel ?? parseSubagentProgress(detail?.progress)?.resolvedModel} />
-                <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {detail?.sessionFile ?? subagent.sessionFile ?? subagent.id}
-                </div>
+                <SubagentDetails
+                  agent={agent}
+                  resolvedModel={progress?.resolvedModel ?? parseSubagentProgress(detail?.progress)?.resolvedModel}
+                  file={detail?.sessionFile ?? subagent.sessionFile}
+                />
                 {historyMeta && (
                   <div style={{ fontSize: 10.5, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
                     {historyMeta}
