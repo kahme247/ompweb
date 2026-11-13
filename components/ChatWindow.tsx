@@ -998,7 +998,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, newSessio
     return null;
   }, [bashRunning, pendingBash, isCompacting, agentRunning, streamState.streamingMessage, pendingToolHeaders.length, agentPhase, activeSubagentCount, currentTodoPhase, t, tn]);
 
-  const askOpen = extensionDialog?.method === "askDialog";
+  // omp's ask tool uses formDialog whenever the UI has one; askDialog is its per-question fallback.
+  // Like omp's TUI, which swaps its editor for the ask, nothing is sent while either is open:
+  // a steer would interrupt the ask ("Ask interrupted by message").
+  const askOpen = extensionDialog?.method === "askDialog" || extensionDialog?.method === "formDialog";
   const hiddenComposerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // A hidden composer that keeps focus keeps the phone keyboard up: the
