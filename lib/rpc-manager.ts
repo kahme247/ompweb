@@ -603,10 +603,12 @@ export class AgentSessionWrapper {
 
   /** An open ask (askDialog/formDialog): omp's ask tool aborts on a user steer ("Ask interrupted by message"). */
   isAwaitingAsk(): boolean {
-    for (const event of this.pendingUiRequests.values()) {
-      if (event.method === "askDialog" || event.method === "formDialog") return true;
-    }
+    for (const event of this.pendingUiRequests.values()) if (isAskRequest(event)) return true;
     return false;
+  }
+
+  private notifyAskClosed(): void {
+    for (const listener of globalThis.__ompAskClosedListeners ?? []) listener(this._sessionId);
   }
 
   /** Local history navigation is busy control work, not an interruptible model turn. */
@@ -1444,8 +1446,10 @@ export class AgentSessionWrapper {
 
   /** Forget a pending dialog and its expiry timer. */
   private forgetPendingUiRequest(id: string): void {
+    const wasAsk = isAskRequest(this.pendingUiRequests.get(id));
     // An answered or expired dialog no longer waits on the user: the sidebar follows.
     if (this.pendingUiRequests.delete(id)) notifyRunningChange();
+    if (wasAsk && !this.isAwaitingAsk()) this.notifyAskClosed();
     const timer = this.uiExpiryTimers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -1454,10 +1458,12 @@ export class AgentSessionWrapper {
   }
 
   private clearPendingUiRequests(): void {
+    const hadAsk = this.isAwaitingAsk();
     this.dropServerUiRequests();
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
     this.pendingUiRequests.clear();
+    if (hadAsk) this.notifyAskClosed();
   }
 
   /** Settle every server dialog as declined and close it in attached tabs. */
@@ -3081,6 +3087,7 @@ declare global {
   var __ompExitedSessions: Map<string, ExitedRpcSession> | undefined;
   var __ompFrameTaps: Set<(wrapper: AgentSessionWrapper, event: AgentEvent) => void> | undefined;
   var __ompSessionMoveListeners: Set<(from: string, to: string) => void> | undefined;
+  var __ompAskClosedListeners: Set<(sessionId: string) => void> | undefined;
   var __ompNativeWrites: WeakSet<object> | undefined;
 }
 
@@ -3207,6 +3214,15 @@ export function tapSessionFrames(tap: (wrapper: AgentSessionWrapper, event: Agen
   const taps = (globalThis.__ompFrameTaps ??= new Set());
   taps.add(tap);
   return () => { taps.delete(tap); };
+}
+
+const isAskRequest = (event: UnsequencedAgentEvent | undefined): boolean => event?.method === "askDialog" || event?.method === "formDialog";
+
+/** A session's last open ask closed (answered, cancelled, expired or its child gone): the outbox's held steers may go. */
+export function onAskClosed(listener: (sessionId: string) => void): () => void {
+  const listeners = (globalThis.__ompAskClosedListeners ??= new Set());
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }
 
 /** Confirmed ownership moves only, after registry aliases exist and before observers see the new identity. */
