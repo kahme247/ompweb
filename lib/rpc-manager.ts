@@ -91,6 +91,9 @@ const DISCONNECT_DESTROY_MS = process.env.OMP_WEB_DISCONNECT_DESTROY_MS !== unde
 const READY_TIMEOUT_MS = 120_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
 const GET_STATE_TIMEOUT_MS = 5_000;
+/** The handshake of a just-started or rejoined child: omp's post-`ready` startup work (model refresh, plugin and
+ * marketplace updates, hooks) can hold its first answers well past GET_STATE_TIMEOUT_MS. */
+const STARTUP_COMMAND_TIMEOUT_MS = 30_000;
 /** Cap on the *acknowledgement* of a prompt frame — not on model execution.
  * omp acks a prompt as soon as it accepts it and the run then reports through
  * events (agent_start/agent_end), so an ack that never arrives means the child
@@ -851,7 +854,7 @@ export class AgentSessionWrapper {
         await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
         await this.enableDeltaUpdates(this.proc);
       }
-      const state = await this.getStateWithTimeout();
+      const state = await this.getStateWithTimeout(STARTUP_COMMAND_TIMEOUT_MS);
       this.applyIdentity(state);
       // Warn when the spawn cwd differs from the session's recorded directory.
       // This happens when the recorded cwd was deleted (removed worktree, moved
@@ -935,19 +938,19 @@ export class AgentSessionWrapper {
     this._adopted = joined;
     this.hostToolsUnknown = true;
     // Older omp rejects some of these, as at startup; a timeout or an exit fails the adoption.
-    const optional = (command: { type: string; [key: string]: unknown }) => this.proc.sendCommand(command, GET_STATE_TIMEOUT_MS).then(() => {}, (error) => {
+    const optional = (command: { type: string; [key: string]: unknown }) => this.proc.sendCommand(command, STARTUP_COMMAND_TIMEOUT_MS).then(() => {}, (error) => {
       if (!(error instanceof RpcCommandError)) throw error;
     });
     try {
       if (!this.hostOwnedLifecycle) {
-        await this.proc.negotiateProtocol(await this.proc.waitReady(), GET_STATE_TIMEOUT_MS);
+        await this.proc.negotiateProtocol(await this.proc.waitReady(), STARTUP_COMMAND_TIMEOUT_MS);
         await optional({ type: "set_subagent_subscription", level: "events" });
         await optional({ type: "set_ask_dialog", enabled: true });
         await this.enableDeltaUpdates(this.proc);
       }
       // omp's state has no shell-command flag: a `!!` command the lost server started
       // leaves bashRunning false, and its result arrives as an unsolicited response.
-      this.applyIdentity(await this.getStateWithTimeout());
+      this.applyIdentity(await this.getStateWithTimeout(STARTUP_COMMAND_TIMEOUT_MS));
       // The wrapper keeps neither (a tab reads both when it attaches): a child that cannot answer them fails here instead.
       await optional({ type: "get_subagents" });
       await optional({ type: "get_btw_history" });
@@ -2191,8 +2194,8 @@ export class AgentSessionWrapper {
     return snapshot;
   }
 
-  private async getStateWithTimeout(): Promise<RpcSessionState> {
-    return this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
+  private async getStateWithTimeout(timeoutMs = GET_STATE_TIMEOUT_MS): Promise<RpcSessionState> {
+    return this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, timeoutMs);
   }
 
   /** After branch/new_session/switch_session the child is on a different
@@ -2400,7 +2403,7 @@ export class AgentSessionWrapper {
           await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
           await this.enableDeltaUpdates(proc);
         }
-        const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
+        const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, STARTUP_COMMAND_TIMEOUT_MS);
         this.applyIdentity(state);
         // Same fresh-spawn guard as startRpcSession: a sessionless wrapper
         // restarts bare, and omp's startup resume handling could land it on the
