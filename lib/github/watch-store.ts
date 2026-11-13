@@ -136,11 +136,13 @@ export function removeWatch(sessionId: string, itemKey: string): boolean {
   });
 }
 
+/** The session is gone: its watches, pending updates and read grants go. */
 export function removeSessionWatches(sessionId: string): void {
   const d = db();
   transaction(d, () => {
     d.prepare("DELETE FROM pending WHERE session_id = ?").run(sessionId);
     d.prepare("DELETE FROM watches WHERE session_id = ?").run(sessionId);
+    d.prepare("DELETE FROM read_grants WHERE session_id = ?").run(sessionId);
   });
 }
 
@@ -162,11 +164,17 @@ export function commitUpdate(sessionId: string, itemKey: string, cursor: WatchCu
 
 type PendingRow = { entry_id: string; message: string; cursor_json: string; final: number };
 
-/** The update a watch is about to post, stored before its outbox add so a crash replays the same entry id. */
-export function setPending(sessionId: string, itemKey: string, pending: PendingUpdate): void {
-  db()
-    .prepare("INSERT OR REPLACE INTO pending (session_id, item_key, entry_id, message, cursor_json, final) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(sessionId, itemKey, pending.entryId, pending.message, JSON.stringify(pending.cursor), pending.final ? 1 : 0);
+/**
+ * The update a watch is about to post, stored before its outbox add so a crash replays the same entry id.
+ * Stores nothing and returns false when the watch is gone (a poll in flight during removeWatch).
+ */
+export function setPending(sessionId: string, itemKey: string, pending: PendingUpdate): boolean {
+  const { changes } = db()
+    .prepare(
+      "INSERT OR REPLACE INTO pending (session_id, item_key, entry_id, message, cursor_json, final) SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM watches WHERE session_id = ? AND item_key = ?)",
+    )
+    .run(sessionId, itemKey, pending.entryId, pending.message, JSON.stringify(pending.cursor), pending.final ? 1 : 0, sessionId, itemKey);
+  return changes > 0;
 }
 
 export function getPending(sessionId: string, itemKey: string): PendingUpdate | null {
@@ -205,7 +213,7 @@ export function grantRead(sessionId: string, repoKey: string): void {
 /**
  * A session move: the moved session's watches replace any the new id already
  * holds for the same items, and keep their pending updates; read grants the
- * new id already has are kept.
+ * new id already has are kept. Pending rows whose watch is not moving stay behind.
  */
 export function renameSession(oldId: string, newId: string): void {
   if (oldId === newId) return;
@@ -214,8 +222,10 @@ export function renameSession(oldId: string, newId: string): void {
     const movedItems = "SELECT item_key FROM watches WHERE session_id = ?";
     d.prepare(`DELETE FROM pending WHERE session_id = ? AND item_key IN (${movedItems})`).run(newId, oldId);
     d.prepare(`DELETE FROM watches WHERE session_id = ? AND item_key IN (${movedItems})`).run(newId, oldId);
+    // Runs while the moved watches still sit under oldId; OR REPLACE keeps one stray row from aborting the move.
+    d.prepare(`UPDATE OR REPLACE pending SET session_id = ? WHERE session_id = ? AND item_key IN (${movedItems})`).run(newId, oldId, oldId);
+    d.prepare("DELETE FROM pending WHERE session_id = ?").run(oldId);
     d.prepare("UPDATE watches SET session_id = ? WHERE session_id = ?").run(newId, oldId);
-    d.prepare("UPDATE pending SET session_id = ? WHERE session_id = ?").run(newId, oldId);
     d.prepare("UPDATE OR IGNORE read_grants SET session_id = ? WHERE session_id = ?").run(newId, oldId);
     d.prepare("DELETE FROM read_grants WHERE session_id = ?").run(oldId);
   });
