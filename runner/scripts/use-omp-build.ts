@@ -82,7 +82,9 @@ if (!tag) {
 	delete manifest.patchedDependencies;
 	await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 	await Bun.write(pinPath, `${JSON.stringify(pin, null, 2)}\n`);
-	run([process.execPath, "install"]);
+	// --force: unstamped tarballs keep their file name across builds (`…pi-coding-agent-18.20.0.tgz`), and without it
+	// bun keeps the old build's integrity for them, so the next `--frozen-lockfile` install fails its check.
+	run([process.execPath, "install", "--force"]);
 	// Any `@oh-my-pi/*` resolved from npm instead of vendor/ is a package the release lacks.
 	const fromNpm = (await Bun.file(path.join(runnerDir, "bun.lock")).text()).match(/\["@oh-my-pi\/[^"]+@(?!\.\/vendor\/)[^"]*"/g);
 	if (fromNpm) throw new Error(`bun.lock resolves these from npm, not ${tag}: ${fromNpm.map(entry => entry.slice(2, -1)).join(", ")}`);
