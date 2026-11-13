@@ -30,17 +30,25 @@ omp process is gone), web server restarts and daemon restarts.
 
 ## Agent tool: `request_attention`
 
-- Lives in a bundled omp extension, `lib/omp/attention-extension.mjs`, loaded
-  with `--extension` beside the session-edit extension on every spawn
-  (`lib/hosts/local-host.ts`), so every omp-web session on every host gets it.
-  Terminal-only omp sessions do not have it.
+- Part of ompweb's omp build: `runner/src/attention.ts` defines it as an SDK
+  custom tool, and `createHostedAgentSession` (`runner/src/session.ts`) passes
+  it in `customTools` to every session the runner creates, headless or TUI, so
+  every omp-web session on every host gets it. Subagents do not (omp builds
+  them with its own factory and none of their parent's custom tools), nor do
+  sessions of a stock omp.
+- `loadMode: "essential"`, so it is always in the model's tool list; omp keeps
+  SDK custom tools active under `--tools <list>` and `--no-tools`.
 - Parameters: `{ reason: string }`, a short sentence on what the agent needs.
-- Effect: `pi.appendEntry("omp-web-attention", { reason })`, persisted as
+  The runner collapses whitespace, trims it and keeps at most 300 characters.
+- Effect: `session.sessionManager.appendCustomEntry("omp-web-attention",
+  { reason })` on the session that runs it, persisted as
   `{"type":"custom","customType":"omp-web-attention","data":{"reason":…},…}`.
   It does not change the session title.
 - The tool description tells the model when to call it: at the end of a turn
   that waits on the user. Not for progress updates, not mid-task.
-- The compiled binary ships the file (`scripts/build-binary.ts` copy list).
+- The entry type and the 300-character cap are a literal on each side, as for
+  `omp-web-history-navigation`: `runner/src/attention.ts` and
+  `lib/omp/session-files.ts`.
 
 ## Detection on disk
 

@@ -1071,14 +1071,21 @@ const nullableString = (value: unknown) => value === null || typeof value === "s
 /** A daemon's session-list entry reduced to SessionInfo's fields; null when one has the wrong type. */
 function sessionEntry(value: unknown): SessionInfo | null {
   if (!isRecord(value)) return null;
-  const { path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch } = value;
+  const { path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch, attention } = value;
+  const mark = attention === undefined ? undefined
+    : isRecord(attention) && typeof attention.reason === "string" && typeof attention.at === "string" ? { reason: attention.reason, at: attention.at }
+    : null;
   if (
     typeof path !== "string" || typeof id !== "string" || !isValidSessionId(id) || typeof cwd !== "string"
     || typeof created !== "string" || typeof modified !== "string" || typeof firstMessage !== "string"
     || typeof messageCount !== "number" || !Number.isFinite(messageCount)
     || ![name, lastMessageAt, parentSessionId, projectRoot, projectKey, worktreeBranch].every(optionalString)
+    || mark === null
   ) return null;
-  return { path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch } as SessionInfo;
+  return {
+    path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch,
+    ...(mark ? { attention: mark } : {}),
+  } as SessionInfo;
 }
 
 /** A daemon's project-registry entry reduced to its known fields; null when one has the wrong type. */

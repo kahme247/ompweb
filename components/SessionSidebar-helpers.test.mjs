@@ -65,3 +65,62 @@ test("sessions on different workers share one logical project while a same-path 
     ["pool:workers:other", { running: 0, unread: 0, exited: 0 }],
   ]);
 });
+
+test("attention: an open dialog counts even while running; the agent's marker only while the session is not running", async () => {
+  const { attentionSessionIds } = await import("./SessionSidebar-helpers.ts");
+  const marker = { reason: "Pick one", at: "2026-11-13T10:00:00.000Z" };
+  const sessions = [
+    { id: "marker-idle", attention: marker },
+    { id: "marker-running", attention: marker },
+    { id: "dialog-running" },
+    { id: "plain" },
+  ];
+  const running = new Set(["marker-running", "dialog-running", "new"]);
+  assert.deepEqual([...attentionSessionIds(sessions, running, new Set(["dialog-running"]))].sort(), ["dialog-running", "marker-idle"]);
+  // A dialog on a session the list does not have yet counts too (its row is a live placeholder).
+  assert.deepEqual([...attentionSessionIds([], running, new Set(["new"]))], ["new"]);
+});
+
+test("attention entries: only attention sessions, workspaces by label and sessions by title A→Z, workspaces without one dropped", async () => {
+  const { attentionProjectEntries } = await import("./SessionSidebar-helpers.ts");
+  const session = (id, cwd, extra) => ({ id, cwd, path: `${cwd}/${id}.jsonl`, created: "", modified: "2026-11-13T10:00:00.000Z", messageCount: 1, firstMessage: "", ...extra });
+  // The manual order (sortOrder) and pins do not apply.
+  const projects = [
+    { path: "/srv/zeta", sortOrder: 0 },
+    { path: "/srv/quiet", sortOrder: 1 },
+    { path: "/srv/Beta", sortOrder: 2, pinOrder: 0 },
+    { path: "/srv/x", alias: "alpha", sortOrder: 3 },
+  ];
+  const sessions = [
+    session("z1", "/srv/zeta", { name: "fix tests" }),
+    session("q1", "/srv/quiet", { name: "idle" }),
+    session("b2", "/srv/Beta", { name: "Zebra" }),
+    session("b1", "/srv/Beta", { firstMessage: "apple pie" }),
+    session("b3", "/srv/Beta", { name: "item 10", parentSessionId: "b2" }),
+    session("b4", "/srv/Beta", { name: "Item 9" }),
+    session("bx", "/srv/Beta", { name: "Aardvark" }),
+    session("x1", "/srv/x", { name: "deploy" }),
+  ];
+  const byProject = groupSessionsByProject(projects, sessions);
+  const entries = attentionProjectEntries(projects, byProject, new Set(["z1", "b2", "b1", "b3", "b4", "x1"]));
+  assert.deepEqual(entries.map(({ project, hostId, tree }) => [project.path, hostId, tree.map((node) => node.session.id)]), [
+    ["/srv/x", "local", ["x1"]],
+    ["/srv/Beta", "local", ["b1", "b4", "b3", "b2"]],
+    ["/srv/zeta", "local", ["z1"]],
+  ]);
+  assert.ok(entries.every(({ tree }) => tree.every((node) => node.children.length === 0)), "a fork does not nest under its parent");
+  assert.deepEqual(attentionProjectEntries(projects, byProject, new Set()), []);
+});
+
+test("attention host groups: only hosts with an entry, A→Z by shown name with this machine not pinned first", async () => {
+  const { attentionHostGroups } = await import("./SessionSidebar-helpers.ts");
+  const hostList = [{ id: "local", label: "" }, { id: "h1", label: "build box" }, { id: "h2", label: "Zed" }, { id: "h3", label: "Empty" }];
+  const names = { local: "This machine", h1: "build box", h2: "Zed", h3: "Empty", "pool:cluster": "Cluster" };
+  const nameOf = (host) => names[host.id];
+  const entries = [{ hostId: "h2", name: "z" }, { hostId: "local", name: "l" }, { hostId: "h1", name: "b2" }, { hostId: "h1", name: "b1" }];
+  const shape = (groups) => groups.map(({ host, projects }) => [host.id, projects.map((entry) => entry.name)]);
+  assert.deepEqual(shape(attentionHostGroups(entries, hostList, undefined, nameOf)), [["h1", ["b2", "b1"]], ["local", ["l"]], ["h2", ["z"]]]);
+  // A cluster member's workspaces list under the cluster, as in Workspaces.
+  const pools = [{ id: "cluster", members: [{ hostId: "h2" }] }];
+  assert.deepEqual(shape(attentionHostGroups(entries, [...hostList, { id: "pool:cluster", label: "Cluster" }], pools, nameOf)), [["h1", ["b2", "b1"]], ["pool:cluster", ["z"]], ["local", ["l"]]]);
+});

@@ -222,3 +222,53 @@ test("the sidebar refetches its projects and sessions when the loaded pools chan
     window.matchMedia = original.matchMedia;
   }
 });
+
+test("Needs attention lists a waiting session under its workspace above Workspaces, without pin or reordering, and goes away when nothing waits", async () => {
+  const original = { fetch: globalThis.fetch, Worker: globalThis.Worker, SharedWorker: globalThis.SharedWorker, matchMedia: window.matchMedia };
+  globalThis.Worker = FakeWorker;
+  globalThis.SharedWorker = undefined;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  // A sort is active and the workspace is pinned: in Workspaces its row has a pin and reorders.
+  localStorage.setItem("omp-web:project-sort", "alphabetical");
+  const session = (id, name, extra) => ({ id, path: `/l/${id}.jsonl`, cwd: "/l", created: "2026-11-13T09:00:00.000Z", modified: "2026-11-13T09:00:00.000Z", messageCount: 2, firstMessage: "hi", name, ...extra });
+  const reason = "Postgres or SQLite?";
+  let sessions = [session("idle", "Quiet chat"), session("wait", "Choose a database", { attention: { reason, at: "2026-11-13T09:00:00.000Z" } })];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/projects") return Response.json({ projects: [{ path: "/l", pinOrder: 0 }] });
+    if (url.pathname === "/api/sessions") return Response.json({ sessions });
+    return Response.json({});
+  };
+  const props = { selectedSessionId: null, skipInitialProjectSelection: true, onSelectSession() {}, addProjectOpen: false, setAddProjectOpen() {}, usageVisible: false };
+  const findSection = () => document.querySelector(`section[aria-label="${translate("sessionSidebar.needsAttention")}"]`);
+  try {
+    const { rerender } = render(React.createElement(SessionSidebar, props));
+    await waitFor(() => assert.ok(findSection()));
+    const section = findSection();
+    assert.ok(section.compareDocumentPosition(screen.getByText(translate("projects.heading"))) & Node.DOCUMENT_POSITION_FOLLOWING, "the section sits above Workspaces");
+    assert.deepEqual([...section.querySelectorAll(".sidebar-project-identity")].map((row) => row.textContent), ["l"]);
+    assert.deepEqual([...section.querySelectorAll(".session-item-button")].map((row) => row.textContent), ["Choose a database"]);
+    assert.equal(section.querySelector("[title^='Choose a database']").getAttribute("title"), `Choose a database\n${translate("sessionSidebar.attentionReason", { reason })}`);
+    const pin = translate("projects.pin", { name: "l" });
+    await waitFor(() => assert.ok(document.querySelector(`[aria-label="${pin}"]`), "the Workspaces row has its pin"));
+    assert.equal(section.querySelector(`[aria-label="${pin}"]`), null, "no pin in Needs attention");
+    assert.equal(section.querySelector(".sidebar-project-header").getAttribute("draggable"), "false");
+    fireEvent.click(section.querySelector(`[aria-label="${translate("commandPalette.actions")}"]`));
+    await screen.findByText(translate("projects.nameAlias"));
+    assert.equal(screen.queryByText(translate("projects.moveUp")), null, "no Move up in Needs attention");
+    fireEvent.keyDown(section.querySelector(".sidebar-project-header"), { key: "Escape" });
+
+    sessions = [session("idle", "Quiet chat")];
+    // The refresh refetches the sessions; let it land inside act.
+    await act(async () => { rerender(React.createElement(SessionSidebar, { ...props, refreshKey: 1 })); });
+    await waitFor(() => assert.equal(findSection(), null));
+    assert.ok(screen.getByText(translate("projects.heading")), "Workspaces stays");
+  } finally {
+    cleanup();
+    localStorage.removeItem("omp-web:project-sort");
+    globalThis.fetch = original.fetch;
+    globalThis.Worker = original.Worker;
+    globalThis.SharedWorker = original.SharedWorker;
+    window.matchMedia = original.matchMedia;
+  }
+});

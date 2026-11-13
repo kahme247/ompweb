@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue } from "react";
+import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue, type CSSProperties } from "react";
 import type { ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -34,6 +34,9 @@ import {
   INITIAL_RESTORE_MAX_ATTEMPTS,
   INITIAL_RESTORE_RETRY_MS,
   MAX_PROJECT_SESSIONS,
+  attentionHostGroups,
+  attentionProjectEntries,
+  attentionSessionIds,
   buildSessionTree,
   livePlace,
   loadExpandedProjects,
@@ -44,6 +47,7 @@ import {
   saveExpandedProjects,
   saveProjectSortMode,
   saveUnreadSessionIds,
+  workspaceLabel,
   type LivePlace,
   type WorktreeContext,
   type WorktreeEntry,
@@ -51,7 +55,7 @@ import {
   hostsCameOnline,
 } from "./SessionSidebar-helpers";
 import { OmpWebTitle, SIDEBAR_BUTTON_TRANSITION, SidebarIconButton, SidebarPortalMenu } from "./SessionSidebar-chrome";
-import { HostGroup, ProjectRow } from "./SessionSidebar-rows";
+import { HostGroup, ProjectRow, type ProjectRowProps } from "./SessionSidebar-rows";
 
 /** Deadline for one /api/sessions fetch. A wedged-but-listening server never
  * answers; without this the initial spinner would pend forever. */
@@ -131,6 +135,15 @@ const projectRequestTarget = (project: ManagedProject) => project.poolId && proj
   : { cwd: project.path, hostId: remoteHostId(project.hostId) };
 const THIS_MACHINE = { id: LOCAL_HOST_ID, label: "" };
 const COLLAPSED_HOSTS_STORAGE_KEY = "omp-web:collapsed-hosts";
+/** The section headings (Needs attention, Workspaces). */
+const SECTION_HEADING_STYLE: CSSProperties = {
+  flex: 1,
+  color: "var(--text-muted)",
+  fontSize: 11,
+  fontWeight: 600,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+};
 
 function loadCollapsedHosts(): Set<string> {
   try {
@@ -173,6 +186,25 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       } catch {
         // Collapse state is a convenience; ignore storage errors.
       }
+      return next;
+    });
+  }, []);
+  // Needs attention keeps its own collapse state, expanded by default and not
+  // stored: collapsing there leaves Workspaces as it is.
+  const [attentionCollapsedHosts, setAttentionCollapsedHosts] = useState<ReadonlySet<string>>(() => new Set());
+  const [attentionCollapsedProjects, setAttentionCollapsedProjects] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleAttentionHostCollapsed = useCallback((hostId: string) => {
+    setAttentionCollapsedHosts((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(hostId)) next.add(hostId);
+      return next;
+    });
+  }, []);
+  const toggleAttentionProjectCollapsed = useCallback((project: ManagedProject) => {
+    const key = projectIdentity(project);
+    setAttentionCollapsedProjects((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
       return next;
     });
   }, []);
@@ -831,7 +863,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // Only "Last updated" reads sessions; other modes must not re-sort on every session refresh.
   const orderingSessions = projectSortMode === "updated" ? visibleSessions : NO_SESSIONS;
   const sortedProjectsBase = useMemo(
-    () => orderProjects(visibleProjects, projectSortMode, orderingSessions, (project) => project.alias ?? project.name ?? projectLabel(project.path)),
+    () => orderProjects(visibleProjects, projectSortMode, orderingSessions, workspaceLabel),
     [visibleProjects, projectSortMode, orderingSessions],
   );
   const orderingKey = useMemo(
@@ -867,6 +899,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const projectActivity = useMemo(
     () => projectActivityCounts(visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions.keys()),
     [visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions],
+  );
+  // Needs attention lists every blocked session; the Workspaces search and
+  // running filter do not apply to it.
+  const attentionIds = useMemo(
+    () => attentionSessionIds(allSessions, runningSessionIds, awaitingInputIds),
+    [allSessions, runningSessionIds, awaitingInputIds],
+  );
+  const attentionEntries = useMemo(
+    () => attentionProjectEntries(sortedProjects, sessionsByProject, attentionIds),
+    [sortedProjects, sessionsByProject, attentionIds],
   );
 
   // Client-side filtering (Workspaces header: search + "running only").
@@ -1460,6 +1502,55 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     if (selected) setLastOpenSession(hostProjectKey(selected.hostId, workspaceKeyOf(selected)), selected.id);
   }, [allSessions, selectedSessionId]);
 
+  // A host group's header (name, link state), the same in both sections.
+  const hostGroupHeader = (host: { id: string; label: string }) => {
+    const row = hosts?.find((candidate) => candidate.id === host.id);
+    return {
+      name: row ? hostName(t, row) : host.label,
+      color: row ? HOST_STATUS_COLOR[row.status] : undefined,
+      statusText: row && row.status !== "online" ? hostStatusText(t, row) : null,
+      unavailableReason: hostUnavailableReason(host.id),
+    };
+  };
+  // What a workspace row shows and does in either section; each section adds
+  // its session tree, expansion and ordering controls.
+  const projectRowProps = (project: ManagedProject, groupHostId: string) => {
+    const projectKey = projectIdentity(project);
+    // A member's own project listed in the cluster group: name its node.
+    const node = project.poolId || groupHostId === hostOf(project) ? undefined : hosts?.find((candidate) => candidate.id === hostOf(project));
+    const unavailable = node ? hostUnavailableReason(node.id) : null;
+    return {
+      project,
+      node: node ? { label: hostName(t, node), statusText: unavailable ? hostStatusText(t, node) : null, unavailableReason: unavailable } : undefined,
+      // Sessions group under a project through the case-folded comparable
+      // form (see groupSessionsByProject), so the active highlight must
+      // use the same comparison: a session whose cwd/projectRoot spells
+      // the project folder with different casing (Windows/NTFS) lands in
+      // this row — the row must light up for it too.
+      isActive: selectedProject !== null && (project.poolId ? selectedProject === projectKey : !selectedPoolKey && selectedHostId === hostOf(project) && comparableProjectPath(selectedProject) === comparableProjectPath(project.path)),
+      activity: projectActivity.get(foldedHostProjectKey(project.hostId, workspaceKeyOf(project))),
+      selectedSessionId,
+      runningSessionIds,
+      awaitingInputIds,
+      unreadSessionIds,
+      exitedSessions,
+      recentlyCompletedIds: effectiveRecentCompletedSet,
+      relativeTimeNow,
+      onActivate: activateProject,
+      onRemoveProject: handleRemoveProject,
+      onEditLaunchConfig: setLaunchConfigProject,
+      onUpdatePresentation: handleUpdateProjectPresentation,
+      onDragProjectChange: setDraggedProject,
+      onDropProject: (target: ManagedProject) => void handleProjectDrop(target),
+      onMoveProject: (target: ManagedProject, delta: -1 | 1) => void handleMoveProject(target, delta),
+      onTogglePin: handleTogglePin,
+      removeBusy: removeProjectKey === projectKey,
+      onSelectSession: handleSelectSessionFromList,
+      onRenamed: loadSessions,
+      onSessionDeleted: handleSessionDeleted,
+    } satisfies Partial<ProjectRowProps>;
+  };
+
   return (
     <div className="sidebar-shell" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
       {addProjectOpen && (
@@ -1626,18 +1717,47 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         </button>
       </div>
 
+      {/* Needs attention: every session blocked on the user, A→Z; scrolls on its own so Workspaces stays reachable */}
+      {attentionEntries.length > 0 && (
+        <section aria-label={t("sessionSidebar.needsAttention")} style={{ flexShrink: 0, maxHeight: "40%", display: "flex", flexDirection: "column" }}>
+          <div style={{ flexShrink: 0, minHeight: 32, boxSizing: "border-box", padding: "4px 10px 2px", display: "flex", alignItems: "center" }}>
+            <span style={SECTION_HEADING_STYLE}>{t("sessionSidebar.needsAttention")}</span>
+          </div>
+          <div style={{ minHeight: 0, overflowY: "auto", padding: "2px 10px 0" }}>
+            {attentionHostGroups(attentionEntries, hostList, pools, (host) => hostGroupHeader(host).name).map(({ host, projects: entries }) => {
+              const rows = entries.map(({ project, tree }) => (
+                <ProjectRow
+                  key={projectIdentity(project)}
+                  {...projectRowProps(project, host.id)}
+                  tree={tree}
+                  isExpanded={!attentionCollapsedProjects.has(projectIdentity(project))}
+                  hiddenCount={0}
+                  onToggleExpand={toggleAttentionProjectCollapsed}
+                  pinnable={false}
+                  reorderable={false}
+                  isDragTarget={false}
+                />
+              ));
+              if (!showHostGroups) return rows;
+              return (
+                <HostGroup
+                  key={host.id}
+                  {...hostGroupHeader(host)}
+                  collapsed={attentionCollapsedHosts.has(host.id)}
+                  onToggle={() => toggleAttentionHostCollapsed(host.id)}
+                  empty={null}
+                >
+                  {rows}
+                </HostGroup>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {/* Workspaces section header: label + search / sort / filter / add */}
       <div style={{ flexShrink: 0, padding: "4px 10px 2px", display: "flex", alignItems: "center", gap: 2 }}>
-        <span
-          style={{
-            flex: 1,
-            color: "var(--text-muted)",
-            fontSize: 11,
-            fontWeight: 600,
-            letterSpacing: "0.08em",
-            textTransform: "uppercase",
-          }}
-        >
+        <span style={SECTION_HEADING_STYLE}>
           {t("projects.heading")}
         </span>
         <SidebarIconButton
@@ -1803,65 +1923,30 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             if (showHostGroups && filtersActive && entries.length === 0) return null;
             const rows = entries.map(({ project, sessions }) => {
               const projectKey = projectIdentity(project);
-              // A member's own project listed in the cluster group: name its node.
-              const node = project.poolId || host.id === hostOf(project) ? undefined : hosts?.find((candidate) => candidate.id === hostOf(project));
-              const unavailable = node ? hostUnavailableReason(node.id) : null;
               const tree = treesByProject.get(projectKey) ?? buildSessionTree(sessions);
-              // Sessions group under a project through the case-folded comparable
-              // form (see groupSessionsByProject), so the active highlight must
-              // use the same comparison: a session whose cwd/projectRoot spells
-              // the project folder with different casing (Windows/NTFS) lands in
-              // this row — the row must light up for it too.
-              const isActive = selectedProject !== null && (project.poolId ? selectedProject === projectKey : !selectedPoolKey && selectedHostId === hostOf(project) && comparableProjectPath(selectedProject) === comparableProjectPath(project.path));
               return (
                 <ProjectRow
                   key={projectKey}
-                  project={project}
-                  node={node ? { label: hostName(t, node), statusText: unavailable ? hostStatusText(t, node) : null, unavailableReason: unavailable } : undefined}
-                  isActive={isActive}
-                  activity={projectActivity.get(foldedHostProjectKey(project.hostId, workspaceKeyOf(project)))}
+                  {...projectRowProps(project, host.id)}
                   tree={tree}
                   isExpanded={expandedProjectKeys.has(foldedHostProjectKey(project.hostId, workspaceKeyOf(project)))}
                   hiddenCount={filtersActive ? 0 : Math.max(0, tree.length - MAX_PROJECT_SESSIONS)}
-                  selectedSessionId={selectedSessionId}
-                  runningSessionIds={runningSessionIds}
-                  awaitingInputIds={awaitingInputIds}
-                  unreadSessionIds={unreadSessionIds}
-                  exitedSessions={exitedSessions}
-                  recentlyCompletedIds={effectiveRecentCompletedSet}
-                  relativeTimeNow={relativeTimeNow}
-                  onActivate={activateProject}
                   onToggleExpand={toggleProjectExpanded}
-                  onRemoveProject={handleRemoveProject}
-                  onEditLaunchConfig={setLaunchConfigProject}
-                  onUpdatePresentation={handleUpdateProjectPresentation}
-                  onDragProjectChange={setDraggedProject}
-                  onDropProject={(target) => void handleProjectDrop(target)}
-                  onMoveProject={(target, delta) => void handleMoveProject(target, delta)}
                   pinnable={pinsActive}
-                  onTogglePin={handleTogglePin}
                   isDragTarget={draggedProject !== null && projectTargetId(draggedProject, pools) === projectTargetId(project, pools) && projectIdentity(draggedProject) !== projectKey && (!pinsActive || project.pinOrder !== undefined)}
-                  removeBusy={removeProjectKey === projectKey}
-                  onSelectSession={handleSelectSessionFromList}
                   searchQuery={trimmedSearchQuery || undefined}
                   onOpenSearchMatch={onOpenSearchMatch ? handleOpenSearchMatch : undefined}
-                  onRenamed={loadSessions}
-                  onSessionDeleted={handleSessionDeleted}
                 />
               );
             });
             if (!showHostGroups) return rows;
-            const row = hosts?.find((candidate) => candidate.id === host.id);
             const member = pools.some((pool) => pool.members.some((member) => member.hostId === host.id));
             if (member && entries.length === 0) return null;
             const canAdd = host.id.startsWith("pool:") || (!member && (host.id === LOCAL_HOST_ID || poolsLoaded));
             return (
               <HostGroup
                 key={host.id}
-                name={row ? hostName(t, row) : host.label}
-                color={row ? HOST_STATUS_COLOR[row.status] : undefined}
-                statusText={row && row.status !== "online" ? hostStatusText(t, row) : null}
-                unavailableReason={hostUnavailableReason(host.id)}
+                {...hostGroupHeader(host)}
                 collapsed={collapsedHosts.has(host.id)}
                 onToggle={() => toggleHostCollapsed(host.id)}
                 onAdd={canAdd ? () => {

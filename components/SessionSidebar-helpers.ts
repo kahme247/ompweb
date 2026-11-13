@@ -1,6 +1,6 @@
 import { isLinkUp, type HostStatus } from "@/lib/hosts/host";
-import type { SessionInfo } from "@/lib/types";
-import { LOCAL_HOST_ID, type ProjectSortMode } from "@/lib/project-ordering";
+import type { ManagedProject, SessionInfo } from "@/lib/types";
+import { LOCAL_HOST_ID, groupProjectsByHost, projectIdentity, projectTargetId, type PoolMembers, type ProjectSortMode } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
 interface WorktreeEntry {
   path: string;
@@ -140,6 +140,21 @@ function projectLabel(projectPath: string): string {
   const index = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
   return index >= 0 ? trimmed.slice(index + 1) : trimmed;
 }
+
+/** The name a workspace row shows: its alias, else its name, else its folder. */
+function workspaceLabel(project: ManagedProject): string {
+  return project.alias ?? project.name ?? projectLabel(project.path);
+}
+
+/** The title a session row shows. */
+function sessionTitle(session: SessionInfo): string {
+  return session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
+}
+
+/** A→Z as the user reads it: case-insensitive, digits numerically. */
+function compareLabels(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+}
 function formatRelativeTime(value: string, _locale: string, now: number): string | null {
   const timestamp = new Date(value).getTime();
   if (!Number.isFinite(timestamp)) return null;
@@ -242,6 +257,62 @@ function hostsCameOnline(
   const wasUp = new Set(prev.filter((host) => isLinkUp(host.status)).map((host) => host.id));
   return next.some((host) => isLinkUp(host.status) && !wasUp.has(host.id));
 }
+
+/** Sessions blocked on the user: an open blocking dialog (`awaitingInputIds`,
+ *  running by definition), or the agent's `request_attention` marker on a
+ *  session that is not running (a run in progress is not waiting). */
+function attentionSessionIds(
+  sessions: readonly SessionInfo[],
+  runningSessionIds: ReadonlySet<string>,
+  awaitingInputIds: ReadonlySet<string>,
+): Set<string> {
+  const ids = new Set(awaitingInputIds);
+  for (const session of sessions) {
+    if (session.attention && !runningSessionIds.has(session.id)) ids.add(session.id);
+  }
+  return ids;
+}
+
+interface AttentionEntry {
+  project: ManagedProject;
+  /** The host group the workspace lists under (`projectTargetId`). */
+  hostId: string;
+  tree: SessionTreeNode[];
+}
+
+/** The Needs attention section's workspaces: each with only its attention
+ *  sessions, workspaces without one dropped. Workspaces A→Z by label and
+ *  sessions A→Z by title, whatever the Workspaces sort. Every session is its
+ *  own root (forks do not nest), so the order holds. */
+function attentionProjectEntries(
+  projects: readonly ManagedProject[],
+  sessionsByProject: ReadonlyMap<string, readonly SessionInfo[]>,
+  ids: ReadonlySet<string>,
+): AttentionEntry[] {
+  if (ids.size === 0) return [];
+  const entries: AttentionEntry[] = [];
+  for (const project of projects) {
+    const sessions = (sessionsByProject.get(projectIdentity(project)) ?? []).filter((session) => ids.has(session.id));
+    if (sessions.length === 0) continue;
+    sessions.sort((a, b) => compareLabels(sessionTitle(a), sessionTitle(b)));
+    entries.push({ project, hostId: projectTargetId(project), tree: sessions.map((session) => ({ session, children: [] })) });
+  }
+  return entries.sort((a, b) => compareLabels(workspaceLabel(a.project), workspaceLabel(b.project)));
+}
+
+/** The Needs attention section's host groups: only hosts with an entry, A→Z by
+ *  the name the group shows (this machine is not pinned first). Entries keep
+ *  their order inside a group. */
+function attentionHostGroups<T extends { hostId?: string; poolId?: string }>(
+  entries: T[],
+  hosts: { id: string; label: string }[],
+  pools: PoolMembers | undefined,
+  nameOf: (host: { id: string; label: string }) => string,
+): { host: { id: string; label: string }; projects: T[] }[] {
+  return groupProjectsByHost(entries, hosts, pools)
+    .filter((group) => group.projects.length > 0)
+    .sort((a, b) => compareLabels(nameOf(a.host), nameOf(b.host)));
+}
 const MAX_PROJECT_SESSIONS = 5;
 export {
   EMPTY_PROJECT_SET,
@@ -250,6 +321,9 @@ export {
   INITIAL_RESTORE_RETRY_MS,
   MAX_PROJECT_SESSIONS,
   UNREAD_SESSIONS_STORAGE_KEY,
+  attentionHostGroups,
+  attentionProjectEntries,
+  attentionSessionIds,
   buildSessionTree,
   displayCwd,
   formatRelativeTime,
@@ -263,6 +337,8 @@ export {
   saveExpandedProjects,
   saveProjectSortMode,
   saveUnreadSessionIds,
+  sessionTitle,
+  workspaceLabel,
   type LivePlace,
   type SessionTreeNode,
   type WorktreeContext,

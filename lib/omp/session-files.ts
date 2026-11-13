@@ -660,6 +660,14 @@ export interface OmpSessionInfo {
   status?: SessionStatus;
   /** Timestamp of the last message entry in the tail window (when scanned with status). */
   lastMessageAt?: Date;
+  /** The agent's request_attention marker newer than the newest user message (when scanned with status). */
+  attention?: SessionAttention;
+}
+
+export interface SessionAttention {
+  reason: string;
+  /** The marker entry's timestamp (ISO). */
+  at: string;
 }
 
 const SESSION_LIST_PREFIX_BYTES = 4096;
@@ -825,27 +833,53 @@ function statusFromTailMessage(message: TailMessage): SessionStatus {
   }
 }
 
-/** The tail window's last message entry: lifecycle status plus its timestamp. */
-function scanTailMessage(suffix: string): { status: SessionStatus; lastMessageAt?: Date } {
-  if (!suffix) return { status: "unknown" };
+/** The `customType` of the agent's `request_attention` marker; ompweb's omp build writes it (`runner/src/attention.ts`). */
+export const ATTENTION_ENTRY_TYPE = "omp-web-attention";
+/** The longest attention reason kept; `runner/src/attention.ts` caps the reason it writes at the same length. */
+export const ATTENTION_REASON_MAX = 300;
+
+interface TailScan {
+  status: SessionStatus;
+  lastMessageAt?: Date;
+  attention?: SessionAttention;
+}
+
+/** The tail window's last message entry (lifecycle status plus its timestamp), and the newest attention marker
+ * written after the newest user message. Entries are appended in time order, so a marker in the window with no user
+ * message after it is newer than every user message, including those before the window. */
+function scanTailMessage(suffix: string): TailScan {
+  const result: TailScan = { status: "unknown" };
+  if (!suffix) return result;
   const lines = suffix.split("\n");
+  let sawMessage = false;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     // Every persisted entry starts with "{" — cheaply skips blank lines and
     // the leading partial fragment of the tail window.
     if (line.charCodeAt(0) !== 123) continue;
-    let entry: { type?: string; timestamp?: unknown; message?: TailMessage };
+    // Past the newest message only user messages and markers matter: skip parsing everything else. A quote inside a
+    // JSON string is escaped, so string content never matches these raw substrings.
+    if (sawMessage && !line.includes('"role":"user"') && !line.includes(`"${ATTENTION_ENTRY_TYPE}"`)) continue;
+    let entry: { type?: string; customType?: unknown; data?: { reason?: unknown }; timestamp?: unknown; message?: TailMessage };
     try {
       entry = JSON.parse(line);
     } catch {
       continue;
     }
     if (entry.type === "message" && entry.message) {
-      const at = typeof entry.timestamp === "string" ? new Date(entry.timestamp) : undefined;
-      return { status: statusFromTailMessage(entry.message), lastMessageAt: at && !Number.isNaN(at.getTime()) ? at : undefined };
+      if (!sawMessage) {
+        sawMessage = true;
+        const at = typeof entry.timestamp === "string" ? new Date(entry.timestamp) : undefined;
+        result.status = statusFromTailMessage(entry.message);
+        result.lastMessageAt = at && !Number.isNaN(at.getTime()) ? at : undefined;
+      }
+      if (entry.message.role === "user") break;
+    } else if (entry.type === "custom" && entry.customType === ATTENTION_ENTRY_TYPE && !result.attention && typeof entry.timestamp === "string") {
+      const reason = entry.data?.reason;
+      result.attention = { reason: typeof reason === "string" ? reason.slice(0, ATTENTION_REASON_MAX) : "", at: entry.timestamp };
     }
   }
-  return { status: "unknown" };
+  return result;
 }
 
 interface SessionListHeader {
@@ -1004,6 +1038,7 @@ export function scanSessionInfo(
       firstMessage: firstMessage || "(no messages)",
       status: tail?.status,
       lastMessageAt: tail?.lastMessageAt,
+      attention: tail?.attention,
     };
   } catch {
     return undefined;

@@ -97,6 +97,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       projectRoot: project?.projectRoot ?? s.cwd,
       projectKey: projectIdentityKey(project?.projectRoot ?? s.cwd),
       ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
+      ...(s.attention ? { attention: s.attention } : {}),
     };
   });
 }

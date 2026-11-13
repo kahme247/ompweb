@@ -1203,6 +1203,8 @@
   "sessionSidebar.copyTranscriptFailed": "无法复制对话记录",
   "sessionSidebar.unsentDraft": "未发送的草稿",
   "sessionSidebar.awaitingInput": "等待你的输入",
+  "sessionSidebar.needsAttention": "需要处理",
+  "sessionSidebar.attentionReason": "需要处理：{reason}",
   "sessionSidebar.selectProjectFirst": "请先选择一个项目",
   "sessionSidebar.switchWorktree": "切换工作树",
   "sessionSidebar.launchConfigDirectory": "目录",
