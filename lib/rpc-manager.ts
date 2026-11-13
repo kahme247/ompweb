@@ -15,15 +15,13 @@ import {
   AGENT_TOOL_NAMES,
   AgentToolGuard,
   executeAgentTool,
-  startsUnasked,
   type AgentToolContext,
   type AgentToolDeliverInput,
   type AgentToolDeliverResult,
-  type AgentToolHost,
   type AgentToolSessionOps,
 } from "./agent-tools";
-import { defaultGhRunner } from "./github/gh";
-import { GITHUB_REPLAY_SAFE_TOOLS } from "./github/tools";
+import type { AgentToolHost } from "./agent-tool-hosts";
+import { createGithubToolOps, GITHUB_REPLAY_SAFE_TOOLS, GITHUB_TOOL_NAMES } from "./github/tools";
 import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterruptedSessions, type InterruptibleSession } from "./session-resume";
 import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
@@ -128,6 +126,9 @@ const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
 /** Answer to a replayed server agent tool call that changes things: it may have run before the restart. */
 const AGENT_TOOL_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with list_sessions before retrying";
+const GITHUB_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with github_read (include comments or threads) before retrying";
+/** A GitHub write is checked on GitHub, not in the session list. */
+const unknownOutcome = (toolName: unknown) => (typeof toolName === "string" && GITHUB_TOOL_NAMES.has(toolName) ? GITHUB_UNKNOWN_OUTCOME : AGENT_TOOL_UNKNOWN_OUTCOME);
 
 /**
  * Failure raised by omp-web itself (not by omp) carrying a stable snake_case
@@ -1216,7 +1217,7 @@ export class AgentSessionWrapper {
       // Only the read-only listing and the idempotent GitHub tools run again (handled below); anything else may already have run.
       if (this.replaying && !(event.type === "host_tool_call" && typeof event.toolName === "string" && (event.toolName === "list_sessions" || GITHUB_REPLAY_SAFE_TOOLS.has(event.toolName)))) {
         this.proc.sendFrame(event.type === "host_tool_call"
-          ? { type: "host_tool_result", id: event.id, isError: true, result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] } }
+          ? { type: "host_tool_result", id: event.id, isError: true, result: { content: [{ type: "text", text: unknownOutcome(event.toolName) }] } }
           : { type: "host_uri_result", id: event.id, isError: true, error: AGENT_TOOL_UNKNOWN_OUTCOME });
         return;
       }
@@ -1354,7 +1355,7 @@ export class AgentSessionWrapper {
               type: "host_tool_result",
               id,
               isError: true,
-              result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] },
+              result: { content: [{ type: "text", text: unknownOutcome(toolName) }] },
             });
           } else if (loadWebServerSettings().agentToolsEnabled) {
             void this.answerServerAgentTool(event);
@@ -3369,14 +3370,7 @@ function createAgentToolOps(source: AgentToolContext, replaying: boolean): Agent
     ];
   };
   return {
-    github: {
-      run: defaultGhRunner,
-      hostReadsUnasked(sourceHostId) {
-        const host = hosts().find((h) => h.id === sourceHostId);
-        return { label: host?.label ?? sourceHostId, allowed: host !== undefined && startsUnasked(host, sourceHostId) };
-      },
-      writesUnasked: () => loadWebServerSettings().githubWritesUnasked,
-    },
+    github: createGithubToolOps(hosts),
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
       const sessions = await listSessionsAllHosts();
