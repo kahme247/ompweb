@@ -112,11 +112,13 @@ function browserHistory({ prior = true, standalone = false } = {}) {
   return result;
 }
 
-async function mount({ open = false, strict = false, active = true } = {}) {
+async function mount({ open = false, strict = false, active = true, panel = false } = {}) {
   const hook = renderHook(({ url }) => {
     const [sidebarOpen, setSidebarOpen] = React.useState(open);
-    const navigation = useSidebarHistory({ active, ready: true, sidebarOpen, setSidebarOpen, url });
-    return { ...navigation, sidebarOpen, setSidebarOpen };
+    const [panelOpen, setPanelOpen] = React.useState(panel);
+    const closePanel = React.useCallback(() => setPanelOpen(false), []);
+    const navigation = useSidebarHistory({ active, ready: true, sidebarOpen, setSidebarOpen, panelOpen, closePanel, url });
+    return { ...navigation, sidebarOpen, setSidebarOpen, panelOpen, setPanelOpen };
   }, {
     initialProps: { url: "first" },
     wrapper: strict ? React.StrictMode : undefined,
@@ -144,6 +146,36 @@ test("closed conversation Back opens the sidebar, Forward recloses it, second cl
     assert.equal(shell.api.sidebarOpen, false);
     world.window.history.back();
     await world.flush();
+    world.window.history.back();
+    await world.flush();
+    assert.equal(world.departed, true);
+  } finally { await shell.unmount(); }
+});
+
+test("Back closes an open full-screen panel first and keeps the conversation and sidebar as they were", async () => {
+  const world = browserHistory();
+  const shell = await mount({ panel: true });
+  try {
+    world.window.history.back();
+    await world.flush();
+    assert.equal(shell.api.panelOpen, false);
+    assert.equal(shell.api.sidebarOpen, false);
+    assert.equal(world.departed, false);
+    world.window.history.back();
+    await world.flush();
+    assert.equal(shell.api.sidebarOpen, true);
+    assert.equal(world.departed, false);
+  } finally { await shell.unmount(); }
+});
+
+test("without a conversation, Back closes the panel instead of leaving; the next Back leaves", async () => {
+  const world = browserHistory();
+  const shell = await mount({ open: true, active: false, panel: true });
+  try {
+    world.window.history.back();
+    await world.flush();
+    assert.equal(shell.api.panelOpen, false);
+    assert.equal(world.departed, false);
     world.window.history.back();
     await world.flush();
     assert.equal(world.departed, true);
