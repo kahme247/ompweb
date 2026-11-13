@@ -938,7 +938,7 @@ export class AgentSessionWrapper {
     this._adopted = joined;
     this.hostToolsUnknown = true;
     // Older omp rejects some of these, as at startup; a timeout or an exit fails the adoption.
-    const optional = (command: { type: string; [key: string]: unknown }) => this.proc.sendCommand(command, STARTUP_COMMAND_TIMEOUT_MS).then(() => {}, (error) => {
+    const optional = (command: { type: string; [key: string]: unknown }, timeoutMs = STARTUP_COMMAND_TIMEOUT_MS) => this.proc.sendCommand(command, timeoutMs).then(() => {}, (error) => {
       if (!(error instanceof RpcCommandError)) throw error;
     });
     try {
@@ -952,8 +952,9 @@ export class AgentSessionWrapper {
       // leaves bashRunning false, and its result arrives as an unsolicited response.
       this.applyIdentity(await this.getStateWithTimeout(STARTUP_COMMAND_TIMEOUT_MS));
       // The wrapper keeps neither (a tab reads both when it attaches): a child that cannot answer them fails here instead.
-      await optional({ type: "get_subagents" });
-      await optional({ type: "get_btw_history" });
+      // get_state answered, so omp's startup work is over: these reads keep the status-poll budget.
+      await optional({ type: "get_subagents" }, GET_STATE_TIMEOUT_MS);
+      await optional({ type: "get_btw_history" }, GET_STATE_TIMEOUT_MS);
       this.replaying = true;
       try {
         this.proc.replay(this.adoptionReplay ?? []);
