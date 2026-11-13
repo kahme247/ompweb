@@ -357,18 +357,22 @@ function AgentToolsSetting() {
 
 function GithubWritesSetting() {
   const { t } = useI18n();
+  // null until loaded, and after a failed load: showing "off" there could hide writes the server allows.
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  // Blocks a second change until the save lands: two PUTs in flight could finish out of order and leave the older one saved.
+  const [saving, setSaving] = useState(false);
   useEffect(() => {
     let alive = true;
     fetch("/api/web-settings")
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { githubWritesUnasked?: boolean } | null) => { if (alive) setEnabled(data?.githubWritesUnasked === true); })
-      .catch(() => { if (alive) setEnabled(false); });
+      .then((data: { githubWritesUnasked?: boolean } | null) => { if (alive && typeof data?.githubWritesUnasked === "boolean") setEnabled(data.githubWritesUnasked); })
+      .catch(() => {});
     return () => { alive = false; };
   }, []);
   const change = async (next: boolean) => {
     const previous = enabled;
     setEnabled(next);
+    setSaving(true);
     try {
       const res = await fetch("/api/web-settings", {
         method: "PUT",
@@ -379,11 +383,13 @@ function GithubWritesSetting() {
     } catch (error) {
       setEnabled(previous);
       toast.error(t("settingsConfig.githubWritesUnaskedSaveFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
     }
   };
   return (
     <NativeSetting searchId="github-writes-unasked" label={t("settingsConfig.githubWritesUnasked")} description={t("settingsConfig.githubWritesUnaskedDesc")}>
-      <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+      <ToggleSwitch checked={enabled === true} disabled={enabled === null || saving} onChange={(next) => void change(next)} />
     </NativeSetting>
   );
 }
