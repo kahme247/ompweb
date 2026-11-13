@@ -937,8 +937,9 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
   const error = typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
   // Nothing reached omp: the session's entries wait for the host's next hello.
   if (body.hostOffline === true && (!sent || body.delivery === "refused")) return "offline";
+  // A timed-out status read (`session_state_timeout`, e.g. omp busy streaming) is the preflight, not the message.
   if (body.code === "session_busy" || body.code === "session_restarting"
-    || (!sent && (body.code === "host_timeout" || body.code === "host_sessions_unavailable"))) return retry(entry);
+    || (!sent && (body.code === "host_timeout" || body.code === "host_sessions_unavailable" || body.code === "session_state_timeout"))) return retry(entry);
   // Only a missing session can be an archived one; any other 404 (an upload that is gone, say) is that refusal.
   if (!sent && response.status === 404 && body.code === "session_not_found") {
     const archive = await archiveState(entry.session_id);
