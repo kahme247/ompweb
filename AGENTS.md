@@ -66,7 +66,12 @@ Shared foundations in `lib/omp/`:
 - `paths.ts` — Node port of omp's directory resolution (`~/.omp/agent`,
   XDG, session dir slugs) and `sessionLocalRoot`, omp's `local://` root rule.
 - `omp-cli.ts` — locate/probe the `ompweb-omp` binary (`resolveOmpBin`,
-  `getOmpVersion`).
+  `getOmpVersion`): `OMP_WEB_OMP_BIN`, else a source checkout's `runner/release/`, else the fetched copy
+  (`fetchedOmpBin`: beside a compiled binary, otherwise `<agentDir>/omp-web/omp/<version>/`).
+- `runner-fetch.ts` — `fetchOmpRunner`/`ensureOmpRunner`/`ompweb fetch-omp`: downloads this version's
+  `ompweb-omp-<platform>` from its own GitHub release (repo from `package.json` `repository`, `lib/release-repo.ts`),
+  checks it against the release's `ompweb-omp.sha256` and writes it atomically. The web server and the daemon run it in
+  the background at start when the runner is missing. There are no runner npm packages.
 - `rpc-process.ts` — process + NDJSON channel layer (`RpcProcess`; `rpc-*` names are historical, the wire is the `ompweb-omp` channel of `docs/specs/2026-11-12-omp-runner-design.md`).
 - `rpc-transport.ts` — `RpcTransport`: the byte pipe under `RpcProcess`
   (`spawnLocalRpcTransport` for a local child; `RemoteRpcTransport` in
@@ -281,7 +286,7 @@ scripts/
   smoke.ts            `npm run smoke`: starts the built server (or `--binary <path>`) and `ompweb host` with a throwaway HOME; checks the SPA, an asset, the API, a session listed through the daemon and SSE
   transport-metrics.ts `bun scripts/transport-metrics.ts [--since 2h|<ISO>] [--until <ISO>] [--client <id>] [--session <id>] [--file <path>]`: per-transport summary of the browser transport samples and per host and direction of the host link samples (`--session`: link samples of one session; default: the last 24 h of the agent dir's file)
   link-hol-probe.ts   `bun scripts/link-hol-probe.ts --host <id> --model <provider/modelId>`: head-of-line load on one host link (large prompts down, large session reads up, get_state beside them) for the link samples; usage at its top
-  build-binary.ts     `npm run build:binary`: compiles server/binary.ts (NODE_ENV define, no .env/bunfig autoload) into release/ompweb-<os>-<arch>/ beside dist/, public/, the KaTeX files, the omp runner (`ompweb-omp`, built first by `runner/scripts/build-binary.ts`) and the licenses; archives it
+  build-binary.ts     `npm run build:binary`: compiles server/binary.ts (NODE_ENV define, no .env/bunfig autoload) into release/ompweb-<os>-<arch>/ beside dist/, public/, the KaTeX files, the omp runner (`ompweb-omp`, built first by `runner/scripts/build-binary.ts`; not with `--no-runner`, which releases use: they attach the runners as separate assets) and the licenses; archives it
   build-release-binaries.sh  the five release targets (one list), run by publish.yml and prerelease.yml (a prerelease per verified `main` commit, titled by build time; one concurrency group per commit, so no commit's run is dropped)
   licenses.ts         the release's `licenses/`: license files of every npm package the server and client bundles hold (Bun.build metafiles; build-client.ts writes build/client-packages.json) and `bun-LICENSE-<version>.md`, the vendored license of the embedded Bun runtime. Bumping Bun: vendor its LICENSE.md for the new version, or build-binary.ts stops
 
@@ -311,7 +316,7 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - The binary needs `process.env.NODE_ENV` defined as `"production"` at build time (`scripts/build-binary.ts`): a plain `bun build --compile` inlines `"development"`, and the server then never writes the daemon's link. `npm run smoke -- --binary` catches that (no session lists).
 - `Bun.serve` turns on `SO_REUSEPORT` when `development` is false, so a second omp-web would share the port instead of failing; `startServer` passes `reusePort: false`, and `startProduction` (`server/app.ts`) reports an `EADDRINUSE` in one line.
 - The web-server in-app update worker runs on Node (`OMP_WEB_NODE_BIN`, the launcher's `process.execPath`), not Bun. The compiled web server updates by download (`lib/self-update.ts`). Host-daemon updates use their own helper in `lib/hosts/update-worker.ts`, including for binary hosts; never reuse the web-server worker to restart a host.
-- Both updaters run the new release's `ompweb preflight` (`lib/hosts/preflight.ts`) in the live environment before they stop anything, and abort on failure: it starts the session omp the release resolves (the web worker sets `OMP_WEB_PACKAGE_DIR` to the scratch-installed candidate) and requires its hello on `CHANNEL_PROTO`. A candidate with a runner but no preflight command is refused; a compiled release is recognized by `PREFLIGHT_MARKER`, which only `preflight.ts` may embed. A failed or aborted web update writes `complete.json` so the armed launcher disarms.
+- Both updaters run the new release's `ompweb fetch-omp` (its runner, from its own release) and then its `ompweb preflight` (`lib/hosts/preflight.ts`) in the live environment before they stop anything, and abort on failure: it starts the session omp the release resolves (the web worker sets `OMP_WEB_PACKAGE_DIR` to the scratch-installed candidate) and requires its hello on `CHANNEL_PROTO`. A candidate with a runner but no preflight command is refused; a compiled release is recognized by `PREFLIGHT_MARKER`, which only `preflight.ts` may embed. A failed or aborted web update writes `complete.json` so the armed launcher disarms.
 - The daemon-owned watcher (`lib/hosts/workspace-watch.ts`) re-stats ~50 ms after every event to catch burst saves (Bun may drop native events within ~2 ms); main only routes its sequenced watch events.
 - `bun:sqlite` `.get()` returns `null` for no row (not `undefined`).
 - `bun:sqlite` `close()` keeps the database file open while prepared statements are alive (until GC), so Windows cannot remove or replace it: the stores close with `close(true)`, which finalizes them (`closeNotificationStore`, `closeUsageDatabase`).

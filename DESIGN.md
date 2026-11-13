@@ -78,8 +78,9 @@ over ompweb's channel. The host receives the same `AgentSession` events and
 calls the same session methods omp's TUI does, so nothing depends on omp's RPC
 mode. A session started from the runner's TUI connects to the daemon's Unix
 socket and shows up live in the web; dialogs open on both sides and the first
-answer wins. Each ompweb release ships its runner as `ompweb-omp`, so omp
-updates with ompweb. The design and the wire are in
+answer wins. Each ompweb release attaches its runners (`ompweb-omp-<platform>`),
+and every install downloads the one of its own version
+(`lib/omp/runner-fetch.ts`), so omp updates with ompweb. The design and the wire are in
 `docs/specs/2026-11-12-omp-runner-design.md`; the fork build in
 `docs/specs/2026-11-12-omp-build-in-ompweb-design.md`.
 

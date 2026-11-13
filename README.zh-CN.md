@@ -26,7 +26,7 @@
 
 ## 环境要求
 
-- 无需另行安装 omp：ompweb 自带其 [omp](https://github.com/can1357/oh-my-pi) 构建 `ompweb-omp`（单一可执行文件版本中位于同一目录，npm 包中作为可选依赖 `@kahme247/ompweb-omp-<os>-<arch>`）。它直接使用 `~/.omp` 中的设置、认证和会话。支持的平台为 linux-x64、linux-arm64、darwin-x64、darwin-arm64 和 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上安装时不含 `ompweb-omp`，无法启动会话
+- 无需另行安装 omp：ompweb 使用自己的 [omp](https://github.com/can1357/oh-my-pi) 构建 `ompweb-omp`，直接使用 `~/.omp` 中的设置、认证和会话。每种安装方式（npm、npx 或单一可执行文件）都会在首次启动时从该版本的 [GitHub 发布](https://github.com/kahme247/ompweb/releases)下载同一版本的 `ompweb-omp`，校验 SHA-256 后保存（单一可执行文件放在同一目录，其他方式放在 `~/.omp/agent/omp-web/omp/<version>/`）；也可用 `ompweb fetch-omp` 手动获取。支持的平台为 linux-x64、linux-arm64、darwin-x64、darwin-arm64 和 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上无法启动会话。无法访问 GitHub 的机器请将 `OMP_WEB_OMP_BIN` 指向该发布的 `ompweb-omp-<os>-<arch>` 副本
 - Node.js `>= 24`。服务器运行在 [Bun](https://bun.sh) 上，Bun 会作为 npm 包的依赖自动安装（找不到随包安装的 Bun 时使用 `PATH` 中的 Bun）
 
 排队消息的 **Steer**、**Delete** 和 **Edit** 操作是 `ompweb-omp` 通道的命令（`promote_queued_message`、`remove_queued_message`）。只有 omp 确认取消后才会移除消息；编辑时也必须先取消成功，再将文本恢复到输入框。消息已不在队列中时，界面保留队列并显示提示；ompweb 不会重复发送一条引导消息。
@@ -58,6 +58,7 @@ ompweb
 ompweb --port 8080                         # 自定义端口
 ompweb --hostname 0.0.0.0                  # 监听网络地址
 ompweb hash-password                      # 输出 OMP_WEB_PASSWORD_HASH 的值
+ompweb fetch-omp                          # 从 GitHub 发布下载本版本的 ompweb-omp（校验 SHA-256，仅在缺失时）
 ompweb preflight                          # 像新会话一样启动一次 omp 并等待其 hello；失败时说明原因并以 1 退出
 ompweb --no-open                           # 不自动打开浏览器
 ```
@@ -121,7 +122,7 @@ Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置�
 | `OMP_WEB_NO_OPEN` | 设为 `1` 时禁止自动打开浏览器 | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | 设为 `1` 时禁用更新检查和应用内更新；修改后需重启 | `0` |
 | `OMP_WEB_NAME` | 浏览器标签页和已安装应用中显示的名称。设为 `url`、`host` 或 `domain`（不区分大小写）时使用浏览器所连接的主机名（不含端口），localhost 和 IP 地址仍显示 `omp web`；其他值按原样使用。修改后需重启 | `omp web` |
-| `OMP_WEB_OMP_BIN` | 用于替代自带版本的 `ompweb-omp` 构建路径（例如源码检出中的 `runner/release/ompweb-omp-<os>-<arch>`）。普通的 `omp` 不支持 ompweb 的通道，无法使用 | _自带的 `ompweb-omp`_ |
+| `OMP_WEB_OMP_BIN` | 用于替代下载版本的 `ompweb-omp` 构建路径（无法访问 GitHub 的机器上为发布中 `ompweb-omp-<os>-<arch>` 的副本，源码检出中为 `runner/release/ompweb-omp-<os>-<arch>`）。普通的 `omp` 不支持 ompweb 的通道，无法使用。服务安装程序仅在你设置了它时才写入服务环境 | _下载的 `ompweb-omp`_ |
 | `PI_CODING_AGENT_DIR` | 自定义 omp agent 目录 | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI 兼容的语音转文字接口 URL。不设置时使用 `OMP_WEB_STT_MODEL` 通过 omp 自身的凭据转录 | _无_ |
 | `OMP_WEB_STT_KEY` | STT 接口对应的 API Key | _无_ |

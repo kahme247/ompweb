@@ -26,7 +26,7 @@
 
 ## 系統需求
 
-- 無需另行安裝 omp：ompweb 隨附其 [omp](https://github.com/can1357/oh-my-pi) 建置版本 `ompweb-omp`（單一二進位檔版本中位於同一資料夾，npm 套件中則為選用相依套件 `@kahme247/ompweb-omp-<os>-<arch>`）。它直接使用 `~/.omp` 中的設定、認證與對話。支援的平台為 linux-x64、linux-arm64、darwin-x64、darwin-arm64 與 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上安裝時不含 `ompweb-omp`，無法啟動對話
+- 無需另行安裝 omp：ompweb 使用自己的 [omp](https://github.com/can1357/oh-my-pi) 建置版本 `ompweb-omp`，直接使用 `~/.omp` 中的設定、認證與對話。每種安裝方式（npm、npx 或單一二進位檔）都會在首次啟動時從該版本的 [GitHub 發行版本](https://github.com/kahme247/ompweb/releases)下載同一版本的 `ompweb-omp`，驗證 SHA-256 後保存（單一二進位檔放在同一資料夾，其他方式放在 `~/.omp/agent/omp-web/omp/<version>/`）；也可用 `ompweb fetch-omp` 手動取得。支援的平台為 linux-x64、linux-arm64、darwin-x64、darwin-arm64 與 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上無法啟動對話。無法連線至 GitHub 的機器請將 `OMP_WEB_OMP_BIN` 指向該發行版本 `ompweb-omp-<os>-<arch>` 的副本
 - Node.js `>= 24`。伺服器運作於 [Bun](https://bun.sh) 上，Bun 會作為 npm 套件的相依套件自動安裝（找不到隨套件安裝的 Bun 時會使用 `PATH` 中的 Bun）
 
 佇列中訊息的**引導（Steer）**、**刪除（Delete）**與**編輯（Edit）**操作皆為 `ompweb-omp` 通道的指令（`promote_queued_message`、`remove_queued_message`）。刪除操作會先經 omp 確認後，標籤才會自畫面消失；編輯操作則在成功取消佇列後，才會將文字取回輸入框。若該訊息已不再處於等待狀態，佇列將維持原狀並顯示提示；ompweb 不會重複傳送引導訊息。
@@ -82,6 +82,7 @@ ompweb
 ompweb --port 8080                         # 自訂連接埠
 ompweb --hostname 0.0.0.0                  # 監聽網路介面
 ompweb hash-password                       # 輸出供 OMP_WEB_PASSWORD_HASH 使用的雜湊值
+ompweb fetch-omp                           # 從 GitHub 發行版本下載此版本的 ompweb-omp（驗證 SHA-256，僅在缺少時）
 ompweb preflight                           # 如同新對話般啟動一次 omp 並等待其 hello；失敗時說明原因並以 1 結束
 ompweb --no-open                           # 不自動開啟瀏覽器
 ompweb --install-tray                      # 安裝 Windows 系統匣服務與桌面捷徑
@@ -137,7 +138,7 @@ ompweb 透過一個輕量的守護行程 `ompweb host` 來執行這台機器的 
 每個[發行版本](https://github.com/kahme247/ompweb/releases/latest)亦提供編譯完成的單一執行檔，隨附其所提供服務的相關檔案：
 `ompweb-linux-x64.tar.gz`、`ompweb-linux-arm64.tar.gz`、`ompweb-darwin-x64.tar.gz`、
 `ompweb-darwin-arm64.tar.gz` 以及 `ompweb-windows-x64.zip`。無需安裝 Node、npm
-或 Bun，也無需安裝 omp：它隨附的 omp 建置版本 `ompweb-omp` 就在同一資料夾中。x64 建置版本採用 Bun 的基準執行階段，因此亦可在不具備 AVX2 指令集的 CPU 上運作。每個封存檔皆於 `licenses/` 包含其打包內容的授權條款。`main` 分支上通過 CI 的每次提交亦會發布為以建置時間命名的[預先發行版（prerelease）](https://github.com/kahme247/ompweb/releases)（例如 `2026-11-01T10:30:00Z`），同樣包含上述五種封存檔。
+或 Bun，也無需安裝 omp：首次啟動時，它會從同一個發行版本下載其 omp 建置版本 `ompweb-omp`（驗證 SHA-256），並保存在同一資料夾中（預先發行版的封存檔已內含）。x64 建置版本採用 Bun 的基準執行階段，因此亦可在不具備 AVX2 指令集的 CPU 上運作。每個封存檔皆於 `licenses/` 包含其打包內容的授權條款。`main` 分支上通過 CI 的每次提交亦會發布為以建置時間命名的[預先發行版（prerelease）](https://github.com/kahme247/ompweb/releases)（例如 `2026-11-01T10:30:00Z`），同樣包含上述五種封存檔。
 
 ```bash
 tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # 解壓縮出 ompweb-linux-x64/
@@ -145,7 +146,7 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # 解壓縮出 ompweb-linux
 ~/.local/share/ompweb-linux-x64/ompweb host          # 本機守護行程，於第二個終端機執行
 ```
 
-- **將 `ompweb` 保留在其資料夾內。** 它會執行 `ompweb-omp`，並從所在目錄提供 `dist/`、`public/` 與其他檔案（在系統 `PATH` 中建立指向它的符號連結可正常運作），若設定了 `OMP_WEB_PACKAGE_DIR` 則從該路徑提供。
+- **將 `ompweb` 保留在其資料夾內。** 它會執行同一資料夾中的 `ompweb-omp`，並從所在目錄提供 `dist/`、`public/` 與其他檔案（在系統 `PATH` 中建立指向它的符號連結可正常運作），若設定了 `OMP_WEB_PACKAGE_DIR` 則從該路徑提供。
 - **macOS** 會對下載檔案加上隔離屬性（quarantine）：首次啟動前請先執行一次 `xattr -dr com.apple.quarantine ompweb-darwin-arm64`。
 - **macOS 15 或更新版本** 在應用程式存取區域網路前會先詢問權限。若 Mac 上的 `ompweb host` 對區網上的伺服器回報 `ECONNREFUSED`，但 `curl` 卻能正常連線，請前往「系統設定 → 隱私權與安全性 → 區域網路」允許你的終端機（或 `ompweb`）。透過 Tailscale 等 VPN 連線的伺服器，或從 SSH 工作階段啟動的 host 則不受影響。
 - **不提供系統匣、服務安裝程式或應用程式內更新。** 若要更新，請停止 `ompweb` 與 `ompweb host`，以新發行版本替換該目錄，然後再次啟動兩者；當有新版本釋出時，**設定 → 系統** 會提供發行頁面連結。你的對話與設定皆儲存於 `~/.omp`，不在該目錄中。
@@ -469,7 +470,7 @@ Start-ScheduledTask ompweb-host
 | `OMP_WEB_NO_OPEN` | 設為 `1` 可防止自動開啟瀏覽器 | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | 設為 `1` 可停用更新檢查與應用程式內更新；變更後需重新啟動 | `0` |
 | `OMP_WEB_NAME` | 顯示於瀏覽器分頁與已安裝應用程式的名稱。若設為 `url`、`host` 或 `domain`（不分大小寫），則採用瀏覽器連線的主機名稱（不含連接埠）；localhost 與 IP 位址仍會保持 `omp web`。其他任何值將原樣採用。變更後需重新啟動 | `omp web` |
-| `OMP_WEB_OMP_BIN` | 用於取代隨附版本的 `ompweb-omp` 建置版本路徑（例如原始碼檢出中的 `runner/release/ompweb-omp-<os>-<arch>`）。一般的 `omp` 不支援 ompweb 的通道，無法使用 | _隨附的 `ompweb-omp`_ |
+| `OMP_WEB_OMP_BIN` | 用於取代下載版本的 `ompweb-omp` 建置版本路徑（無法連線至 GitHub 的機器上為發行版本中 `ompweb-omp-<os>-<arch>` 的副本，原始碼檢出中為 `runner/release/ompweb-omp-<os>-<arch>`）。一般的 `omp` 不支援 ompweb 的通道，無法使用。服務安裝程式僅在你設定它時才會寫入服務環境 | _下載的 `ompweb-omp`_ |
 | `PI_CODING_AGENT_DIR` | 自訂 omp 代理目錄 | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | 相容於 OpenAI 的語音轉文字（STT）端點網址。若保留未設定，則會透過 omp 自身的憑證搭配 `OMP_WEB_STT_MODEL` 進行轉錄 | _無_ |
 | `OMP_WEB_STT_KEY` | STT 端點的選用 API 金鑰 | _無_ |
