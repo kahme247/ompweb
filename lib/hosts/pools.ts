@@ -182,7 +182,7 @@ export function selectPoolHost(
   for (const member of pool.members) {
     if (!member.provisioned || member.draining) continue;
     const report = snapshots.get(member.hostId);
-    if (!report || report.status !== "online" || !(report.linkProtocol >= 8) || !report.capacity || !report.configCurrent) continue;
+    if (!report || report.status !== "online" || !report.capacity || !report.configCurrent) continue;
     const { sample, receivedAt } = report.capacity;
     if (!nonnegative(receivedAt) || receivedAt > now || now - receivedAt > 15_000) continue;
     const { effectiveCpus, load1, busyFraction, stealFraction, availableMemoryBytes, activeSessions } = sample;

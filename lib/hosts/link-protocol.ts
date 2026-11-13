@@ -651,18 +651,13 @@ function cutPart(line: string, at: number, seq: number): { line: string; at: num
 /** The sending side of one link direction (spec D7): FIFO per key, keys served round-robin (Map order: a key that
  * sent goes to the back), each turn one whole line, one `part` or one result piece. Lines are numbered as they go
  * out, so wire order is `seq` order. One key at a time may be part-way through a multi-part line, so the receiver
- * holds at most one partial line. `parts`: false for a v4 peer, which gets every line whole. */
+ * holds at most one partial line. */
 export class LinkSender<T extends SendItem> {
-  parts: boolean;
   /** `at`: how far the item has gone out (UTF-16 units of `line`, bytes of `blob`); `line`: set while it goes in parts;
    * `left`: its bytes still counted in queuedBytes. */
   private readonly queues = new Map<string, { item: T; at: number; line: string | null; left: number }[]>();
   private active: string | null = null;
   private queued = 0;
-
-  constructor(parts: boolean) {
-    this.parts = parts;
-  }
 
   /** Bytes queued and not sent yet (a line's `size`, a result's bytes; a line going in parts less the parts sent). */
   get queuedBytes(): number {
@@ -734,9 +729,7 @@ export class LinkSender<T extends SendItem> {
         head.at += piece.byteLength;
         unit = { key, item, done: head.at >= item.blob.byteLength, frame: encodeBlobFrame(item.id, piece) };
         this.sent(head, unit.done, piece.byteLength);
-      } else if (!this.parts || item.size <= LINK_LIMITS.pieceBytes) {
-        // A line part-way out in parts when the peer turned out to be v4 goes whole from the start.
-        if (this.active === key) this.active = null;
+      } else if (item.size <= LINK_LIMITS.pieceBytes) {
         const seq = nextSeq();
         unit = { key, item, done: true, seq, line: withSeq(item.line, seq), part: false, messageBytes: numberedBytes(item.size, seq) };
         this.sent(head, true, 0);

@@ -279,7 +279,7 @@ function linkFor(id: string): Link {
       notifier: true,
       socket: null,
       downSeq: 0,
-      sender: new LinkSender(true),
+      sender: new LinkSender(),
       outbox: new Outbox(),
       outboxBytes: 0,
       sentSeq: 0,
@@ -349,8 +349,7 @@ function released(link: Link, items: Sent[]): void {
 function flush(link: Link): void {
   const ws = link.socket;
   if (!ws || link.awaitingDrain || hub().frozen) return;
-  // A v4 daemon acks only inside its next uplink frame, which may be a pong 15 s away: it gets no window.
-  const limit = link.sender.parts ? LINK_LIMITS.unackedBytes : Infinity;
+  const limit = LINK_LIMITS.unackedBytes;
   const write = (item: Sent): boolean => {
     const sent = ws.send(item.line);
     if (sent !== 0) {
@@ -722,7 +721,6 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   link.hostVersion = hello.v;
   link.shared = true;
   link.notifier = hello.link?.notifier === true;
-  link.sender.parts = true;
   enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id }));
   // Resend what the daemon has not applied, in order and paced, before anything new.
   link.sentSeq = hello.ack;
@@ -755,7 +753,7 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     } catch {
       return ws.close(LINK_CLOSE.policy, "Malformed result frame");
     }
-    // A large result comes in pieces, in order (a v4 daemon sends one). Pieces for an op no longer waiting are dropped;
+    // A large result comes in pieces, in order. Pieces for an op no longer waiting are dropped;
     // past blobBytes none are kept, so its `res` then fails host_blob_missing.
     const pending = link.pending.get(result.id);
     if (pending) {
