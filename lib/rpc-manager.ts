@@ -3431,6 +3431,8 @@ function createAgentToolOps(source: AgentToolContext, replaying: boolean): Agent
         cold = true;
       }
       const target = wrapper;
+      // A steer would interrupt the target's open ask: it goes as a follow-up, which the result reports.
+      let delivery = input.delivery;
       const send = async () => {
         const wasRunning = target.isRunning();
         if (input.delivery === "prompt" && wasRunning) {
@@ -3439,24 +3441,22 @@ function createAgentToolOps(source: AgentToolContext, replaying: boolean): Agent
         if (input.delivery === "steer" && !wasRunning) {
           throw new Error("Target session is not running; use delivery \"prompt\" to start a turn.");
         }
-        if (input.delivery === "steer" && target.isAwaitingAsk()) {
-          throw new Error("Target session is waiting for its user to answer a question, which a steer would interrupt; use delivery \"followUp\".");
-        }
-        const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
+        if (delivery === "steer" && target.isAwaitingAsk()) delivery = "followUp";
+        const terminalEndsNeeded = delivery === "followUp" && wasRunning ? 2 : 1;
         const waiter = input.wait ? target.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
-        await target.send({ type: DELIVERY_COMMAND[input.delivery], message: input.message });
+        await target.send({ type: DELIVERY_COMMAND[delivery], message: input.message });
         return { waiter }; // Boxed: the lease ends at delivery, not at the turn's end.
       };
       const { waiter } = cold ? await wrapper.withPendingCommand(send, true) : await send();
       if (!input.wait || !waiter) {
-        return { accepted: true, targetSessionId: input.sessionId, delivery: input.delivery, waited: false, responseText: null };
+        return { accepted: true, targetSessionId: input.sessionId, delivery, waited: false, responseText: null };
       }
       await waiter;
       const last = (await wrapper.send({ type: "get_last_assistant_text" })) as { text?: unknown } | null;
       return {
         accepted: true,
         targetSessionId: input.sessionId,
-        delivery: input.delivery,
+        delivery,
         waited: true,
         responseText: typeof last?.text === "string" ? last.text : null,
       };

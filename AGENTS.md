@@ -1234,7 +1234,7 @@ during the wait.
   A steer waits (`held`) while an ask (`askDialog`/`formDialog`) is open, since
   omp's ask tool aborts on a user steer; the wrapper's `onAskClosed` (answered,
   cancelled, expired or child gone) pumps it. The composer is hidden meanwhile,
-  and `send_to_session` refuses a steer.
+  and a `send_to_session` steer goes as a follow-up (its result says so).
   Host offline → `waiting_host`; uncertain replies/child exits while delivering
   → `failed` with `mayHaveBeenSent`, never independently resent. Anything that
   stops an entry before its native write (an error before the claim, omp exiting
