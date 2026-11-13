@@ -39,9 +39,10 @@ export type GithubEvent =
 
 const settled = (head: Head | undefined): head is Head => head !== undefined && head.checks.length > 0 && head.checks.every((c) => c.status === "completed");
 
+// The snapshot's own ids are never trimmed: a trimmed id would come back as new on the next poll.
 const remember = (known: string[], seen: string[]): string[] => {
   const fresh = new Set(seen);
-  return [...known.filter((id) => !fresh.has(id)), ...seen].slice(-KEPT);
+  return [...known.filter((id) => !fresh.has(id)).slice(-KEPT), ...seen];
 };
 
 const unseen = <T extends { id: string }>(items: T[], known: string[], posted: ReadonlySet<string>): T[] => {
@@ -70,9 +71,9 @@ function ciEvent(url: string, head: Head): GithubEvent {
 export function baselineCursor(snapshot: ItemSnapshot): WatchCursor {
   const head = snapshot.head;
   return {
-    commentIds: snapshot.comments.map((c) => c.id),
-    reviewIds: snapshot.reviews.map((r) => r.id),
-    threadCommentIds: snapshot.threadComments.map((t) => t.id),
+    commentIds: remember([], snapshot.comments.map((c) => c.id)),
+    reviewIds: remember([], snapshot.reviews.map((r) => r.id)),
+    threadCommentIds: remember([], snapshot.threadComments.map((t) => t.id)),
     reportedHeads: settled(head) ? [head.sha] : [],
     final: false,
   };
