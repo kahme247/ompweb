@@ -158,6 +158,8 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
     const replyTo = args.replyTo === undefined || args.replyTo === null ? undefined : stringArg(args, "replyTo");
     if (replyTo !== undefined && !/^(PRRT_[A-Za-z0-9_-]+|\d+)$/.test(replyTo)) throw new Error("replyTo must be a review comment id or a review thread id.");
     const { login } = await checkGh(ops.run);
+    // A remote session reaches the target only through a read grant, before the thread lookup reads it.
+    await allowRead(ops, ctx, t);
     const item = itemKeyOf(t);
     if (replyTo?.startsWith("PRRT_")) {
       const thread = await fetchThread(ops.run, replyTo);
