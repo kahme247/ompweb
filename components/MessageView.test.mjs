@@ -47,6 +47,35 @@ test("Delete confirmation never claims omp has not seen a message that may have 
   }
 });
 
+test("a queued message on its way stays hidden for a second; known-unqueued ones and prompts show at once", (t) => {
+  const base = { id: "held", message: "Queued text.", createdAt: Date.now(), local: true };
+  const shown = (held) => {
+    const view = render(React.createElement(HeldMessageView, { held }));
+    const count = view.container.querySelectorAll("[data-held-message]").length;
+    view.unmount();
+    return count;
+  };
+  for (const mode of ["followUp", "steer"]) {
+    for (const state of ["sending", "held", "delivering"]) assert.equal(shown({ ...base, mode, state }), 0, `${mode} ${state}`);
+    for (const state of ["failed", "waiting_host"]) assert.equal(shown({ ...base, mode, state }), 1, `${mode} ${state}`);
+  }
+  assert.equal(shown({ ...base, mode: "prompt", state: "sending" }), 1);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let reveals = 0;
+  const props = { held: { ...base, mode: "followUp", state: "sending" }, onReveal: () => { reveals += 1; } };
+  const view = render(React.createElement(HeldMessageView, props));
+  const count = () => view.container.querySelectorAll("[data-held-message]").length;
+  act(() => t.mock.timers.tick(999));
+  assert.equal(count(), 0);
+  act(() => view.rerender(React.createElement(HeldMessageView, { ...props, held: { ...props.held, state: "delivering" } })));
+  act(() => t.mock.timers.tick(1));
+  assert.equal(count(), 1, "the timer survives state changes along the way");
+  assert.equal(reveals, 1, "the chat is told so it can follow the late bubble");
+  act(() => view.rerender(React.createElement(HeldMessageView, { ...props, held: { ...props.held, state: "held" } })));
+  assert.equal(count(), 1, "a shown bubble stays shown");
+  view.unmount();
+});
+
 test("sent messages without timestamps or branch metadata still offer copy", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     message: { role: "user", content: "Keep this message copyable." },

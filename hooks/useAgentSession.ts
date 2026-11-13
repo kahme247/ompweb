@@ -4456,6 +4456,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleSteer = useCallback((message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => handleQueued("steer", message, images, uploads, uploadProofs), [handleQueued]);
   const handleFollowUp = useCallback((message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => handleQueued("followUp", message, images, uploads, uploadProofs), [handleQueued]);
 
+  // A held bubble that appears late (HeldMessageView's reveal delay) re-runs the follow-scroll effect.
+  const followHeldMessages = useCallback(() => setHeldFollow((n) => n + 1), []);
   const heldMessagesRef = useRef(heldMessages);
   heldMessagesRef.current = heldMessages;
   const localOutboxRef = useRef(localOutbox);
@@ -4961,7 +4963,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, handleFastModeChange, handleSlowModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply, setSkillStartupDiagnostics,
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handleAbortCompaction,
-    heldMessages, deleteHeldMessage,
+    heldMessages, deleteHeldMessage, followHeldMessages,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, removeQueuedMessage, promoteQueuedToSteer, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,

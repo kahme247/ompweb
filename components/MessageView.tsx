@@ -530,15 +530,32 @@ const heldActionStyle = {
   fontSize: 11, whiteSpace: "nowrap",
 } as const;
 
+/** How long a queued (follow-up or steer) held message stays hidden: omp's queue chip usually replaces it sooner. */
+const QUEUED_HELD_REVEAL_MS = 1000;
+
 /** A message omp-web holds until omp has it (docs/specs/2026-11-04-message-outbox-design.md O1): dimmed, after the
  * live turn, naming the leg it waits on. Delete only while nothing of it can have reached omp. */
-export function HeldMessageView({ held, hostLabel, onDelete }: {
+export function HeldMessageView({ held, hostLabel, onDelete, onReveal }: {
   held: HeldMessage;
   hostLabel?: string;
   onDelete?: (id: string) => void;
+  /** Called when a bubble that started hidden appears, so the chat can follow it. */
+  onReveal?: () => void;
 }) {
   const { t, locale } = useI18n();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // A queued message that is on its way would flash here before becoming omp's queue chip; one known not to be queued
+  // (failed, host offline) shows at once, and an idle prompt always does. Once shown, it stays shown.
+  const deferred = held.mode !== "prompt" && held.state !== "failed" && held.state !== "waiting_host";
+  const [revealed, setRevealed] = useState(!deferred);
+  useEffect(() => {
+    if (revealed) return;
+    const reveal = () => { setRevealed(true); onReveal?.(); };
+    if (!deferred) return reveal();
+    const timer = setTimeout(reveal, QUEUED_HELD_REVEAL_MS);
+    return () => clearTimeout(timer);
+  }, [revealed, deferred, onReveal]);
+  if (!revealed && deferred) return null;
   const failed = held.state === "failed";
   const status = failed
     ? held.mayHaveBeenSent ? t("heldMessage.mayHaveBeenSent") : held.error ? t("heldMessage.notSentReason", { reason: held.error }) : t("heldMessage.notSent")
