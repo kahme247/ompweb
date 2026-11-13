@@ -716,7 +716,7 @@
   "errors.not_a_file": "このパスはファイルではありません",
   "errors.not_a_skill_file": "このパスは SKILL.md ファイルではありません",
   "errors.not_a_worktree": "このリポジトリのワークツリーではありません",
-  "errors.omp_not_found": "omp バイナリが見つかりません。oh-my-pi をインストールするか、OMP_WEB_OMP_BIN を設定してください。",
+  "errors.omp_not_found": "ompweb の omp バイナリ (ompweb-omp) が見つかりません。ompweb を再インストールするか、OMP_WEB_OMP_BIN を設定してください。",
   "errors.package_required": "package が必要です",
   "errors.package_scope_together": "package と scope は同時に指定する必要があります",
   "errors.path_must_be_absolute": "パスは絶対パスである必要があります",

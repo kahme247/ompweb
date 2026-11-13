@@ -1,7 +1,7 @@
 import type { spawn } from "child_process";
 import { sanitizeProjectCommandEnvironment } from "../project-command-env";
 import { isRecord } from "../type-guards";
-import { resolveOmpBin } from "./omp-cli";
+import { OMP_NOT_FOUND, resolveOmpBin } from "./omp-cli";
 import { type RpcTransport, spawnLocalRpcTransport } from "./rpc-transport";
 import { LINK_LIMITS } from "../hosts/link-protocol";
 
@@ -106,7 +106,7 @@ export function spawnOmpTransport(options: RpcProcessOptions): RpcTransport {
   const resolveBin = options.dependencies?.resolveOmpBin ?? resolveOmpBin;
   const bin = resolveBin();
   if (!bin) {
-    throw new Error("ompweb's omp binary (ompweb-omp) not found. Reinstall ompweb or set OMP_WEB_OMP_BIN.");
+    throw new Error(OMP_NOT_FOUND);
   }
   const args = ["--headless", "--cwd", options.cwd, ...(options.extraArgs ?? [])];
   // omp-web ignores named profiles (OMP_PROFILE/PI_PROFILE): strip them so the

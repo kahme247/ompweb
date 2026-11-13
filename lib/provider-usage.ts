@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { resolveOmpBin } from "./omp/omp-cli";
+import { OMP_NOT_FOUND, resolveOmpBin } from "./omp/omp-cli";
 import { createChildProcessEnvironment } from "./project-command-env";
 import { asNumber, isRecord } from "./type-guards";
 import type {
@@ -213,7 +213,7 @@ export function parseProviderUsageOutput(output: string, query: UsageQuery = {},
 
 async function fetchProviderUsage(refresh = false): Promise<string> {
   const bin = resolveOmpBin();
-  if (!bin) throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
+  if (!bin) throw new Error(OMP_NOT_FOUND);
   if (refresh) {
     await execFileAsync(bin, ["usage", "invalidate"], {
       timeout: USAGE_TIMEOUT_MS,

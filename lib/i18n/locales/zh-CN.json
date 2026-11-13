@@ -716,7 +716,7 @@
   "errors.not_a_file": "该路径不是文件",
   "errors.not_a_skill_file": "该路径不是 SKILL.md 文件",
   "errors.not_a_worktree": "不是此仓库的工作树",
-  "errors.omp_not_found": "未找到 omp 可执行文件。请安装 oh-my-pi 或设置 OMP_WEB_OMP_BIN。",
+  "errors.omp_not_found": "未找到 ompweb 的 omp 可执行文件 (ompweb-omp)。请重新安装 ompweb 或设置 OMP_WEB_OMP_BIN。",
   "errors.package_required": "需要提供 package",
   "errors.package_scope_together": "package 和 scope 必须同时提供",
   "errors.path_must_be_absolute": "路径必须是绝对路径",

@@ -732,7 +732,7 @@
   "errors.not_a_file": "該路徑不是檔案",
   "errors.not_a_skill_file": "該路徑不是 SKILL.md 檔案",
   "errors.not_a_worktree": "不是此儲存庫的工作樹",
-  "errors.omp_not_found": "找不到 omp 執行檔。請安裝 oh-my-pi 或設定 OMP_WEB_OMP_BIN。",
+  "errors.omp_not_found": "找不到 ompweb 的 omp 執行檔 (ompweb-omp)。請重新安裝 ompweb 或設定 OMP_WEB_OMP_BIN。",
   "errors.package_required": "必須提供套件",
   "errors.package_scope_together": "必須同時提供套件（package）與範圍（scope）",
   "errors.path_must_be_absolute": "路徑必須是絕對路徑",
