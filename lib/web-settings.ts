@@ -17,6 +17,8 @@ export interface WebServerSettings {
    * or SSE reconnect).
    */
   agentToolsEnabled: boolean;
+  /** The GitHub agent tools may post and resolve threads as the server's `gh` account without asking the user each time. */
+  githubWritesUnasked: boolean;
   /**
    * Environment variables merged into the `omp` child process (issue #104).
    * Stored as a validated record; lib/omp/agent-env.ts owns the policy and
@@ -32,6 +34,7 @@ export interface WebServerSettings {
 const DEFAULTS: WebServerSettings = {
   autoResumeSessions: false,
   agentToolsEnabled: false,
+  githubWritesUnasked: false,
   agentEnv: {},
   browserTransport: "ws",
   uploadRetentionDays: DEFAULT_UPLOAD_RETENTION_DAYS,
@@ -73,6 +76,7 @@ export function loadWebServerSettings(): WebServerSettings {
         settings = {
           autoResumeSessions: raw.autoResumeSessions === true,
           agentToolsEnabled: raw.agentToolsEnabled === true,
+          githubWritesUnasked: raw.githubWritesUnasked === true,
           agentEnv: readAgentEnvRecord(raw.agentEnv),
           browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "ws",
           uploadRetentionDays: isUploadRetentionDays(raw.uploadRetentionDays) ? raw.uploadRetentionDays : DEFAULT_UPLOAD_RETENTION_DAYS,

@@ -18,8 +18,11 @@ import {
   type AgentToolContext,
   type AgentToolDeliverInput,
   type AgentToolDeliverResult,
+  type AgentToolHost,
   type AgentToolSessionOps,
 } from "./agent-tools";
+import { defaultGhRunner } from "./github/gh";
+import { GITHUB_REPLAY_SAFE_TOOLS } from "./github/tools";
 import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterruptedSessions, type InterruptibleSession } from "./session-resume";
 import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
@@ -1209,8 +1212,8 @@ export class AgentSessionWrapper {
       const key = `${event.type}:${event.id}`;
       if (this.deliveredCallbacks.has(key)) return;
       this.deliveredCallbacks.add(key);
-      // Only the read-only listing runs again (handled below); anything else may already have run.
-      if (this.replaying && !(event.type === "host_tool_call" && event.toolName === "list_sessions")) {
+      // Only the read-only listing and the idempotent GitHub tools run again (handled below); anything else may already have run.
+      if (this.replaying && !(event.type === "host_tool_call" && typeof event.toolName === "string" && (event.toolName === "list_sessions" || GITHUB_REPLAY_SAFE_TOOLS.has(event.toolName)))) {
         this.proc.sendFrame(event.type === "host_tool_call"
           ? { type: "host_tool_result", id: event.id, isError: true, result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] } }
           : { type: "host_uri_result", id: event.id, isError: true, error: AGENT_TOOL_UNKNOWN_OUTCOME });
@@ -1345,7 +1348,7 @@ export class AgentSessionWrapper {
         // is an explicit error, not a silent hang and not a browser call.
         if (id && toolName && AGENT_TOOL_NAMES.has(toolName)) {
           // Independent pooled creations have durable native-request identity; other mutations stay unknown.
-          if (this.replaying && toolName !== "list_sessions" && (toolName !== "new_session" || !loadWebServerSettings().agentToolsEnabled)) {
+          if (this.replaying && toolName !== "list_sessions" && !GITHUB_REPLAY_SAFE_TOOLS.has(toolName) && (toolName !== "new_session" || !loadWebServerSettings().agentToolsEnabled)) {
             this.proc.sendFrame({
               type: "host_tool_result",
               id,
@@ -3357,20 +3360,22 @@ const DELIVERY_COMMAND: Record<AgentToolDeliverInput["delivery"], string> = { pr
  * reads the turn's final text with get_last_assistant_text.
  */
 function createAgentToolOps(source: AgentToolContext, replaying: boolean): AgentToolSessionOps {
+  const hosts = (): AgentToolHost[] => {
+    const local = getHost(LOCAL_HOST_ID);
+    return [
+      { id: local.id, label: local.label, online: isLinkUp(local.status()), allowAgentStart: true },
+      ...listHosts().map((h) => ({ id: h.id, label: h.label, online: isLinkUp(h.status), allowAgentStart: h.allowAgentStart })),
+    ];
+  };
   return {
+    github: { run: defaultGhRunner, listHosts: hosts, writesUnasked: () => loadWebServerSettings().githubWritesUnasked },
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
       const sessions = await listSessionsAllHosts();
       return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id), hostId: s.hostId ?? LOCAL_HOST_ID }));
     },
 
-    listHosts() {
-      const local = getHost(LOCAL_HOST_ID);
-      return [
-        { id: local.id, label: local.label, online: isLinkUp(local.status()), allowAgentStart: true },
-        ...listHosts().map((h) => ({ id: h.id, label: h.label, online: isLinkUp(h.status), allowAgentStart: h.allowAgentStart })),
-      ];
-    },
+    listHosts: hosts,
 
     async createSession(input, authorize) {
       const authorizeHost = (host: Host) => {
