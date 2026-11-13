@@ -33,6 +33,24 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      # The omp the runners compile against: the fork's newest integration build, not runner/omp-build.json's pin
+      # (not committed back). No such release or a runner that fails tsc against it fails the release.
+      - name: Find the newest omp integration build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api repos/andrebrait/oh-my-pi/commits/integration-release --jq .sha)
+          tag=$(gh api --paginate 'repos/andrebrait/oh-my-pi/releases?per_page=100' --jq '.[].tag_name' \
+            | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]{12}\.g${sha:0:7}\$" | head -n 1 || true)
+          if [ -z "$tag" ]; then
+            echo "::error::andrebrait/oh-my-pi has no integration release for integration-release ($sha)"
+            exit 1
+          fi
+          echo "OMP_TAG=$tag" >> "$GITHUB_ENV"
+      # Without GH_TOKEN: bun install runs the omp packages' scripts.
+      - name: Pin the runner to it
+        run: npx bun runner/scripts/use-omp-build.ts "$OMP_TAG" && (cd runner && npx bun x tsc -p .)
       # Builds the omp runners too, which the source smoke spawns from runner/release/.
       - name: Build the release binaries
         run: sh scripts/build-release-binaries.sh
@@ -46,6 +64,7 @@ jobs:
         run: |
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             node bin/generate-release-notes.js --tag "$TAG" --output release-notes.md
+            printf '\nomp: andrebrait/oh-my-pi %s\n' "$OMP_TAG" >> release-notes.md
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file release-notes.md --draft
           fi
 
