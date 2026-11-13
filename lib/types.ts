@@ -449,6 +449,8 @@ export interface SessionInfo {
   /** Registered logical identity; physical owner/cwd/projectRoot remain unchanged. */
   poolId?: string;
   projectId?: string;
+  /** The agent asked for the user (`request_attention`) after the newest user message. */
+  attention?: { reason: string; at: string };
 }
 
 /** Metadata for a gzip-compressed session in OMP's archive tree. */

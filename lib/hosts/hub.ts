@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
 import { readBodyWithinLimit } from "../bounded-form-data";
+import { ATTENTION_REASON_MAX } from "../omp/session-files";
 import type { RpcTransport } from "../omp/rpc-transport";
 import type { ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
@@ -1071,14 +1072,21 @@ const nullableString = (value: unknown) => value === null || typeof value === "s
 /** A daemon's session-list entry reduced to SessionInfo's fields; null when one has the wrong type. */
 function sessionEntry(value: unknown): SessionInfo | null {
   if (!isRecord(value)) return null;
-  const { path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch } = value;
+  const { path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch, attention } = value;
+  // Optional: a malformed marker drops only the marker, never the session.
+  const mark = isRecord(attention) && typeof attention.reason === "string" && typeof attention.at === "string"
+    ? { reason: attention.reason.slice(0, ATTENTION_REASON_MAX), at: attention.at }
+    : undefined;
   if (
     typeof path !== "string" || typeof id !== "string" || !isValidSessionId(id) || typeof cwd !== "string"
     || typeof created !== "string" || typeof modified !== "string" || typeof firstMessage !== "string"
     || typeof messageCount !== "number" || !Number.isFinite(messageCount)
     || ![name, lastMessageAt, parentSessionId, projectRoot, projectKey, worktreeBranch].every(optionalString)
   ) return null;
-  return { path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch } as SessionInfo;
+  return {
+    path, id, cwd, name, created, modified, lastMessageAt, messageCount, firstMessage, parentSessionId, projectRoot, projectKey, worktreeBranch,
+    ...(mark ? { attention: mark } : {}),
+  } as SessionInfo;
 }
 
 /** A daemon's project-registry entry reduced to its known fields; null when one has the wrong type. */

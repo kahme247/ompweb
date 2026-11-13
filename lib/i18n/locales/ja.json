@@ -1203,6 +1203,8 @@
   "sessionSidebar.copyTranscriptFailed": "トランスクリプトをコピーできませんでした",
   "sessionSidebar.unsentDraft": "未送信の下書き",
   "sessionSidebar.awaitingInput": "入力を待っています",
+  "sessionSidebar.needsAttention": "要対応",
+  "sessionSidebar.attentionReason": "要対応: {reason}",
   "sessionSidebar.selectProjectFirst": "先にプロジェクトを選択してください",
   "sessionSidebar.switchWorktree": "ワークツリーを切り替え",
   "sessionSidebar.launchConfigDirectory": "ディレクトリ",

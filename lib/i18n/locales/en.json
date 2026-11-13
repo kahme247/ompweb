@@ -1246,6 +1246,8 @@
   "sessionSidebar.copyTranscriptFailed": "Could not copy the transcript",
   "sessionSidebar.unsentDraft": "Unsent draft",
   "sessionSidebar.awaitingInput": "Waiting for your input",
+  "sessionSidebar.needsAttention": "Needs attention",
+  "sessionSidebar.attentionReason": "Needs attention: {reason}",
   "sessionSidebar.selectProjectFirst": "Select a project first",
   "sessionSidebar.switchWorktree": "Switch worktree",
   "sessionSidebar.launchConfigDirectory": "Directory",

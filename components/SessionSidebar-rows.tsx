@@ -14,7 +14,8 @@ import { hasDraft, subscribeDrafts } from "@/lib/draft-store";
 import {
   MAX_PROJECT_SESSIONS,
   formatRelativeTime,
-  projectLabel,
+  sessionTitle,
+  workspaceLabel,
   type SessionTreeNode,
 } from "./SessionSidebar-helpers";
 import {
@@ -117,6 +118,8 @@ interface ProjectRowProps {
   /** A sort is active: show the pin toggle; only pinned rows reorder by hand. */
   pinnable: boolean;
   onTogglePin: (project: ManagedProject) => Promise<void>;
+  /** False where the list has a fixed order (Needs attention): no drag, no Move up/down. */
+  reorderable?: boolean;
   isDragTarget: boolean;
   removeBusy: boolean;
   onSelectSession: (s: SessionInfo) => void;
@@ -156,6 +159,7 @@ function ProjectRow({
   onMoveProject,
   pinnable,
   onTogglePin,
+  reorderable = true,
   isDragTarget,
   removeBusy,
   onSelectSession,
@@ -196,9 +200,9 @@ function ProjectRow({
     // The sidebar already reports failed presentation writes in a toast.
     void onUpdatePresentation(project, { alias }).catch(() => {});
   }, [aliasValue, project, onUpdatePresentation]);
-  const label = project.alias ?? project.name ?? projectLabel(project.path);
+  const label = workspaceLabel(project);
   const pinned = pinnable && project.pinOrder !== undefined;
-  const canReorder = !pinnable || pinned;
+  const canReorder = reorderable && (!pinnable || pinned);
   const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0 || activity.exited > 0));
   const visibleRoots = hiddenCount > 0 && !showAllSessions
     ? tree.slice(0, MAX_PROJECT_SESSIONS)
@@ -743,7 +747,9 @@ const SessionItem = memo(function SessionItem({
   const inputRef = useRef<HTMLInputElement>(null);
   const contentButtonRef = useRef<HTMLButtonElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
-  const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
+  const title = sessionTitle(session);
+  // The agent's request_attention reason; a running session is not waiting on it.
+  const attentionReason = isRunning ? undefined : session.attention?.reason;
   // A session's composer draft is keyed by its id (ChatWindow's `draftKey`).
   const hasUnsentDraft = useSyncExternalStore(subscribeDrafts, () => hasDraft(session.id), () => false);
   const relativeTime = formatRelativeTime(session.modified, locale, relativeTimeNow);
@@ -893,7 +899,7 @@ const SessionItem = memo(function SessionItem({
         <>
           {depth > 0 && <GitBranch size={11} strokeWidth={2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />}
           <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete" && !deleting) { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
-            <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
+            <span title={attentionReason ? `${title}\n${t("sessionSidebar.attentionReason", { reason: attentionReason })}` : title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
               {title}
             </span>
             {isAwaitingInput && (
