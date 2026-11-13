@@ -49,6 +49,13 @@ export async function PUT(req: Request) {
     patch.agentToolsEnabled = payload.agentToolsEnabled;
   }
 
+  if (payload.githubWritesUnasked !== undefined) {
+    if (typeof payload.githubWritesUnasked !== "boolean") {
+      return Response.json({ error: "githubWritesUnasked must be a boolean", code: "invalid_settings" }, { status: 400 });
+    }
+    patch.githubWritesUnasked = payload.githubWritesUnasked;
+  }
+
   if (payload.browserTransport !== undefined) {
     const transport = BROWSER_TRANSPORTS.find((value) => value === payload.browserTransport);
     if (!transport) {
