@@ -1966,6 +1966,9 @@ during the wait.
   activity is wrapped in `subagent_*` frames and never notifies. "Completed"
   fires on `session_settled` (not `prompt_result`), so background work started
   by the prompt is done too; a failed or aborted last prompt suppresses it.
+  On a shared daemon channel the other servers get that prompt's outcome as
+  `peer_prompt_outcome` (no command id), which only feeds their detector, so the
+  elected notifier hears a failure whichever server prompted.
   Auto-approved tool confirmations return before the hook and never notify.
   omp sends `retry_fallback_applied` before the `auto_retry_start` of the same
   failure, so the detector holds a reason-less fallback until that frame.

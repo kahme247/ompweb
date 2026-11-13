@@ -1,8 +1,10 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { HostChannel } from "../src/channel";
 import { createTestSession, type Frame, startHost, type TestHost, type TestSession } from "./harness";
 
@@ -160,6 +162,32 @@ describe("ompweb channel", () => {
 		// Proving an absence: wait out one real redial interval (2 s) of the channel's own timer.
 		await Bun.sleep(2_500);
 		expect(host.frames.filter(frame => frame.t === "hello")).toHaveLength(1);
+	});
+
+	it("sends a relocation's notice before the moved session's identity", async () => {
+		// An in-memory session never relocates; capture the persistence-notice observers to raise one by hand.
+		const observers: ((notice: SessionPersistenceNotice) => void)[] = [];
+		const subscribe = SessionManager.prototype.onPersistenceNotice;
+		SessionManager.prototype.onPersistenceNotice = function (cb) {
+			observers.push(cb);
+			return subscribe.call(this, cb);
+		};
+		try {
+			host = await startHost();
+			test = await createTestSession();
+			await host.connected;
+		} finally {
+			SessionManager.prototype.onPersistenceNotice = subscribe;
+		}
+		const to = path.join(os.tmpdir(), "moved.jsonl");
+		test.session.sessionManager.getSessionFile = () => to;
+		for (const observer of observers) observer({ reason: "open-elsewhere", from: "/elsewhere/original.jsonl", to });
+
+		const identity = await host.waitFor(frame => frame.t === "session");
+		expect(identity).toMatchObject({ sessionFile: to });
+		const notice = host.frames.findIndex(frame => eventType(frame) === "notice");
+		expect(notice).toBeGreaterThanOrEqual(0);
+		expect(notice).toBeLessThan(host.frames.indexOf(identity));
 	});
 
 	it("does not dial a socket in a directory others can write", async () => {

@@ -191,8 +191,10 @@ export function watchSessionIdentity(session: AgentSession, send: CommandContext
 		send({ t: "session", sessionId: session.sessionId, sessionFile: session.sessionFile, cwd: session.sessionManager.getCwd() });
 	};
 	const offChange = session.registerSessionChangeCallback(check);
-	// Relocation off a contended file changes the id without an AgentSession transition.
-	const offMove = session.sessionManager.onPersistenceNotice(check);
+	// Relocation off a contended file changes the id without an AgentSession transition. Deferred past every observer of
+	// the same notice, so the host reads the relocation `notice` before this frame whatever the subscription order: a
+	// `session` frame first reads as another conversation and drops the original id's aliases.
+	const offMove = session.sessionManager.onPersistenceNotice(() => queueMicrotask(check));
 	return () => {
 		offChange();
 		offMove();
