@@ -403,7 +403,8 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
             <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 12 }}>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <DialogTitle style={{ marginBottom: 2, fontSize: 16, lineHeight: 1.3 }}>
-                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--accent)", fontSize: 14 }}>{agent}</span>
+                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--accent)", fontSize: 14 }}>{subagent.id}</span>
+                  {agent && <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-dim)", fontSize: 12, marginLeft: 8 }}>{agent}</span>}
                 </DialogTitle>
                 {description && (
                   <div style={{ fontSize: 12.5, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 4 }}>
