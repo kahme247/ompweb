@@ -156,6 +156,8 @@ export interface AgentToolContext {
   guard: AgentToolGuard;
   /** Ask the calling session's user; resolves false when declined or the dialog is dropped. */
   confirm(title: string): Promise<boolean>;
+  /** Aborted by omp's host_tool_cancel for this call; a GitHub write checks it last, before posting. */
+  signal?: AbortSignal;
 }
 
 /**

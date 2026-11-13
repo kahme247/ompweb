@@ -426,6 +426,24 @@ export async function postComment(run: GhRunner, target: GithubTarget, body: str
   return { id: posted.node_id, url: posted.html_url };
 }
 
+/**
+ * The newest comment `login` posted on the item since `since` with exactly `body`, skipping ids in `skip`
+ * (earlier agent posts). Finds a post whose `gh` call failed after GitHub had taken it.
+ */
+export async function findOwnComment(
+  run: GhRunner,
+  target: GithubTarget,
+  { login, body, since, review, skip }: { login: string; body: string; since: string; review: boolean; skip: ReadonlySet<string> },
+): Promise<{ id: string; url: string } | undefined> {
+  const list = review ? "pulls" : "issues";
+  const comments = await restPages<{ node_id: string; html_url: string; body?: string; user?: { login: string } | null }>(
+    run,
+    `repos/${target.owner}/${target.repo}/${list}/${target.number}/comments?since=${encodeURIComponent(since)}`,
+  );
+  const found = comments.findLast((c) => c.user?.login === login && c.body === body && !skip.has(c.node_id));
+  return found && { id: found.node_id, url: found.html_url };
+}
+
 export async function resolveThread(run: GhRunner, threadId: string): Promise<void> {
   await graphql(run, RESOLVE_MUTATION, { threadId });
 }
