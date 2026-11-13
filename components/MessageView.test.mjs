@@ -406,6 +406,8 @@ test("task tool results render a per-subagent summary panel", () => {
   assert.match(html, /Subagents/);
   assert.match(html, /Map the surface/);
   assert.match(html, /Write the code/);
+  assert.match(html, />Scout</);
+  assert.match(html, /aria-label="Worker \(worker\): /);
   assert.match(html, /2 subagents/);
   assert.match(html, /999k tok/);
   assert.match(html, /gpt-5.6/);
