@@ -76,6 +76,9 @@ export const HISTORY_MUTATING_COMMANDS = new Set([
 export const MESSAGE_COMMANDS = new Set(["prompt", "steer", "follow_up", "followUp", "abort_and_prompt"]);
 /** Shared-channel marker a daemon puts in the other members' output when one link writes a message command. */
 export const PEER_MESSAGE_FRAME = "peer_message_command";
+/** Shared-channel frame `{t, outcome}` a daemon puts in the other members' output for one link's `prompt_result` or
+ * `prompt_error` (its command id dropped): the elected notifier must hear a run failed whichever server prompted it. */
+export const PEER_PROMPT_OUTCOME_FRAME = "peer_prompt_outcome";
 export type HostUriScheme = { scheme: string; writable: boolean };
 
 /** Named `req.args` keys for each session op, in parameter order. Named, not

@@ -943,7 +943,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 ### Session moves (omp >= 18.5 ownership) and title generation
 - Only the first omp process to write a session file owns it; a non-owner moves
   to a sibling file with a new id on its first write and emits a
-  `notice` with `source: "session-persistence"`. `handleFrame` answers it with
+  `notice` with `source: "session-persistence"` (the runner sends it before the
+  new `session` frame, which the daemon's `ChannelTable` reads the same way). `handleFrame` answers it with
   `followSessionMove()`: the pending flag makes the next `applyIdentity` treat
   the id change as the same conversation (stream/run state kept, **old id kept
   as a registry alias**, new id registered via `onIdentityChange({keepOldId})`).

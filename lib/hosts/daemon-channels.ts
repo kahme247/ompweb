@@ -5,7 +5,7 @@ import { readSessionHeaderSync } from "../omp/session-files";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import type { DaemonLink } from "./daemon-link";
-import { CONFIG_VERSION_RE, CREATION_ID_RE, HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
+import { CONFIG_VERSION_RE, CREATION_ID_RE, HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, PEER_PROMPT_OUTCOME_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
 import { CHANNEL_PROTO } from "./omp-socket";
 import { idOf, parseWire, PendingRequests, wireEvent, type WireFrame } from "./pending-requests";
 import { StreamSnapshot } from "./stream-snapshot";
@@ -383,6 +383,11 @@ export class ChannelTable {
         if (frame.t !== "bash_output") channel.commands.delete(frame.id);
         const member = owner.link && channel.members.get(owner.link.id);
         if (member) this.deliver(channel, member, { type: "stdout", ch: channel.ch, line: JSON.stringify({ ...frame, id: owner.id }) });
+        if (frame.t !== "bash_output") {
+          const outcome: WireFrame = { ...frame }; delete outcome.id;
+          const peer = JSON.stringify({ t: PEER_PROMPT_OUTCOME_FRAME, outcome });
+          for (const other of channel.members.values()) if (other !== member) this.deliver(channel, other, { type: "stdout", ch: channel.ch, line: peer });
+        }
         return;
       }
     }
