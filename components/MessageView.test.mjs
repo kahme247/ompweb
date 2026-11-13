@@ -407,6 +407,8 @@ test("task tool results render a per-subagent summary panel", () => {
   assert.match(html, /Map the surface/);
   assert.match(html, /Write the code/);
   assert.match(html, />Scout</);
+  // A long job ID is capped to a share of the row so the task text keeps visible width.
+  assert.match(html, /<span title="Scout" style="[^"]*max-width:min\(200px, 40%\)/);
   assert.match(html, /aria-label="Worker \(worker\): /);
   assert.match(html, /2 subagents/);
   assert.match(html, /999k tok/);

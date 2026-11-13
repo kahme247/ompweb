@@ -94,7 +94,7 @@ export function TaskResultPanel({ details }: { details: unknown }) {
           >
             <TaskResultStatusIcon status={status} />
             {typeof row.id === "string" && (
-              <span title={row.id} style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", minWidth: 0, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span title={row.id} style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", minWidth: 0, maxWidth: "min(200px, 40%)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {row.id}
               </span>
             )}
