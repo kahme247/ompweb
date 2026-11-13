@@ -164,7 +164,7 @@ test("status/drain/resume consume the real CLI daemon endpoint and SIGTERM remov
     status = JSON.parse((await hostCommand(f.env, "status")).stdout);
   }
   assert.equal(status.pid, daemon.child.pid, "the launcher must not leave a wrapper PID");
-  assert.equal(status.protocol, 10);
+  assert.equal(status.protocol, (await import("../lib/hosts/link-protocol.ts")).LINK_PROTOCOL_VERSION);
   assert.equal(status.drained, false);
   assert.equal(hellos, 1);
   assert.equal(JSON.stringify(status).includes("private-cli-fixture-token"), false);
