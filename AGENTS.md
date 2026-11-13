@@ -1231,6 +1231,9 @@ during the wait.
   Startup recovery fails a same-PID `delivering` row (a reused PID from the
   last run) unless this process holds that claim in memory: an add accepted
   before a delayed startup retry may already be in flight.
+  A steer waits (`held`, retried every `RETRY_MS`) while an ask (`askDialog`/
+  `formDialog`) is open, since omp's ask tool aborts on a user steer; the
+  composer is hidden then, as in omp's TUI, and `send_to_session` refuses a steer.
   Host offline → `waiting_host`; uncertain replies/child exits while delivering
   → `failed` with `mayHaveBeenSent`, never independently resent. Anything that
   stops an entry before its native write (an error before the claim, omp exiting

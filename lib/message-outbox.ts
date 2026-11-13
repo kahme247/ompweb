@@ -787,6 +787,9 @@ async function deliver(entry: Row): Promise<Outcome> {
   // A cold start can discover native aliases. Re-select across them before claiming, so an older alias wins.
   const oldest = db().prepare(`SELECT id FROM entries WHERE session_id IN (${slots(keys)}) AND state IN ('held', 'waiting_host') ORDER BY rowid LIMIT 1`).get(...keys) as { id: string } | null;
   if (oldest?.id !== current.id) return "next";
+  // A steer would interrupt an open ask; like omp's TUI, nothing steers until it is answered.
+  // shortcut: polled every RETRY_MS, so it goes up to 5 s after the answer; pump on the dialog's settle if that shows.
+  if (!idle && current.mode === "steer" && wrapper.isAwaitingAsk()) return retry(current);
   // Give legacy accepted authority its immutable generation before transcript/attachment preparation can yield.
   for (const receipt of current.upload_receipts ? JSON.parse(current.upload_receipts) as OutboxUploadReceipt[] : []) {
     if (receipt.completionKey !== undefined) continue;

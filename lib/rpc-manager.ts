@@ -601,6 +601,14 @@ export class AgentSessionWrapper {
     return this.pendingUiRequests.size > 0;
   }
 
+  /** An open ask (askDialog/formDialog): omp's ask tool aborts on a user steer ("Ask interrupted by message"). */
+  isAwaitingAsk(): boolean {
+    for (const event of this.pendingUiRequests.values()) {
+      if (event.method === "askDialog" || event.method === "formDialog") return true;
+    }
+    return false;
+  }
+
   /** Local history navigation is busy control work, not an interruptible model turn. */
   isEditingHistory(): boolean {
     return this.historyEditInFlight;
@@ -3414,6 +3422,9 @@ function createAgentToolOps(source: AgentToolContext, replaying: boolean): Agent
         }
         if (input.delivery === "steer" && !wasRunning) {
           throw new Error("Target session is not running; use delivery \"prompt\" to start a turn.");
+        }
+        if (input.delivery === "steer" && target.isAwaitingAsk()) {
+          throw new Error("Target session is waiting for its user to answer a question, which a steer would interrupt; use delivery \"followUp\".");
         }
         const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
         const waiter = input.wait ? target.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
