@@ -139,8 +139,9 @@ export async function DELETE(
     clearExitedRpcSession(id);
     try {
       removeSessionWatches(id);
-    } catch {
+    } catch (error) {
       // The delete succeeded; a watch left behind ends at the outbox's 404 for this session.
+      console.warn(`[omp-web] GitHub watches of ${id} were not removed: ${error instanceof Error ? error.message : String(error)}`);
     }
     return Response.json({ ok: true, ...result.value });
   } catch (error) {
