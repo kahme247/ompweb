@@ -1,4 +1,4 @@
-import { mkdirSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { Database } from "bun:sqlite";
 import { getAgentDir } from "../omp/paths";
@@ -65,10 +65,13 @@ function transaction<T>(db: Database, run: () => T): T {
   }
 }
 
+const storeDir = (): string => join(getAgentDir(), "omp-web");
+const storePath = (): string => join(storeDir(), "github-watches.sqlite");
+
 /** The store for the current agent directory; reopened when PI_CODING_AGENT_DIR changes. */
 function db(): Database {
-  const dir = join(getAgentDir(), "omp-web");
-  const path = join(dir, "github-watches.sqlite");
+  const dir = storeDir();
+  const path = storePath();
   const cached = globalThis.__ompGithubWatchStore;
   if (cached?.path === path) return cached.db;
   const database = open(dir, path);
@@ -76,6 +79,15 @@ function db(): Database {
   closeWatchStore();
   globalThis.__ompGithubWatchStore = { path, db: database };
   return database;
+}
+
+/**
+ * The store only if this agent directory has one: a session delete or move must not create (and on Windows
+ * hold open) a store nobody watches from. A file that exists but cannot be opened still throws.
+ */
+function existingDb(): Database | undefined {
+  const path = storePath();
+  return globalThis.__ompGithubWatchStore?.path === path || existsSync(path) ? db() : undefined;
 }
 
 /** Closes the cached store. `close(true)` finalizes the statements still alive: without it the file stays open until GC, and Windows keeps it locked. */
@@ -143,7 +155,8 @@ export function removeWatch(sessionId: string, itemKey: string): boolean {
 
 /** The session is gone: its watches, pending updates and read grants go. */
 export function removeSessionWatches(sessionId: string): void {
-  const d = db();
+  const d = existingDb();
+  if (!d) return;
   transaction(d, () => {
     d.prepare("DELETE FROM pending WHERE session_id = ?").run(sessionId);
     d.prepare("DELETE FROM watches WHERE session_id = ?").run(sessionId);
@@ -237,7 +250,8 @@ export function grantRead(sessionId: string, repoKey: string): void {
  */
 export function renameSession(oldId: string, newId: string): void {
   if (oldId === newId) return;
-  const d = db();
+  const d = existingDb();
+  if (!d) return;
   transaction(d, () => {
     const movedItems = "SELECT item_key FROM watches WHERE session_id = ?";
     d.prepare(`DELETE FROM pending WHERE session_id = ? AND item_key IN (${movedItems})`).run(newId, oldId);
