@@ -50,6 +50,9 @@ type ChannelDeps = {
 };
 const collision = () => new HostOpError(409, "session_running_elsewhere", "This session is already running on another link");
 const invalid = (message = "Invalid channel request") => new HostOpError(400, "invalid_request", message);
+/** omp's post-`ready` startup work (model refresh, plugin updates, hooks) can hold its first answers past 5 s.
+ * One budget for the whole configure keeps `open` inside the hub's channelReadyMs + opTimeoutMs. */
+const STARTUP_COMMAND_MS = 30_000;
 /** A process start's launch, from what its opener asked: the wire never names the credentials server (it is the opening
  * link's own, and only when the hub asks), and a configuration version passes only in its one valid form. */
 function forStart(launch: SpawnRequest, link: DaemonLink, opener: SpawnRequest): SpawnRequest {
@@ -322,24 +325,26 @@ export class ChannelTable {
     const supported = ready?.supportedProtocolVersions;
     const supportsV2 = Array.isArray(supported) && supported.includes(2);
     let delta = false;
+    const deadline = Date.now() + STARTUP_COMMAND_MS;
+    const startup = (frame: RpcFrameRecord) => this.command(channel, frame, undefined, Math.max(1, deadline - Date.now()));
     if (supportsV2) {
-      try { const reply = await this.command(channel, { type: "negotiate_protocol", protocolVersion: 2 }); delta = isRecord(reply.data) && reply.data.protocolVersion === 2; }
+      try { const reply = await startup({ type: "negotiate_protocol", protocolVersion: 2 }); delta = isRecord(reply.data) && reply.data.protocolVersion === 2; }
       catch { /* Older omp stays on full updates. */ }
     }
-    try { await this.command(channel, { type: "set_event_filter", events: null, messageUpdates: delta ? "delta" : "full" }); }
-    catch { if (delta) await this.command(channel, { type: "set_event_filter", events: null, messageUpdates: "full" }).catch(() => {}); }
-    await this.command(channel, { type: "set_subagent_subscription", level: "events" }).catch(() => {});
-    await this.command(channel, { type: "set_ask_dialog", enabled: true }).catch(() => {});
-    await this.command(channel, { type: "get_state" }).catch(() => {});
+    try { await startup({ type: "set_event_filter", events: null, messageUpdates: delta ? "delta" : "full" }); }
+    catch { if (delta) await startup({ type: "set_event_filter", events: null, messageUpdates: "full" }).catch(() => {}); }
+    await startup({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+    await startup({ type: "set_ask_dialog", enabled: true }).catch(() => {});
+    await startup({ type: "get_state" }).catch(() => {});
   }
 
-  private command(channel: Channel, frame: RpcFrameRecord, onReply?: () => void): Promise<RpcFrameRecord> {
+  private command(channel: Channel, frame: RpcFrameRecord, onReply?: () => void, timeoutMs = 5000): Promise<RpcFrameRecord> {
     if (channel.exited) return Promise.reject(new Error("omp exited"));
     const id = `d:${++this.commandId}`, command = { ...frame, id };
     let line: string;
     try { line = encodeRpcCommand(command); } catch (error) { return Promise.reject(error); }
     const { promise, resolve, reject } = Promise.withResolvers<RpcFrameRecord>();
-    const timer = setTimeout(() => { channel.internal.delete(id); channel.lifecycle?.forgetCommand(id); reject(new Error(`omp ${frame.type} timed out`)); }, 5000); timer.unref?.();
+    const timer = setTimeout(() => { channel.internal.delete(id); channel.lifecycle?.forgetCommand(id); reject(new Error(`omp ${frame.type} timed out`)); }, timeoutMs); timer.unref?.();
     channel.internal.set(id, { resolve, reject, timer, onReply }); channel.lifecycle?.noteStdin(command);
     channel.transport.write(line, error => {
       if (error) { const pending = channel.internal.get(id); if (!pending) return; clearTimeout(pending.timer); channel.internal.delete(id); channel.lifecycle?.forgetCommand(id, true); reject(error); }
