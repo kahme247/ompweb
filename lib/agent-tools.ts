@@ -1,5 +1,6 @@
 import type { HostToolDefinition } from "./pi-types";
 import { isRecord } from "./type-guards";
+import { GITHUB_TOOL_DEFINITIONS, GITHUB_TOOL_NAMES, executeGithubTool, type GithubToolOps } from "./github/tools";
 
 /**
  * Server-side agent tools for issue #275: tools an agent running inside
@@ -18,7 +19,7 @@ import { isRecord } from "./type-guards";
  */
 
 /** Tools the server answers itself. Browser-routed tools are unaffected. */
-export const AGENT_TOOL_NAMES = new Set(["list_sessions", "new_session", "send_to_session"]);
+export const AGENT_TOOL_NAMES = new Set(["list_sessions", "new_session", "send_to_session", ...GITHUB_TOOL_NAMES]);
 
 export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
   {
@@ -70,6 +71,7 @@ export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
       required: ["sessionId", "message"],
     },
   },
+  ...GITHUB_TOOL_DEFINITIONS,
 ];
 
 /** A message that would also be rejected by the HTTP body limit is too big to relay. */
@@ -146,6 +148,8 @@ export interface AgentToolSessionOps {
   deliver(input: AgentToolDeliverInput): Promise<AgentToolDeliverResult>;
   /** The host a session lives on; null when no host has it. */
   sessionHostId(sessionId: string): Promise<string | null>;
+  /** The GitHub tools' `gh` runner, host list and write setting. */
+  github: GithubToolOps;
 }
 
 export interface AgentToolContext {
@@ -318,7 +322,7 @@ function resolveHost(hosts: AgentToolHost[], host: string): AgentToolHost {
 }
 
 /** A host's allowAgentStart covers its agents' calls; a remote caller always asks before reaching this machine. */
-function startsUnasked(target: AgentToolHost, sourceHostId: string): boolean {
+export function startsUnasked(target: AgentToolHost, sourceHostId: string): boolean {
   return target.allowAgentStart && !(target.id === "local" && sourceHostId !== "local");
 }
 
@@ -339,6 +343,11 @@ export async function executeAgentTool(
   }
   if (!AGENT_TOOL_NAMES.has(toolName)) throw new Error(`Unknown agent tool: ${toolName}.`);
   const record = asRecord(args);
+
+  if (GITHUB_TOOL_NAMES.has(toolName)) {
+    ctx.guard.checkRate(ctx.sourceSessionId);
+    return executeGithubTool(toolName, record, ops.github, ctx);
+  }
 
   if (toolName === "list_sessions") {
     ctx.guard.checkRate(ctx.sourceSessionId);
