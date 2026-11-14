@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
+import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "../image-attachments";
 import { loadWebServerSettings } from "../web-settings";
 import { fetchSnapshot } from "./api";
-import { diffSnapshot, formatUpdate, updateEntryId } from "./events";
+import { diffSnapshot, formatUpdate, splitUpdateEvents, updateEntryId } from "./events";
 import { checkGh, defaultGhRunner, formatTarget, GhUnavailableError, parseGithubTarget, type GhRunner } from "./gh";
-import { closeWatchStore, commitUpdate, getPending, isPosting, listWatches, postedIds, removeSessionWatches, renameSession, setPending, type PendingUpdate, type Watch } from "./watch-store";
+import { advanceCursor, advancePendingBatch, claimPending, closeWatchStore, commitUpdate, getPending, isPosting, listWatches, postedIds, removeSessionWatches, renameSession, type PendingUpdate, type Watch } from "./watch-store";
 
 /**
  * Server-only poller: every watched item is fetched once per interval (items
@@ -29,6 +30,18 @@ const ITEM_SPACING_MS = 1500;
 /** Below this many points left, polling waits for the reset so the user's own `gh` keeps working. */
 const BUDGET_FLOOR = 200;
 
+// Both generated tokens are fixed-length base64url strings and do not need JSON escaping.
+const OUTBOX_ID_PLACEHOLDER = `gh-${"0".repeat(40)}`;
+const OUTBOX_SCOPE_PLACEHOLDER = "0".repeat(43);
+const EMPTY_OUTBOX_COMMAND_BYTES = Buffer.byteLength(JSON.stringify({
+  type: "outbox_add",
+  id: OUTBOX_ID_PLACEHOLDER,
+  scope: OUTBOX_SCOPE_PLACEHOLDER,
+  mode: "prompt",
+  message: "",
+}));
+const MAX_UPDATE_MESSAGE_CONTENT_BYTES = MAX_AGENT_COMMAND_REQUEST_BYTES - EMPTY_OUTBOX_COMMAND_BYTES;
+
 interface Outage {
   message: string;
   minute: number;
@@ -41,7 +54,7 @@ interface WatcherState {
   cancels: Set<() => void>;
   inFlight: Set<string>;
   failing: Set<string>;
-  /** Watches whose refused update was logged ("session\0item"). */
+  /** Refusals already logged by watch; retained size errors use a separate key. */
   refused: Set<string>;
   /** Epoch ms of the GraphQL budget reset polling waits for. */
   budgetResetAt?: number;
@@ -82,29 +95,159 @@ const defaultSchedule: Required<WatcherDeps>["schedule"] = (fn, ms) => {
 const warn = (what: string, error: unknown) => console.warn(`[omp-web] github watcher: ${what}: ${error instanceof Error ? error.message : String(error)}`);
 
 /**
- * Delivers a stored update; `ok` saves its cursor, `gone` ends the session's watches, `retry` leaves the row for the next poll.
- * `rejected` drops the update but saves its cursor, so the watch goes on instead of retrying a refusal forever.
+ * Delivers persisted batches in order; only the final accepted batch commits the cursor or removes a final watch.
  */
-async function deliverPending(state: WatcherState, sessionId: string, itemKey: string, pending: PendingUpdate): Promise<void> {
-  const outcome = await state.deps.deliver(sessionId, pending.entryId, pending.message);
-  if (outcome === "gone") removeSessionWatches(sessionId);
-  else if (outcome !== "retry") {
-    const watchKey = `${sessionId}\0${itemKey}`;
-    if (outcome !== "ok" && !state.refused.has(watchKey)) {
-      state.refused.add(watchKey);
-      console.warn(`[omp-web] github watcher: the outbox of ${sessionId} refused an update for ${itemKey} (${outcome.rejected}); dropped it`);
+async function deliverPending(state: WatcherState, watch: Watch, pending: PendingUpdate): Promise<void> {
+  const { sessionId, itemKey, registrationId } = watch;
+  while (true) {
+    if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+    if (pending.batchIndex === pending.batches.length) {
+      commitUpdate(sessionId, itemKey, registrationId, pending.entryId, pending.cursor, pending.final);
+      return;
     }
-    commitUpdate(sessionId, itemKey, pending.cursor, pending.final);
+    const batch = pending.batches[pending.batchIndex];
+    const outcome = await state.deps.deliver(sessionId, batch.entryId, batch.message);
+    if (outcome === "gone") {
+      if (!state.stopped && loadWebServerSettings().agentToolsEnabled) {
+        removeSessionWatches(sessionId, { itemKey, registrationId, entryId: pending.entryId });
+      }
+      return;
+    }
+    if (outcome === "retry" || state.stopped) return;
+    if (outcome !== "ok") {
+      const watchKey = `${sessionId}\0${itemKey}`;
+      if (outcome.rejected.startsWith("413")) {
+        const sizeKey = `${watchKey}\0size`;
+        if (!state.refused.has(sizeKey)) {
+          state.refused.add(sizeKey);
+          console.warn(`[omp-web] github watcher: the outbox of ${sessionId} rejected an oversized update batch for ${itemKey} (${outcome.rejected}); batch retained`);
+        }
+        return;
+      }
+      if (!state.refused.has(watchKey)) {
+        state.refused.add(watchKey);
+        console.warn(`[omp-web] github watcher: the outbox of ${sessionId} refused an update for ${itemKey} (${outcome.rejected}); dropped it`);
+      }
+    }
+    if (!advancePendingBatch(sessionId, itemKey, registrationId, pending.entryId, pending.batchIndex)) return;
+    const next = getPending(sessionId, itemKey, registrationId);
+    if (!next) return;
+    pending = next;
   }
 }
+async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
+  if (state.stopped || !loadWebServerSettings().agentToolsEnabled || state.inFlight.has(itemKey)) return;
+  state.inFlight.add(itemKey);
+  try {
+    const watches = listWatches().filter((w) => w.itemKey === itemKey);
+    // A stored update is redelivered as it is; only watches without one are diffed anew.
+    const fresh: Watch[] = [];
+    for (const watch of watches) {
+      const pending = getPending(watch.sessionId, itemKey, watch.registrationId);
+      if (pending) await deliverPending(state, watch, pending);
+      else fresh.push(watch);
+    }
+    if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+    if (!fresh.length) return;
+    if (isPosting(itemKey)) return;
+    // A low GraphQL budget waits for its reset; stored updates above cost no GitHub call.
+    if (state.deps.now() < (state.budgetResetAt ?? 0)) return;
 
-/** Same id for the same session, kind and minute, so a repeat after a crash collapses in the outbox. */
+    const target = parseGithubTarget(itemKey);
+    const targetText = formatTarget(target);
+    // Ids every watch already knows: paging stops there, so a lagging watch still sees what came after its own cursor.
+    const known = fresh.map((w) => new Set([...w.cursor.commentIds, ...w.cursor.reviewIds]));
+    const since = new Set([...known[0]].filter((id) => known.every((ids) => ids.has(id))));
+    let snapshot;
+    try {
+      await checkGh(state.deps.run, state.deps.now); // gh missing or logged out arrives as GhUnavailableError only through here
+      if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+      snapshot = await fetchSnapshot(state.deps.run, target, since);
+    } catch (error) {
+      if (error instanceof GhUnavailableError) await announcePaused(state, error.message);
+      else if (!state.failing.has(itemKey)) {
+        state.failing.add(itemKey);
+        warn(`${itemKey} could not be fetched`, error);
+      }
+      return;
+    }
+    if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+    state.failing.delete(itemKey);
+    await announceResumed(state);
+    if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+    const budget = snapshot.rateLimit;
+    if (budget && budget.remaining < BUDGET_FLOOR && state.deps.now() >= (state.budgetResetAt ?? 0)) {
+      state.budgetResetAt = Date.parse(budget.resetAt) || state.deps.now() + INTERVAL_MS;
+      console.warn(`[omp-web] github watcher: GraphQL budget low (${budget.remaining} points left); polling paused until ${budget.resetAt}`);
+    }
+
+    for (const watch of fresh) {
+      if (state.stopped || !loadWebServerSettings().agentToolsEnabled || isPosting(itemKey)) return;
+      let diff = diffSnapshot(watch.cursor, snapshot, postedIds(itemKey));
+      if (!diff.events.length && JSON.stringify(diff.cursor) === JSON.stringify(watch.cursor)) continue;
+
+      // Re-read shared post state immediately before mutating this watch; the SQL guards repeat it atomically.
+      if (state.stopped || !loadWebServerSettings().agentToolsEnabled || isPosting(itemKey)) return;
+      diff = diffSnapshot(watch.cursor, snapshot, postedIds(itemKey));
+      if (!diff.events.length) {
+        advanceCursor(watch.sessionId, itemKey, watch.registrationId, watch.cursor, diff.cursor);
+        continue;
+      }
+
+      const { events, cursor } = diff;
+      let batches: PendingUpdate["batches"];
+      try {
+        batches = splitUpdateEvents(targetText, snapshot.url, events, MAX_UPDATE_MESSAGE_CONTENT_BYTES).map((batchEvents, index) => {
+          const entryId = updateEntryId(`${watch.sessionId}\0${itemKey}\0${watch.registrationId}\0batch:${index}`, batchEvents);
+          const message = formatUpdate(targetText, snapshot.url, batchEvents);
+          const bytes = Buffer.byteLength(JSON.stringify({
+            type: "outbox_add",
+            id: entryId,
+            scope: OUTBOX_SCOPE_PLACEHOLDER,
+            mode: "prompt",
+            message,
+          }));
+          if (bytes > MAX_AGENT_COMMAND_REQUEST_BYTES) throw new RangeError("A GitHub update batch exceeds the agent command size limit.");
+          return { entryId, message };
+        });
+      } catch (error) {
+        const watchKey = `${watch.sessionId}\0${itemKey}`;
+        if (!state.refused.has(watchKey)) {
+          state.refused.add(watchKey);
+          warn(`${itemKey} has an event that exceeds the agent command size limit`, error);
+        }
+        continue;
+      }
+      const update: PendingUpdate = {
+        entryId: updateEntryId(`${watch.sessionId}\0${itemKey}\0${watch.registrationId}\0update`, events),
+        cursor,
+        final: events.some((e) => e.kind === "merged" || e.kind === "closed"),
+        batches,
+        batchIndex: 0,
+      };
+      if (state.stopped || !loadWebServerSettings().agentToolsEnabled || isPosting(itemKey)) return;
+      const eventIds = events.flatMap((event) => {
+        if (event.kind === "review" && event.databaseId !== undefined) return [event.id, `review:${event.databaseId}`];
+        return [event.id];
+      });
+      const claimed = claimPending(watch.sessionId, itemKey, watch.registrationId, watch.cursor, update, eventIds);
+      if (claimed) await deliverPending(state, watch, claimed);
+    }
+  } catch (error) {
+    warn(`${itemKey} poll failed`, error);
+  } finally {
+    state.inFlight.delete(itemKey);
+  }
+}
 async function notify(state: WatcherState, sessionId: string, kind: "paused" | "resumed", minute: number, text: string): Promise<boolean> {
+  if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return false;
   const id = `gh-${createHash("sha256").update(`${sessionId}\0${kind}\0${minute}`).digest("base64url").slice(0, 40)}`;
   const outcome = await state.deps.deliver(sessionId, id, `GitHub update (omp-web): ${text}`);
+  if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return false;
   if (outcome === "gone") removeSessionWatches(sessionId);
   return outcome !== "retry";
 }
+
 
 async function announcePaused(state: WatcherState, message: string): Promise<void> {
   if (!state.outage || state.outage.recovered) state.outage = { message, minute: Math.floor(state.deps.now() / 60_000), paused: new Set() };
@@ -127,70 +270,6 @@ async function announceResumed(state: WatcherState): Promise<void> {
   if (recovered.told.size === outage.paused.size) state.outage = undefined;
 }
 
-async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
-  if (state.stopped || !loadWebServerSettings().agentToolsEnabled || state.inFlight.has(itemKey)) return;
-  state.inFlight.add(itemKey);
-  try {
-    const watches = listWatches().filter((w) => w.itemKey === itemKey);
-    // A stored update is redelivered as it is; only watches without one are diffed anew.
-    const fresh: Watch[] = [];
-    for (const watch of watches) {
-      const pending = getPending(watch.sessionId, itemKey);
-      if (pending) await deliverPending(state, watch.sessionId, itemKey, pending);
-      else fresh.push(watch);
-    }
-    if (!fresh.length) return;
-    // A low GraphQL budget waits for its reset; stored updates above cost no GitHub call.
-    if (state.deps.now() < (state.budgetResetAt ?? 0)) return;
-
-    const target = parseGithubTarget(itemKey);
-    // Ids every watch already knows: paging stops there, so a lagging watch still sees what came after its own cursor.
-    const known = fresh.map((w) => new Set([...w.cursor.commentIds, ...w.cursor.reviewIds]));
-    const since = new Set([...known[0]].filter((id) => known.every((ids) => ids.has(id))));
-    let snapshot;
-    try {
-      await checkGh(state.deps.run, state.deps.now); // gh missing or logged out arrives as GhUnavailableError only through here
-      snapshot = await fetchSnapshot(state.deps.run, target, since);
-    } catch (error) {
-      if (error instanceof GhUnavailableError) await announcePaused(state, error.message);
-      else if (!state.failing.has(itemKey)) {
-        state.failing.add(itemKey);
-        warn(`${itemKey} could not be fetched`, error);
-      }
-      return;
-    }
-    state.failing.delete(itemKey);
-    await announceResumed(state);
-    const budget = snapshot.rateLimit;
-    if (budget && budget.remaining < BUDGET_FLOOR && state.deps.now() >= (state.budgetResetAt ?? 0)) {
-      state.budgetResetAt = Date.parse(budget.resetAt) || state.deps.now() + INTERVAL_MS;
-      console.warn(`[omp-web] github watcher: GraphQL budget low (${budget.remaining} points left); polling paused until ${budget.resetAt}`);
-    }
-    // An agent post to this item may be in the snapshot before its id is recorded: the next poll diffs it.
-    if (isPosting(itemKey)) return;
-
-    const posted = postedIds(itemKey);
-    for (const watch of fresh) {
-      const { events, cursor } = diffSnapshot(watch.cursor, snapshot, posted);
-      if (!events.length) {
-        if (JSON.stringify(cursor) !== JSON.stringify(watch.cursor)) commitUpdate(watch.sessionId, itemKey, cursor, false);
-        continue;
-      }
-      const update = {
-        // createdAt: a close after a re-watch repeats the first close's event id, and the outbox keeps delivered ids for days.
-        entryId: updateEntryId(`${watch.sessionId}\0${itemKey}\0${watch.createdAt}`, events),
-        message: formatUpdate(formatTarget(target), snapshot.url, events),
-        cursor,
-        final: events.some((e) => e.kind === "merged" || e.kind === "closed"),
-      };
-      if (setPending(watch.sessionId, itemKey, update)) await deliverPending(state, watch.sessionId, itemKey, update);
-    }
-  } catch (error) {
-    warn(`${itemKey} poll failed`, error);
-  } finally {
-    state.inFlight.delete(itemKey);
-  }
-}
 
 const itemsOf = (): string[] => [...new Set(listWatches().map((w) => w.itemKey))];
 
