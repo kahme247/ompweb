@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { DatabaseSync } from "node:sqlite";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { getAgentDir } from "./omp/paths";
 import { BROWSER_TRANSPORTS, type BrowserTransport, type BrowserTransportState } from "./event-stream-protocol";
@@ -17,6 +18,8 @@ export interface WebServerSettings {
    * or SSE reconnect).
    */
   agentToolsEnabled: boolean;
+  /** The GitHub agent tools may post and resolve threads as the server's `gh` account without asking the user each time. */
+  githubWritesUnasked: boolean;
   /**
    * Environment variables merged into the `omp` child process (issue #104).
    * Stored as a validated record; lib/omp/agent-env.ts owns the policy and
@@ -32,6 +35,7 @@ export interface WebServerSettings {
 const DEFAULTS: WebServerSettings = {
   autoResumeSessions: false,
   agentToolsEnabled: false,
+  githubWritesUnasked: false,
   agentEnv: {},
   browserTransport: "ws",
   uploadRetentionDays: DEFAULT_UPLOAD_RETENTION_DAYS,
@@ -56,6 +60,45 @@ function settingsPath(): string {
   return resolve(getAgentDir(), "omp-web-settings.json");
 }
 
+function settingsLockPath(): string {
+  return resolve(getAgentDir(), "omp-web-settings.lock.sqlite");
+}
+
+function normalizeSettings(raw: Record<string, unknown>): WebServerSettings {
+  return {
+    autoResumeSessions: raw.autoResumeSessions === true,
+    agentToolsEnabled: raw.agentToolsEnabled === true,
+    githubWritesUnasked: raw.githubWritesUnasked === true,
+    agentEnv: readAgentEnvRecord(raw.agentEnv),
+    browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "ws",
+    uploadRetentionDays: isUploadRetentionDays(raw.uploadRetentionDays) ? raw.uploadRetentionDays : DEFAULT_UPLOAD_RETENTION_DAYS,
+  };
+}
+
+function parseSettingsRecord(text: string): Record<string, unknown> {
+  const raw: unknown = JSON.parse(text);
+  if (!isRecord(raw)) throw new Error("The settings file must contain a JSON object.");
+  return raw;
+}
+
+function freshSettingsRecord(): Record<string, unknown> | null {
+  try {
+    return parseSettingsRecord(readFileSync(settingsPath(), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** Permission reconciliation must use current disk state rather than another process's cached value. */
+export function readWebServerSettingsFromDisk(): WebServerSettings {
+  try {
+    return normalizeSettings(parseSettingsRecord(readFileSync(settingsPath(), "utf8")));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return DEFAULTS;
+    throw error;
+  }
+}
+
 declare global {
   // Survives `bun --hot` re-evaluation, which creates fresh module instances.
   var __ompWebSettingsCache: { path: string; settings: WebServerSettings } | undefined;
@@ -67,18 +110,7 @@ export function loadWebServerSettings(): WebServerSettings {
   if (cached?.path === path) return cached.settings;
   let settings = DEFAULTS;
   try {
-    if (existsSync(path)) {
-      const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if (isRecord(raw)) {
-        settings = {
-          autoResumeSessions: raw.autoResumeSessions === true,
-          agentToolsEnabled: raw.agentToolsEnabled === true,
-          agentEnv: readAgentEnvRecord(raw.agentEnv),
-          browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "ws",
-          uploadRetentionDays: isUploadRetentionDays(raw.uploadRetentionDays) ? raw.uploadRetentionDays : DEFAULT_UPLOAD_RETENTION_DAYS,
-        };
-      }
-    }
+    if (existsSync(path)) settings = normalizeSettings(parseSettingsRecord(readFileSync(path, "utf8")));
   } catch {
     // Unreadable settings fall back to the defaults.
   }
@@ -86,22 +118,42 @@ export function loadWebServerSettings(): WebServerSettings {
   return settings;
 }
 
+/** Fresh permission gates for shared-agent-dir decisions; neither reader touches the process cache. */
+export function readAgentToolsEnabledFromDisk(): boolean {
+  return freshSettingsRecord()?.agentToolsEnabled === true;
+}
+
+export function readGithubWritesUnaskedFromDisk(): boolean {
+  return freshSettingsRecord()?.githubWritesUnasked === true;
+}
+
 /** Atomic write (temp file + rename), like the project registry. Private to its user: it holds agentEnv. */
 export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebServerSettings {
   const path = settingsPath();
-  const settings = { ...loadWebServerSettings(), ...patch };
   mkdirSync(resolve(path, ".."), { recursive: true });
+  const lockPath = settingsLockPath();
+  closeSync(openSync(lockPath, "a", 0o600));
+  chmodSync(lockPath, 0o600);
+  const lock = new DatabaseSync(lockPath);
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
+    lock.exec("PRAGMA busy_timeout = 5000");
+    lock.exec("BEGIN IMMEDIATE");
+    const settings = { ...readWebServerSettingsFromDisk(), ...patch };
     writeFileSync(temp, `${JSON.stringify(settings, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     renameSync(temp, path);
+    globalThis.__ompWebSettingsCache = { path, settings };
+    lock.exec("COMMIT");
+    return settings;
+  } catch (error) {
+    if (lock.isTransaction) lock.exec("ROLLBACK");
+    throw error;
   } finally {
     try {
       if (existsSync(temp)) rmSync(temp);
     } catch {
       // ignore cleanup failures
     }
+    lock.close();
   }
-  globalThis.__ompWebSettingsCache = { path, settings };
-  return settings;
 }

@@ -21,6 +21,7 @@ import type { OutboxEntry, OutboxMode } from "./types";
 import { MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE } from "./upload-limits";
 import { snapshotOutboxUploads, UploadError, type OutboxUploadReceipt } from "./uploads";
 import { resolveWebAuthSecret } from "./web-auth-secret";
+import { readAgentToolsEnabledFromDisk } from "./web-settings";
 
 /** Delivered (and removed) ids answer a repeated `outbox_add` this long (spec O2: idempotent by id); the browser gives
  * up resending after 7 days, so a resend always finds its id. */
@@ -29,6 +30,7 @@ export const KEEP_DELIVERED_MS = 8 * 24 * 60 * 60 * 1000;
 export const RETRY_MS = 5_000;
 /** Fixed snapshot budget below the browser link's 32 MiB backlog; per-entry error margin and frame envelope included. */
 export const MAX_OUTBOX_BYTES = 16 * 1024 * 1024;
+export const GITHUB_WATCH_OUTBOX_OWNER = "omp-web:github-watch";
 const MAX_GLOBAL_OUTBOX_BYTES = 256 * 1024 * 1024;
 const MAX_GLOBAL_OUTBOX_ENTRIES = 1000;
 
@@ -37,6 +39,7 @@ const MODES: Record<OutboxMode, true> = { prompt: true, followUp: true, steer: t
 
 
 const COLUMNS = "id, session_id, mode, message, images, uploads, owner, advisor, state, error, may_have_been_sent, created_at, upload_receipts, previous_entry_ids, source_session_id, settlement, replacement_id, replacement_digest, payload_bytes";
+const RECEIPT_PIN_SCHEMA = "CREATE TABLE IF NOT EXISTS github_receipt_pins (session_id TEXT NOT NULL, entry_id TEXT NOT NULL, PRIMARY KEY (entry_id, session_id))";
 
 /** `owner`: the web session whose uploads the entry attaches; `advisor`: the chat's spawn flag at Send. */
 interface Row {
@@ -62,6 +65,7 @@ interface Row {
 }
 type AddResult =
   | { kind: "full" }
+  | { kind: "paused" }
   | { kind: "conflict" }
   | { kind: "existing"; entry: Row; replaces?: string }
   | { kind: "duplicate"; entry: Row; originalSession: string; replaces: string }
@@ -104,7 +108,7 @@ function db(): Database {
   const path = join(dir, "outbox.db");
   const cached = globalThis.__ompOutboxStore;
   // A `bun --hot` reload keeps a connection the previous code migrated: reopen when the migration changed.
-  const schema = `${OUTBOX_SCHEMA}${OUTBOX_CHANGE_SCHEMA}${COLUMNS}`;
+  const schema = `${OUTBOX_SCHEMA}${OUTBOX_CHANGE_SCHEMA}${COLUMNS}${RECEIPT_PIN_SCHEMA}`;
   if (cached?.path === path && cached.schema === schema) return cached.db;
   mkdirSync(dir, { recursive: true });
   // Owner-only before SQLite opens it: it holds message texts. SQLite gives its -wal/-shm files the same mode.
@@ -126,6 +130,7 @@ function db(): Database {
     database.exec("PRAGMA synchronous = NORMAL");
     database.transaction(() => {
       database.exec(OUTBOX_SCHEMA);
+      database.exec(RECEIPT_PIN_SCHEMA);
       const columns = database.prepare("PRAGMA table_info(entries)").all() as { name: string }[];
       for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"], ["settlement", "TEXT"], ["replacement_id", "TEXT"], ["replacement_digest", "TEXT"]]) {
         if (!columns.some((column) => column.name === name)) database.exec(`ALTER TABLE entries ADD COLUMN ${name} ${type}`);
@@ -148,6 +153,19 @@ function db(): Database {
   cached?.db.close(true);
   globalThis.__ompOutboxStore = { path, db: database, schema };
   return database;
+}
+
+/** Pending GitHub batches can replay after the browser's finite receipt-retention window. */
+export function pinOutboxReceipt(sessionId: string, entryId: string): void {
+  db().prepare("INSERT OR IGNORE INTO github_receipt_pins (session_id, entry_id) VALUES (?, ?)").run(sessionId, entryId);
+}
+
+export function releaseOutboxReceipt(entryId: string): void {
+  db().prepare("DELETE FROM github_receipt_pins WHERE entry_id = ?").run(entryId);
+}
+
+export function listOutboxReceiptPins(): { sessionId: string; entryId: string }[] {
+  return db().prepare("SELECT session_id AS sessionId, entry_id AS entryId FROM github_receipt_pins").all() as { sessionId: string; entryId: string }[];
 }
 
 /** Closes the cached store. `close(true)` finalizes the statements still alive: without it the file stays open until GC, and Windows keeps it locked. */
@@ -526,6 +544,8 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
         const confirmsReplacement = confirmedReplacementId(concurrent, sessionId, replaces);
         return { kind: "existing", entry: concurrent, ...(confirmsReplacement ? { replaces: confirmsReplacement } : {}) };
       }
+      // Host discovery may have awaited while another server disabled the watcher.
+      if (owner === GITHUB_WATCH_OUTBOX_OWNER && !readAgentToolsEnabledFromDisk()) return { kind: "paused" };
       const original = typeof replaces === "string" ? row(replaces) : null;
       const originalMatchesSession = original !== null && entryBelongsToSession(original, sessionId);
       if (original && originalMatchesSession && original.replacement_id) {
@@ -609,6 +629,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
     return commandErrorResponse(error);
   }
   if (result.kind === "conflict") return Response.json({ error: "This message id belongs to another session", code: "outbox_id_conflict" }, { status: 409 });
+  if (result.kind === "paused") return Response.json({ error: "Agent tools are disabled; GitHub updates are paused.", code: "agent_tools_disabled" }, { status: 503 });
   if (result.kind === "full") return Response.json({ error: "The message outbox is full. It will accept more messages after held entries drain or are deleted.", code: "outbox_full" }, { status: 429 });
   if (result.kind === "existing") {
     const entry = toEntry(result.entry);

@@ -204,6 +204,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   // Windows Background Service & System Tray
   { id: "auto-resume-sessions", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.autoResumeSessions", descKey: "settingsConfig.autoResumeSessionsDesc", fallbackSection: "System", fallbackLabel: "Resume running sessions after a restart", fallbackDesc: "When omp-web restarts while agents are working, restart those sessions and tell each agent: \"Session interrupted and resumed. Continue as you would have done without the interruption.\" Work in progress at the moment of the restart, such as a running command, is lost." },
   { id: "agent-tools-cross-session", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentTools", descKey: "settingsConfig.agentToolsDesc", fallbackSection: "System", fallbackLabel: "Agent tools (cross-session)", fallbackDesc: "Allow agents to call list_sessions, new_session and send_to_session to reach other omp-web sessions, even with no browser tab open. Delivered messages are prefixed with the sending session's ID." },
+  { id: "github-writes-unasked", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.githubWritesUnasked", descKey: "settingsConfig.githubWritesUnaskedDesc", fallbackSection: "System", fallbackLabel: "Allow agent GitHub writes without asking", fallbackDesc: "Let agents post comments, reply in review threads and resolve threads through this server's gh login without a confirmation each time. Off: every GitHub write asks in the session first." },
   { id: "upload-retention", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.uploadRetention", descKey: "settingsConfig.uploadRetentionDesc", fallbackSection: "System", fallbackLabel: "Delete sent uploads after", fallbackDesc: "Files attached As file are deleted from each session's local://uploads folder on every host, archived sessions included, once they are this old. Never keeps them for ever." },
   { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
   { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
@@ -336,6 +337,52 @@ function AgentToolsSetting() {
   return (
     <NativeSetting searchId="agent-tools-cross-session" label={t("settingsConfig.agentTools")} description={t("settingsConfig.agentToolsDesc")}>
       <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+    </NativeSetting>
+  );
+}
+
+function GithubWritesSetting() {
+  const { t } = useI18n();
+  // null until loaded, and after a failed load: showing "off" there could hide writes the server allows.
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  // Blocks a second change until the save and any uncertain-result reload finish.
+  const [saving, setSaving] = useState(false);
+  const load = useCallback(async (): Promise<boolean | null> => {
+    try {
+      const res = await fetch("/api/web-settings");
+      if (!res.ok) return null;
+      const data: { githubWritesUnasked?: boolean } = await res.json();
+      return typeof data.githubWritesUnasked === "boolean" ? data.githubWritesUnasked : null;
+    } catch {
+      return null;
+    }
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    void load().then((value) => { if (alive) setEnabled(value); });
+    return () => { alive = false; };
+  }, [load]);
+  const change = async (next: boolean) => {
+    setEnabled(next);
+    setSaving(true);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ githubWritesUnasked: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      setEnabled(null);
+      toast.error(t("settingsConfig.githubWritesUnaskedSaveFailed"), error instanceof Error ? error.message : String(error));
+      setEnabled(await load());
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <NativeSetting searchId="github-writes-unasked" label={t("settingsConfig.githubWritesUnasked")} description={t("settingsConfig.githubWritesUnaskedDesc")}>
+      <ToggleSwitch checked={enabled === true} disabled={enabled === null || saving} onChange={(next) => void change(next)} />
     </NativeSetting>
   );
 }
@@ -1833,6 +1880,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <AutoResumeSessionsSetting />
 
                 <AgentToolsSetting />
+
+                <GithubWritesSetting />
 
                 <UploadRetentionSetting />
 

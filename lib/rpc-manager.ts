@@ -20,6 +20,8 @@ import {
   type AgentToolDeliverResult,
   type AgentToolSessionOps,
 } from "./agent-tools";
+import type { AgentToolHost } from "./agent-tool-hosts";
+import { createGithubToolOps, GITHUB_REPLAY_SAFE_TOOLS, GITHUB_TOOL_NAMES } from "./github/tools";
 import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterruptedSessions, type InterruptibleSession } from "./session-resume";
 import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
@@ -124,6 +126,9 @@ const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
 /** Answer to a replayed server agent tool call that changes things: it may have run before the restart. */
 const AGENT_TOOL_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with list_sessions before retrying";
+const GITHUB_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with github_read (include comments or threads) before retrying";
+/** A GitHub write is checked on GitHub, not in the session list. */
+const unknownOutcome = (toolName: unknown) => (typeof toolName === "string" && GITHUB_TOOL_NAMES.has(toolName) ? GITHUB_UNKNOWN_OUTCOME : AGENT_TOOL_UNKNOWN_OUTCOME);
 
 /**
  * Failure raised by omp-web itself (not by omp) carrying a stable snake_case
@@ -485,6 +490,7 @@ export class AgentSessionWrapper {
   /** Retained until native adoption has replayed pending requests and released live frames. */
   private adoptionReplay?: string[];
   private restarting = false;
+  private restartingProc: RpcProcess | null = null;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Synchronous mutex for getMcpList: checked+set before any await, so two
    *  concurrent callers can never both enter (the waiter/promptRunning
@@ -503,6 +509,8 @@ export class AgentSessionWrapper {
   private _adopted = false;
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools = new Map<string, { event: UnsequencedAgentEvent; crossSessionId?: string }>();
+  /** Server-side agent tool calls in flight (answerServerAgentTool); host_tool_cancel aborts them. */
+  private serverToolCalls = new Map<string, AbortController>();
   /** Own host calls no tab has seen yet (see parkHostTool), with their deadlines. */
   private parkedHostTools = new Map<string, ReturnType<typeof setTimeout>>();
   /** Listeners omp-web attaches itself (waitForTurnEnd), not tabs: a parked host call waits for a tab. */
@@ -627,6 +635,7 @@ export class AgentSessionWrapper {
     if (!this.hostOwnedLifecycle || !this.canReplaceAdvisor()) return null;
     const old = this.proc;
     this.restarting = true;
+    this.restartingProc = old;
     this.expectedExitProc = old;
     try {
       const spawned = await this.host.spawnRpc(launch, this._sessionId, { replaceAdvisor: true, preparing });
@@ -639,6 +648,7 @@ export class AgentSessionWrapper {
       throw error;
     } finally {
       if (this.expectedExitProc === old) this.expectedExitProc = null;
+      if (this.restartingProc === old) this.restartingProc = null;
       this.restarting = false;
     }
   }
@@ -751,8 +761,9 @@ export class AgentSessionWrapper {
   }
 
   start(): void {
-    this.unsubscribeFrames = this.proc.onFrame((frame) => this.handleFrame(frame));
-    this.watchResync(this.proc);
+    const proc = this.proc;
+    this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame, proc));
+    this.watchResync(proc);
     this.unsubscribeHostStatus = this.host.onStatus((status) => this.handleHostStatus(status));
     this.reportInterest();
     this.resetIdleTimer();
@@ -990,6 +1001,7 @@ export class AgentSessionWrapper {
     // live stream and run state must survive; only the id changes.
     const moved = identityChanged && this.sessionMovePending;
     if (identityChanged && !moved) {
+      this.abortServerToolCalls();
       this.resetStream();
       this.promptRunning = false;
       this.awaitingAgentStart = false;
@@ -1191,7 +1203,7 @@ export class AgentSessionWrapper {
     }
   }
 
-  private handleFrame(frame: RpcFrame): void {
+  private handleFrame(frame: RpcFrame, sourceProc: RpcProcess = this.proc): void {
     this.resetIdleTimer();
     const event = frame;
     if (event.type === PEER_MESSAGE_FRAME) {
@@ -1209,10 +1221,10 @@ export class AgentSessionWrapper {
       const key = `${event.type}:${event.id}`;
       if (this.deliveredCallbacks.has(key)) return;
       this.deliveredCallbacks.add(key);
-      // Only the read-only listing runs again (handled below); anything else may already have run.
-      if (this.replaying && !(event.type === "host_tool_call" && event.toolName === "list_sessions")) {
+      // Only the read-only listing and the idempotent GitHub tools run again (handled below); anything else may already have run.
+      if (this.replaying && !(event.type === "host_tool_call" && typeof event.toolName === "string" && (event.toolName === "list_sessions" || GITHUB_REPLAY_SAFE_TOOLS.has(event.toolName)))) {
         this.proc.sendFrame(event.type === "host_tool_call"
-          ? { type: "host_tool_result", id: event.id, isError: true, result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] } }
+          ? { type: "host_tool_result", id: event.id, isError: true, result: { content: [{ type: "text", text: unknownOutcome(event.toolName) }] } }
           : { type: "host_uri_result", id: event.id, isError: true, error: AGENT_TOOL_UNKNOWN_OUTCOME });
         return;
       }
@@ -1345,15 +1357,15 @@ export class AgentSessionWrapper {
         // is an explicit error, not a silent hang and not a browser call.
         if (id && toolName && AGENT_TOOL_NAMES.has(toolName)) {
           // Independent pooled creations have durable native-request identity; other mutations stay unknown.
-          if (this.replaying && toolName !== "list_sessions" && (toolName !== "new_session" || !loadWebServerSettings().agentToolsEnabled)) {
+          if (this.replaying && toolName !== "list_sessions" && !GITHUB_REPLAY_SAFE_TOOLS.has(toolName) && (toolName !== "new_session" || !loadWebServerSettings().agentToolsEnabled)) {
             this.proc.sendFrame({
               type: "host_tool_result",
               id,
               isError: true,
-              result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] },
+              result: { content: [{ type: "text", text: unknownOutcome(toolName) }] },
             });
           } else if (loadWebServerSettings().agentToolsEnabled) {
-            void this.answerServerAgentTool(event);
+            void this.answerServerAgentTool(event, sourceProc);
           } else {
             this.proc.sendFrame({
               type: "host_tool_result",
@@ -1408,6 +1420,7 @@ export class AgentSessionWrapper {
       }
       case "host_tool_cancel": {
         const targetId = typeof event.targetId === "string" ? event.targetId : "";
+        this.serverToolCalls.get(targetId)?.abort();
         if (targetId && this.cancelPendingHostTool(targetId)) {
           notifyRunningChange();
           return;
@@ -1490,12 +1503,24 @@ export class AgentSessionWrapper {
    * replay and input-needed notification. Resolves false when declined, when
    * the run ends, or when the session stops.
    */
-  confirmFromServer(title: string): Promise<boolean> {
-    if (!this._alive) return Promise.resolve(false);
+  confirmFromServer(title: string, signal?: AbortSignal): Promise<boolean> {
+    if (!this._alive || signal?.aborted) return Promise.resolve(false);
     const id = `omp-web:${randomUUID()}`;
     const { promise, resolve } = Promise.withResolvers<boolean>();
-    this.serverUiRequests.set(id, resolve);
-    this.handleFrame({ type: "ui_request", id, method: "confirm", args: [title, ""] });
+    const finish = (confirmed: boolean) => {
+      signal?.removeEventListener("abort", abort);
+      resolve(confirmed);
+    };
+    const abort = () => {
+      if (!this.serverUiRequests.delete(id)) return;
+      this.forgetPendingUiRequest(id);
+      this.emit({ type: "ui_end", id });
+      finish(false);
+    };
+    this.serverUiRequests.set(id, finish);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    else this.handleFrame({ type: "ui_request", id, method: "confirm", args: [title, ""] });
     return promise;
   }
 
@@ -1937,44 +1962,65 @@ export class AgentSessionWrapper {
    * with host_tool_result — never via pendingHostTools, so a later tab
    * disconnect cannot settle it as a UI call.
    */
-  private async answerServerAgentTool(event: UnsequencedAgentEvent): Promise<void> {
+  private async answerServerAgentTool(event: UnsequencedAgentEvent, sourceProc: RpcProcess): Promise<void> {
     const id = typeof event.id === "string" ? event.id : "";
     const toolName = typeof event.toolName === "string" ? event.toolName : "";
     if (!id) return;
+    const proc = sourceProc;
     const sendResult = (text: string, isError = false) => {
-      this.proc.sendFrame({
+      proc.sendFrame({
         type: "host_tool_result",
         id,
         isError,
         result: { content: [{ type: "text", text }] },
       });
     };
+    if (!this._alive || sourceProc === this.restartingProc) {
+      sendResult(this._alive ? RESTARTING_MESSAGE : "Session is no longer running", true);
+      return;
+    }
+    const sourceSessionId = this.sessionId;
+    const sourceSessionFile = this._sessionFile;
+    const cancel = new AbortController();
+    const sendToolResult = (text: string, isError = false) => {
+      if (cancel.signal.aborted && (this.sessionId !== sourceSessionId || this._sessionFile !== sourceSessionFile)) return;
+      sendResult(text, isError);
+    };
+    this.serverToolCalls.set(id, cancel);
     try {
       const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
+      const getSessionId = () => this.sessionId;
       const context: AgentToolContext = {
-        sourceSessionId: this.sessionId,
+        get sourceSessionId() { return getSessionId(); },
         sourceRequestId: id,
         sourceCwd: this.cwd,
         sourceHostId: this.host.id,
         enabled: loadWebServerSettings().agentToolsEnabled,
         guard: getAgentToolGuard(),
-        confirm: (title) => this.confirmFromServer(title),
+        confirm: (title) => this.confirmFromServer(title, cancel.signal),
+        signal: cancel.signal,
       };
       if (this.replaying && toolName === "new_session" && (
         args.shareWorkspace === true || args.host != null || !poolProjectBindings(loadPools()).get(this.host.id)?.size
       )) throw new Error(AGENT_TOOL_UNKNOWN_OUTCOME);
       const result = await executeAgentTool(toolName, args, createAgentToolOps(context, this.replaying), context);
-      sendResult(typeof result === "string" ? result : JSON.stringify(result));
+      sendToolResult(typeof result === "string" ? result : JSON.stringify(result));
     } catch (error) {
       if (error instanceof PoolStartError) {
-        sendResult(JSON.stringify({
+        sendToolResult(JSON.stringify({
           error: error.message.slice(0, 1024), code: error.code.slice(0, 128),
           sessionId: error.sessionId, hostId: error.hostId, cwd: error.cwd, delivery: error.delivery,
         }), true);
       } else {
-        sendResult(error instanceof Error ? error.message : String(error), true);
+        sendToolResult(error instanceof Error ? error.message : String(error), true);
       }
+    } finally {
+      if (this.serverToolCalls.get(id) === cancel) this.serverToolCalls.delete(id);
     }
+  }
+
+  private abortServerToolCalls(): void {
+    for (const controller of this.serverToolCalls.values()) controller.abort();
   }
 
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */
@@ -2292,6 +2338,8 @@ export class AgentSessionWrapper {
     // Stays true for the whole restart so send() rejects commands that would
     // otherwise hit the disposed or half-built child.
     this.restarting = true;
+    this.restartingProc = old;
+    this.abortServerToolCalls();
     let resumable: boolean;
     try {
       // Asked before touching the live child: a remote host can be offline,
@@ -2299,6 +2347,7 @@ export class AgentSessionWrapper {
       resumable = !!sessionFile && await this.host.sessionFileExists(sessionFile);
     } catch (error) {
       this.restarting = false;
+      this.restartingProc = null;
       throw error;
     }
     this.resetStream();
@@ -2364,7 +2413,7 @@ export class AgentSessionWrapper {
       this.deliveredCallbacks.clear();
       this.messageCommandGeneration += 1;
       this.confirmedMessageCommandGeneration = this.messageCommandGeneration;
-      this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
+      this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame, proc));
       this.watchResync(proc);
       this.reportInterest();
       try {
@@ -2407,6 +2456,7 @@ export class AgentSessionWrapper {
         throw error;
       }
     } finally {
+      this.restartingProc = null;
       this.restarting = false;
     }
     notifyRunningChange();
@@ -3008,6 +3058,7 @@ export class AgentSessionWrapper {
     if (this.destroyPromise) return untilHostDown(this.host, this.destroyPromise);
     if (!this._alive) return;
     console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
+    this.abortServerToolCalls();
     this._alive = false;
     this.reportInterest();
     this.deliveredCallbacks.clear();
@@ -3357,20 +3408,22 @@ const DELIVERY_COMMAND: Record<AgentToolDeliverInput["delivery"], string> = { pr
  * reads the turn's final text with get_last_assistant_text.
  */
 function createAgentToolOps(source: AgentToolContext, replaying: boolean): AgentToolSessionOps {
+  const hosts = (): AgentToolHost[] => {
+    const local = getHost(LOCAL_HOST_ID);
+    return [
+      { id: local.id, label: local.label, online: isLinkUp(local.status()), allowAgentStart: true },
+      ...listHosts().map((h) => ({ id: h.id, label: h.label, online: isLinkUp(h.status), allowAgentStart: h.allowAgentStart })),
+    ];
+  };
   return {
+    github: createGithubToolOps(hosts),
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
       const sessions = await listSessionsAllHosts();
       return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id), hostId: s.hostId ?? LOCAL_HOST_ID }));
     },
 
-    listHosts() {
-      const local = getHost(LOCAL_HOST_ID);
-      return [
-        { id: local.id, label: local.label, online: isLinkUp(local.status()), allowAgentStart: true },
-        ...listHosts().map((h) => ({ id: h.id, label: h.label, online: isLinkUp(h.status), allowAgentStart: h.allowAgentStart })),
-      ];
-    },
+    listHosts: hosts,
 
     async createSession(input, authorize) {
       const authorizeHost = (host: Host) => {
