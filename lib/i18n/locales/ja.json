@@ -565,6 +565,7 @@
   "chatWindow.subagentState.failed": "失敗",
   "chatWindow.subagentState.started": "実行中",
   "chatWindow.subagentSummary": "{running} 実行中 · {total} 件",
+  "chatWindow.subagentCompletedSummary": "{completed}/{total} 完了",
   "chatWindow.completedSubagents": "完了 ({count})",
   "chatWindow.subagentsPanel": "サブエージェント",
   "chatWindow.subagentRetrying": "再試行中 {attempt}/{max}",
