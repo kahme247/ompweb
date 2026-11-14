@@ -85,10 +85,10 @@
 **Interfaces:**
 - Consumes: `ItemSnapshot`, `formatTarget`.
 - Produces:
-  - `interface WatchCursor { commentIds: string[]; reviewIds: string[]; threadCommentIds: string[]; reportedHeads: string[]; final: boolean }` (id sets are bounded: keep the newest 2000 of each).
+  - `interface WatchCursor { commentIds: string[]; reviewIds: string[]; threadCommentIds: string[]; reportedHeads: string[]; final: boolean }` (comment/head history is bounded; retain all review and thread-comment IDs so late submissions and old-thread replies are not dropped or replayed).
   - `baselineCursor(snapshot): WatchCursor` (marks the current head reported if its checks are all terminal).
   - `type GithubEvent` (union: `comment`, `review`, `thread_comment`, `ci`, `merged`, `closed`), each with `id`, `url`, and metadata from the snapshot.
-  - `diffSnapshot(cursor, snapshot, postedIds: ReadonlySet<string>): { events: GithubEvent[]; cursor: WatchCursor }`: new ids not in cursor and not in `postedIds` become events (posted ones join the cursor silently); one `ci` event when the head is not in `reportedHeads` and every check is terminal (counts by conclusion, failed/cancelled/timed-out names capped at 100 chars); `merged`/`closed` once, setting `final`.
+  - `diffSnapshot(cursor, snapshot, postedIds: ReadonlySet<string>): { events: GithubEvent[]; cursor: WatchCursor }`: new ids not in cursor and not in `postedIds` become events (posted ones join the cursor silently); one `ci` event when the head is not in `reportedHeads` and every check is terminal (counts by conclusion only); `merged`/`closed` once, setting `final`.
   - `formatUpdate(targetText, url, events): string` — header line, then one line per event per spec "What is delivered".
   - `updateEntryId(watchKey: string, events): string` — `"gh-" + sha256(watchKey + "\0" + eventIds.join("\0")).base64url.slice(0, 40)` (matches the outbox's `ENTRY_ID_RE`).
 
