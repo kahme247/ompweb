@@ -139,7 +139,11 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
     collapseReason: reasons.get(entry.path),
   }));
 
-  return { isGitRepository: true, repositoryRoot, files };
+  // The response is self-consistent: repositoryRoot is canonical, matching
+  // the canonical filePath entries, so callers can combine them with
+  // path.relative. findRepositoryRoot's lexical spelling is only used as
+  // git's -C cwd above, never returned here.
+  return { isGitRepository: true, repositoryRoot: canonicalRoot, files };
 }
 
 function hasNullByte(content: Buffer): boolean {
@@ -200,7 +204,15 @@ export async function getGitFileDiff(cwd: string, filePath: string): Promise<Git
   }
   if (!stat.isFile() || stat.size > TEXT_PREVIEW_MAX_BYTES) return { supported: false };
 
-  const relativePath = toGitPath(path.relative(repositoryRoot, resolvedFilePath));
+  // Derive the git-relative path from the canonical root and the
+  // canonicalized file directory, keeping the leaf name: a caller may pass
+  // the file through the symlinked cwd spelling, while a tracked symlink's
+  // own name must survive — only its directory is resolved, never the
+  // entry itself (resolving the entry would follow the link out of the
+  // repository and drop it, the #322 case in reverse).
+  const canonicalRoot = canonicalizePath(repositoryRoot);
+  const canonicalDir = canonicalizePath(path.dirname(resolvedFilePath));
+  const relativePath = toGitPath(path.relative(canonicalRoot, path.join(canonicalDir, path.basename(resolvedFilePath))));
   const entries = await readStatusEntries(repositoryRoot);
   const entry = entries.find((candidate) => candidate.path === relativePath);
   if (!entry) return { supported: false };
