@@ -34,10 +34,10 @@ export const defaultGhRunner: GhRunner = (args, input) => {
   const { promise, resolve, reject } = Promise.withResolvers<string>();
   const child = execFile(
     "gh",
-    args,
+    args[0] === "api" ? ["api", "--hostname", "github.com", ...args.slice(1)] : args,
     {
       // GH_PROMPT_DISABLED: a prompt would wait on a stdin that never answers.
-      env: createChildProcessEnvironment({ GH_PROMPT_DISABLED: "1" }),
+      env: { ...createChildProcessEnvironment({ GH_PROMPT_DISABLED: "1" }), GH_TOKEN: undefined, GITHUB_TOKEN: undefined },
       timeout: GH_TIMEOUT_MS,
       maxBuffer: GH_MAX_BUFFER,
       encoding: "utf8",
@@ -97,10 +97,10 @@ export interface GithubTarget {
 }
 
 const TARGET_ERROR = 'Agent tool argument "target" must be OWNER/REPO#N or a GitHub pull request or issue URL.';
-// GitHub owners are alphanumeric with hyphens. Repos may hold dots and
-// underscores; the leading character excludes "." and ".." (path segments).
+// GitHub owners are alphanumeric with hyphens. Repos may start with dots,
+// but "." and ".." are path segments, not repository names.
 const OWNER = /^[A-Za-z0-9-]+$/;
-const REPO = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
+const REPO = /^(?!\.{1,2}$)[A-Za-z0-9_.-]+$/;
 const SHORT_FORM = /^([^/#\s]+)\/([^/#\s]+)#([1-9]\d{0,9})$/;
 
 function validTarget(owner: string, repo: string, number: number): GithubTarget {
