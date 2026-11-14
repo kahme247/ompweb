@@ -997,6 +997,7 @@ export class AgentSessionWrapper {
     // live stream and run state must survive; only the id changes.
     const moved = identityChanged && this.sessionMovePending;
     if (identityChanged && !moved) {
+      this.abortServerToolCalls();
       this.resetStream();
       this.promptRunning = false;
       this.awaitingAgentStart = false;
@@ -1974,7 +1975,13 @@ export class AgentSessionWrapper {
       sendResult(this.restarting ? RESTARTING_MESSAGE : "Session is no longer running", true);
       return;
     }
+    const sourceSessionId = this.sessionId;
+    const sourceSessionFile = this._sessionFile;
     const cancel = new AbortController();
+    const sendToolResult = (text: string, isError = false) => {
+      if (cancel.signal.aborted && (this.sessionId !== sourceSessionId || this._sessionFile !== sourceSessionFile)) return;
+      sendResult(text, isError);
+    };
     this.serverToolCalls.set(id, cancel);
     try {
       const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
@@ -1993,15 +2000,15 @@ export class AgentSessionWrapper {
         args.shareWorkspace === true || args.host != null || !poolProjectBindings(loadPools()).get(this.host.id)?.size
       )) throw new Error(AGENT_TOOL_UNKNOWN_OUTCOME);
       const result = await executeAgentTool(toolName, args, createAgentToolOps(context, this.replaying), context);
-      sendResult(typeof result === "string" ? result : JSON.stringify(result));
+      sendToolResult(typeof result === "string" ? result : JSON.stringify(result));
     } catch (error) {
       if (error instanceof PoolStartError) {
-        sendResult(JSON.stringify({
+        sendToolResult(JSON.stringify({
           error: error.message.slice(0, 1024), code: error.code.slice(0, 128),
           sessionId: error.sessionId, hostId: error.hostId, cwd: error.cwd, delivery: error.delivery,
         }), true);
       } else {
-        sendResult(error instanceof Error ? error.message : String(error), true);
+        sendToolResult(error instanceof Error ? error.message : String(error), true);
       }
     } finally {
       if (this.serverToolCalls.get(id) === cancel) this.serverToolCalls.delete(id);
