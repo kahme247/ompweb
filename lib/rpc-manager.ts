@@ -1498,12 +1498,24 @@ export class AgentSessionWrapper {
    * replay and input-needed notification. Resolves false when declined, when
    * the run ends, or when the session stops.
    */
-  confirmFromServer(title: string): Promise<boolean> {
-    if (!this._alive) return Promise.resolve(false);
+  confirmFromServer(title: string, signal?: AbortSignal): Promise<boolean> {
+    if (!this._alive || signal?.aborted) return Promise.resolve(false);
     const id = `omp-web:${randomUUID()}`;
     const { promise, resolve } = Promise.withResolvers<boolean>();
-    this.serverUiRequests.set(id, resolve);
-    this.handleFrame({ type: "ui_request", id, method: "confirm", args: [title, ""] });
+    const finish = (confirmed: boolean) => {
+      signal?.removeEventListener("abort", abort);
+      resolve(confirmed);
+    };
+    const abort = () => {
+      if (!this.serverUiRequests.delete(id)) return;
+      this.forgetPendingUiRequest(id);
+      this.emit({ type: "ui_end", id });
+      finish(false);
+    };
+    this.serverUiRequests.set(id, finish);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    else this.handleFrame({ type: "ui_request", id, method: "confirm", args: [title, ""] });
     return promise;
   }
 
@@ -1949,8 +1961,9 @@ export class AgentSessionWrapper {
     const id = typeof event.id === "string" ? event.id : "";
     const toolName = typeof event.toolName === "string" ? event.toolName : "";
     if (!id) return;
+    const proc = this.proc;
     const sendResult = (text: string, isError = false) => {
-      this.proc.sendFrame({
+      proc.sendFrame({
         type: "host_tool_result",
         id,
         isError,
@@ -1968,7 +1981,7 @@ export class AgentSessionWrapper {
         sourceHostId: this.host.id,
         enabled: loadWebServerSettings().agentToolsEnabled,
         guard: getAgentToolGuard(),
-        confirm: (title) => this.confirmFromServer(title),
+        confirm: (title) => this.confirmFromServer(title, cancel.signal),
         signal: cancel.signal,
       };
       if (this.replaying && toolName === "new_session" && (
@@ -1986,8 +1999,12 @@ export class AgentSessionWrapper {
         sendResult(error instanceof Error ? error.message : String(error), true);
       }
     } finally {
-      this.serverToolCalls.delete(id);
+      if (this.serverToolCalls.get(id) === cancel) this.serverToolCalls.delete(id);
     }
+  }
+
+  private abortServerToolCalls(): void {
+    for (const controller of this.serverToolCalls.values()) controller.abort();
   }
 
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */
@@ -2305,6 +2322,7 @@ export class AgentSessionWrapper {
     // Stays true for the whole restart so send() rejects commands that would
     // otherwise hit the disposed or half-built child.
     this.restarting = true;
+    this.abortServerToolCalls();
     let resumable: boolean;
     try {
       // Asked before touching the live child: a remote host can be offline,
@@ -3021,6 +3039,7 @@ export class AgentSessionWrapper {
     if (this.destroyPromise) return untilHostDown(this.host, this.destroyPromise);
     if (!this._alive) return;
     console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
+    this.abortServerToolCalls();
     this._alive = false;
     this.reportInterest();
     this.deliveredCallbacks.clear();
