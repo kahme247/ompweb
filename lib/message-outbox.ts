@@ -148,8 +148,8 @@ export function pinOutboxReceipt(sessionId: string, entryId: string): void {
   db().prepare("INSERT OR IGNORE INTO github_receipt_pins (session_id, entry_id) VALUES (?, ?)").run(sessionId, entryId);
 }
 
-export function releaseOutboxReceipt(sessionId: string, entryId: string): void {
-  db().prepare("DELETE FROM github_receipt_pins WHERE session_id = ? AND entry_id = ?").run(sessionId, entryId);
+export function releaseOutboxReceipt(entryId: string): void {
+  db().prepare("DELETE FROM github_receipt_pins WHERE entry_id = ?").run(entryId);
 }
 
 export function listOutboxReceiptPins(): { sessionId: string; entryId: string }[] {
