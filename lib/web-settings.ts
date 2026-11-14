@@ -59,6 +59,40 @@ function settingsPath(): string {
   return resolve(getAgentDir(), "omp-web-settings.json");
 }
 
+function normalizeSettings(raw: Record<string, unknown>): WebServerSettings {
+  return {
+    autoResumeSessions: raw.autoResumeSessions === true,
+    agentToolsEnabled: raw.agentToolsEnabled === true,
+    githubWritesUnasked: raw.githubWritesUnasked === true,
+    agentEnv: readAgentEnvRecord(raw.agentEnv),
+    browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "ws",
+    uploadRetentionDays: isUploadRetentionDays(raw.uploadRetentionDays) ? raw.uploadRetentionDays : DEFAULT_UPLOAD_RETENTION_DAYS,
+  };
+}
+
+function parseSettingsRecord(text: string): Record<string, unknown> {
+  const raw: unknown = JSON.parse(text);
+  if (!isRecord(raw)) throw new Error("The settings file must contain a JSON object.");
+  return raw;
+}
+
+function freshSettingsRecord(): Record<string, unknown> | null {
+  try {
+    return parseSettingsRecord(readFileSync(settingsPath(), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function settingsForSave(path: string): WebServerSettings {
+  try {
+    return normalizeSettings(parseSettingsRecord(readFileSync(path, "utf8")));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return DEFAULTS;
+    throw error;
+  }
+}
+
 declare global {
   // Survives `bun --hot` re-evaluation, which creates fresh module instances.
   var __ompWebSettingsCache: { path: string; settings: WebServerSettings } | undefined;
@@ -70,19 +104,7 @@ export function loadWebServerSettings(): WebServerSettings {
   if (cached?.path === path) return cached.settings;
   let settings = DEFAULTS;
   try {
-    if (existsSync(path)) {
-      const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if (isRecord(raw)) {
-        settings = {
-          autoResumeSessions: raw.autoResumeSessions === true,
-          agentToolsEnabled: raw.agentToolsEnabled === true,
-          githubWritesUnasked: raw.githubWritesUnasked === true,
-          agentEnv: readAgentEnvRecord(raw.agentEnv),
-          browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "ws",
-          uploadRetentionDays: isUploadRetentionDays(raw.uploadRetentionDays) ? raw.uploadRetentionDays : DEFAULT_UPLOAD_RETENTION_DAYS,
-        };
-      }
-    }
+    if (existsSync(path)) settings = normalizeSettings(parseSettingsRecord(readFileSync(path, "utf8")));
   } catch {
     // Unreadable settings fall back to the defaults.
   }
@@ -90,20 +112,19 @@ export function loadWebServerSettings(): WebServerSettings {
   return settings;
 }
 
-/** Fresh, fail-closed Agent-tools gate for cross-process watcher checks; does not change the process cache. */
+/** Fresh permission gates for shared-agent-dir decisions; neither reader touches the process cache. */
 export function readAgentToolsEnabledFromDisk(): boolean {
-  try {
-    const raw: unknown = JSON.parse(readFileSync(settingsPath(), "utf8"));
-    return isRecord(raw) && raw.agentToolsEnabled === true;
-  } catch {
-    return false;
-  }
+  return freshSettingsRecord()?.agentToolsEnabled === true;
+}
+
+export function readGithubWritesUnaskedFromDisk(): boolean {
+  return freshSettingsRecord()?.githubWritesUnasked === true;
 }
 
 /** Atomic write (temp file + rename), like the project registry. Private to its user: it holds agentEnv. */
 export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebServerSettings {
   const path = settingsPath();
-  const settings = { ...loadWebServerSettings(), ...patch };
+  const settings = { ...settingsForSave(path), ...patch };
   mkdirSync(resolve(path, ".."), { recursive: true });
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
