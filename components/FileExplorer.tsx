@@ -572,6 +572,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     operation?.handle?.abort();
   }, [workspaceKey]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollFrameRef = useRef<number | null>(null);
   const loadingPathsRef = useRef<Set<string>>(new Set());
   // Listing generation: advanced whenever every cached listing is dropped
   // (cwd change). An in-flight fetch carries the generation it started on; a
@@ -872,11 +873,20 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   }, [goToRow, handleActivateRow, handleToggleExpanded]);
 
   const handleTreeScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    setScrollTop(el.scrollTop);
-    setViewportHeight(el.clientHeight);
-  }, []);
+    if (scrollFrameRef.current !== null) return;
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const el = scrollRef.current;
+      if (!el) return;
+      // The virtual window changes only at row boundaries, not every pixel.
+      setScrollTop(Math.floor(el.scrollTop / rowHeight) * rowHeight);
+    });
+  }, [rowHeight]);
+
+  useEffect(() => () => {
+    if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+    scrollFrameRef.current = null;
+  }, [rowHeight]);
 
   // Track the viewport height so the window math stays correct across panel
   // resizes; rows themselves are fixed-height and never measured.

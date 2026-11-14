@@ -885,8 +885,7 @@ export function AppShell({ appName }: { appName: string }) {
     // Live rect, not state: it always reflects the committed width (custom or
     // fluid default), and keeps this callback above the state declarations
     // without a TDZ cycle. The handle only exists while the panel is open.
-    const startWidth = rightPanelRef.current?.getBoundingClientRect().width
-      ?? RIGHT_PANEL_MIN_WIDTH;
+    const measuredWidth = rightPanelRef.current?.getBoundingClientRect().width;
     // Same --ui-scale ground truth as the left sidebar handle: clientX is in
     // viewport pixels while the panel width is zoomed layout pixels.
     let uiScale = 1;
@@ -897,18 +896,27 @@ export function AppShell({ appName }: { appName: string }) {
     } catch {
       // SSR/unavailable: fall back to unscaled math.
     }
+    const startWidth = measuredWidth === undefined ? RIGHT_PANEL_MIN_WIDTH : measuredWidth / uiScale;
     setRightPanelResizing(true);
+    let frame: number | null = null;
+    const cancelFrame = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+    };
+    const applyWidth = () => {
+      frame = null;
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${pendingRightPanelWidthRef.current}px`);
+    };
     const onMove = (ev: MouseEvent) => {
       // Dragging the left edge left grows the panel: inverse of the sidebar.
-      const next = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
-      // Write the CSS variable straight to the DOM: the flex row follows the
-      // pointer without re-rendering the whole AppShell on every mousemove.
-      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
-      pendingRightPanelWidthRef.current = next;
+      pendingRightPanelWidthRef.current = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
+      if (frame === null) frame = requestAnimationFrame(applyWidth);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      cancelFrame();
+      applyWidth();
       rightResizeHandlersRef.current = null;
       setRightPanelResizing(false);
       // Commit the final width so state and the persisted value agree with
@@ -920,7 +928,7 @@ export function AppShell({ appName }: { appName: string }) {
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     pendingRightPanelWidthRef.current = startWidth;
-    rightResizeHandlersRef.current = { onMove, onUp };
+    rightResizeHandlersRef.current = { onMove, onUp, cancelFrame };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   }, [isMobile]);
@@ -932,6 +940,7 @@ export function AppShell({ appName }: { appName: string }) {
     if (!handlers) return;
     window.removeEventListener("mousemove", handlers.onMove);
     window.removeEventListener("mouseup", handlers.onUp);
+    handlers.cancelFrame();
     rightResizeHandlersRef.current = null;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
@@ -1027,7 +1036,7 @@ export function AppShell({ appName }: { appName: string }) {
     onRightOpenChange: setRightPanelOpen,
   });
   const pendingRightPanelWidthRef = useRef<number | null>(null);
-  const rightResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
+  const rightResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void; cancelFrame: () => void } | null>(null);
   useEffect(() => {
     setRightPanelWidth(loadRightPanelWidth());
   }, []);
