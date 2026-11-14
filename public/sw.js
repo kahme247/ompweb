@@ -94,12 +94,14 @@ function markOutboxFailed(db, id, error) {
   });
 }
 
-function deleteOutboxEntry(db, id) {
+/** A Retry's copy takes the failed original it replaces with it: the server retired that with the same add. */
+function deleteOutboxEntry(db, id, replaces) {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction("entries", "readwrite");
     transaction.oncomplete = () => resolve();
     transaction.onabort = transaction.onerror = () => reject(transaction.error || new Error("Could not remove the outbox entry"));
     transaction.objectStore("entries").delete(id);
+    if (replaces) transaction.objectStore("entries").delete(replaces);
   });
 }
 
@@ -130,7 +132,7 @@ async function flushOutbox() {
     // Oldest first, and a session's later entries wait while an earlier one fails: the server queues by arrival.
     entries.sort(compareOutbox);
     const waiting = new Set();
-    for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, state, createdAt } of entries) {
+    for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, replaces, state, createdAt } of entries) {
       if (state !== "sending" || waiting.has(sessionId)) continue;
       // Expired or unscoped rows are never rebound: they are not sent, so they stop blocking that session's later entries.
       const stale = Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 ? "Not sent within 7 days."
@@ -147,7 +149,7 @@ async function flushOutbox() {
       let error;
       let timer;
       try {
-        const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs });
+        const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs, replaces });
         // Include the body read: a half-open POST must not keep every later sync entry waiting forever.
         const controller = new AbortController();
         timer = setTimeout(() => controller.abort(), 40_000 + Math.ceil(body.length / 2));
@@ -162,7 +164,7 @@ async function flushOutbox() {
       } finally {
         clearTimeout(timer);
       }
-      if (status >= 200 && status < 300) await deleteOutboxEntry(db, id);
+      if (status >= 200 && status < 300) await deleteOutboxEntry(db, id, replaces);
       else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) waiting.add(sessionId);
       else await markOutboxFailed(db, id, error || `HTTP ${status}`);
     }

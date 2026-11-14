@@ -1299,9 +1299,12 @@ during the wait.
   Sending (browser, locked while its first-leg command may be in flight),
   Waiting to send / Waiting for <host> (Delete), Delivering (locked),
   Not sent (Retry, Delete). Retry (`retryHeldMessage`) holds a new entry with the same text, images, uploads and
-  mode, and removes the failed one (in the session it was in) only after the worker reports the server stored
-  that copy (`outboxStored`; a refused copy keeps it). A copy stored but whose original's removal failed is
-  remembered, so a later Retry only removes. A `mayHaveBeenSent` entry asks first. The delivery mode is a read-only label. Delete
+  mode and `replaces: <failed id>`, persisted in IndexedDB and sent with `outbox_add`. The server retires a failed
+  original of the same session in the transaction that stores the copy, and the worker (or `sw.js`) deletes the
+  browser's row of it in the commit that deletes the stored copy; a refused copy leaves it. The `outboxStored` it
+  posts carries `replaces`, and the hook marks that original represented at once. Retry holds no copy while one
+  naming the id waits in IndexedDB (true after a remount, a reload or a closed page) or once one was stored, and
+  never sends `outbox_remove`. A `mayHaveBeenSent` entry asks first. The delivery mode is a read-only label. Delete
   (`deleteHeldMessage`) awaits the IndexedDB delete commit for a browser-held
   entry; a server entry sends `outbox_remove`, refused with 409
   `outbox_dispatched` once delivering. A late commit consumes only the original
