@@ -3,7 +3,7 @@
 // local users connect and whose name anyone may claim first, so the pipe name is random per start and every
 // request carries a per-start token; both live only in a descriptor file in this user's agent directory.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, linkSync, lstatSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, constants, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { getAgentDir } from "../omp/paths";
@@ -79,17 +79,45 @@ export function hostControlPath(agentDir = getAgentDir()): string {
   return join(realpathSync("/tmp"), `ompweb-host-${process.getuid!()}-${hash}`, "control.sock");
 }
 
-function owned(path: string, kind: "directory" | "socket", mode: number): Stats {
+function owned(path: string, kind: "directory" | "socket", mode?: number): Stats {
   const stat = lstatSync(path);
   if (stat.isSymbolicLink() || stat.uid !== process.getuid!() || (kind === "directory" ? !stat.isDirectory() : !stat.isSocket())) {
     throw new Error(`Unsafe host control ${kind}: not an owned ${kind}`);
   }
-  if ((stat.mode & 0o777) !== mode) throw new Error(`Host control ${kind} must have private ${mode.toString(8)} permissions`);
+  if (mode !== undefined && (stat.mode & 0o777) !== mode) throw new Error(`Host control ${kind} must have private ${mode.toString(8)} permissions`);
   return stat;
 }
-const same = (left: Stats, right: Stats) => left.ino === right.ino && left.dev === right.dev && left.uid === right.uid && left.mode === right.mode;
+const sameIdentity = (left: Stats, right: Stats) => left.ino === right.ino && left.dev === right.dev && left.uid === right.uid;
+const same = (left: Stats, right: Stats) => sameIdentity(left, right) && left.mode === right.mode;
+
+function secureDirectory(path: string): Stats {
+  const previous = owned(path, "directory");
+  const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+  let fd: number;
+  try {
+    fd = openSync(path, flags);
+  } catch (error) {
+    if (errno(error) !== "EACCES") throw error;
+    const parent = lstatSync(dirname(path));
+    // A root-owned sticky parent prevents another UID replacing our unreadable directory during chmod.
+    if (!parent.isDirectory() || parent.uid !== 0 || !(parent.mode & 0o1000)
+      || !sameIdentity(previous, owned(path, "directory"))) throw error;
+    chmodSync(path, 0o700);
+    fd = openSync(path, flags);
+  }
+  try {
+    if (!sameIdentity(previous, fstatSync(fd))) throw new Error("Host control directory changed during permission recovery");
+    // Repair the verified inode, never a pathname another local user could replace with a symlink.
+    if ((fstatSync(fd).mode & 0o777) !== 0o700) fchmodSync(fd, 0o700);
+    const current = owned(path, "directory", 0o700);
+    if (!same(fstatSync(fd), current)) throw new Error("Host control directory changed during permission recovery");
+    return current;
+  } finally {
+    closeSync(fd);
+  }
+}
 function removeOwn(path: string, acquired: Stats): void {
-  try { if (same(acquired, lstatSync(path))) unlinkSync(path); }
+  try { if (sameIdentity(acquired, lstatSync(path))) unlinkSync(path); }
   catch (error) { if (errno(error) !== "ENOENT") throw error; }
 }
 
@@ -182,10 +210,15 @@ export async function createHostControlServer(control: (command: HostControlComm
   const path = hostControlPath(agentDir);
   const dir = dirname(path);
   try { mkdirSync(dir, { mode: 0o700 }); } catch (error) { if (errno(error) !== "EEXIST") throw error; }
-  owned(dir, "directory", 0o700);
+  const directory = secureDirectory(dir);
   try {
+    const previous = owned(path, "socket");
+    // The directory is now private; tighten an owned socket before probing, including a mode-000 socket.
+    if ((previous.mode & 0o777) !== 0o600) chmodSync(path, 0o600);
     const stale = owned(path, "socket", 0o600);
+    if (!sameIdentity(previous, stale)) throw new Error("Host control endpoint changed during permission recovery");
     await refused(path);
+    if (!same(directory, owned(dir, "directory", 0o700))) throw new Error("Host control directory changed during stale recovery");
     const current = owned(path, "socket", 0o600);
     if (!same(stale, current)) throw new Error("Host control endpoint changed during stale recovery");
     unlinkSync(path);
