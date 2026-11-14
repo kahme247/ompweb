@@ -1899,10 +1899,7 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
-/* New-session workspace picker: keep the destination legible without turning
-   it into a second prominent form. The folder badge and path provide a quiet
-   visual hierarchy while the native select preserves keyboard and platform
-   behavior. */
+/* New-session destination controls and their themed option lists. */
 .new-session-workspace {
   display: grid;
   gap: 8px;
@@ -1962,7 +1959,33 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   color: var(--accent);
   pointer-events: none;
 }
-.new-session-workspace-control select {
+.themed-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.themed-select-trigger:hover:not(:disabled) { background: var(--bg-hover); }
+.themed-select-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.themed-select-trigger[aria-invalid="true"] { border-color: var(--status-error); }
+.themed-select-trigger:disabled { opacity: 0.6; cursor: not-allowed; }
+.themed-select-value { flex: 1; min-width: 0; }
+.themed-select-chevron { flex-shrink: 0; color: var(--text-dim); }
+.workspace-select-trigger .themed-select-chevron { display: none; }
+.workspace-select-trigger {
   width: 100%;
   min-width: 0;
   height: 46px;
@@ -1970,7 +1993,8 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   overflow: hidden;
   border: 0;
   outline: 0;
-  appearance: none;
+  display: flex;
+  align-items: center;
   background: transparent;
   color: var(--text);
   cursor: pointer;
@@ -1978,14 +2002,77 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   font-size: 15px;
   font-weight: 500;
   line-height: 1.2;
+  text-align: left;
+}
+.themed-select-value {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.new-session-workspace-control select option {
+.themed-select-item-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.themed-select-positioner {
+  z-index: 1100;
+  min-width: var(--anchor-width);
+  width: max-content;
+  max-width: calc(100vw / var(--ui-scale, 1) - 24px);
+}
+.themed-select-popup {
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
   background: var(--bg-panel);
   color: var(--text);
-  font-family: var(--font-mono);
+  box-shadow: var(--shadow-pop);
+}
+.themed-select-list {
+  max-height: min(320px, calc(var(--available-height) - 8px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding: 4px;
+}
+.themed-select-item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  outline: none;
   font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
+}
+.themed-select-item[data-highlighted] {
+  background: var(--bg-hover);
+}
+.themed-select-item[data-selected] {
+  font-weight: 600;
+}
+.themed-select-item[data-disabled] {
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
+.themed-select-item[data-action] {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text-muted);
+}
+.themed-select-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+@media (max-width: 640px) {
+  .themed-select-item {
+    min-height: 44px;
+  }
 }
 .new-session-workspace-chevron {
   position: absolute;
@@ -3044,7 +3131,7 @@ html.dark .dropdown-surface :is(select, option) {
 }
 
 /* Dropdowns take at most half the card and ellipsize long option labels. */
-.settings-card-control:has(> select) {
+.settings-card-control:has(> .themed-select-trigger) {
   flex-shrink: 1;
   max-width: 50%;
 }
@@ -3111,17 +3198,17 @@ html.dark .dropdown-surface :is(select, option) {
 }
 
 @media (max-width: 640px) {
-  /* Stack dropdown rows so the select spans the full card below its label. */
-  .settings-card:has(> .settings-card-control > select),
+  /* Stack dropdown rows so the control spans the full card below its label. */
+  .settings-card:has(> .settings-card-control > .themed-select-trigger),
   .settings-card:has(> .settings-card-control > .compaction-method-order) {
     flex-direction: column;
     align-items: stretch;
     gap: 8px;
   }
-  .settings-card-control:has(> select) {
+  .settings-card-control:has(> .themed-select-trigger) {
     max-width: none;
   }
-  .settings-card-control > select {
+  .settings-card-control > .themed-select-trigger {
     width: 100%;
   }
 }
@@ -4662,6 +4749,79 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   transition: transform var(--dur-fast) var(--ease-out-warm);
 }
 .skip-link:focus { transform: translateY(0); box-shadow: var(--shadow-pop); }
+
+.git-change-mention-action { background: transparent; color: var(--text-muted); }
+.git-change-mention-action:disabled { color: var(--text-dim); }
+.git-change-mention-action:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+
+.file-explorer-row:not([aria-disabled="true"]):not([aria-current="true"]):hover {
+  background: var(--bg-hover);
+}
+.file-explorer-row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.file-explorer-row-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 14px;
+  flex-shrink: 0;
+}
+.file-explorer-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.file-explorer-row-action,
+.file-explorer-row-action-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+}
+.file-explorer-row-action {
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-decoration: none;
+}
+.file-explorer-row-action:hover {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+.file-explorer-row-action:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  color: var(--text);
+}
+@media (hover: hover) and (pointer: fine) {
+  .file-explorer-row-actions {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .file-explorer-row:hover .file-explorer-row-actions,
+  .file-explorer-row:focus-within .file-explorer-row-actions,
+  .file-explorer-row[aria-current="true"] .file-explorer-row-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+@media (max-width: 640px) {
+  .file-explorer-row-action,
+  .file-explorer-row-action-slot {
+    flex-basis: 44px;
+    width: 44px;
+    height: 44px;
+  }
+}
 
 /* Touch target density options (Settings -> Touch Targets). */
 html[data-touch-targets="accessible"] :is(

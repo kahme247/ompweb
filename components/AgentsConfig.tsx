@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Bot, Check, Copy, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { Alert } from "@/components/ui/field";
+import { ThemedSelect } from "@/components/ui/primitives";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -352,10 +353,12 @@ export function AgentsConfig({ cwd, userOnly = false }: { cwd: string | null; us
                   {creating ? (
                     <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)" }}>
                       {t("agentsConfig.scope")}
-                      <select value={createScope} onChange={(e) => setCreateScope(e.target.value as "user" | "project")} style={{ ...nativeSelectStyle, fontSize: 11, minHeight: 28 }}>
-                        <option value="user">{t("agentsConfig.scopeUser")}</option>
-                        {!userOnly && <option value="project" disabled={!canEditProject}>{t("agentsConfig.scopeProject")}</option>}
-                      </select>
+                      <ThemedSelect aria-label={t("agentsConfig.scope")} value={createScope} onChange={(nextValue) => setCreateScope(nextValue as "user" | "project")} style={{ ...nativeSelectStyle, fontSize: 11, minHeight: 28 }}
+                        options={[
+                          { value: "user", label: t("agentsConfig.scopeUser") },
+                          ...(!userOnly && [{ value: "project", label: t("agentsConfig.scopeProject"), disabled: !canEditProject }] || []),
+                        ]}
+                      />
                     </label>
                   ) : null}
                 </div>
@@ -374,9 +377,9 @@ export function AgentsConfig({ cwd, userOnly = false }: { cwd: string | null; us
                   </label>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.thinkingLevel")}</span>
-                    <select value={thinkingLevel} onChange={(e) => setThinkingLevel(e.target.value)} style={nativeSelectStyle}>
-                      {THINKING_LEVELS.map((lv) => <option key={lv} value={lv}>{lv || t("agentsConfig.defaultThinking")}</option>)}
-                    </select>
+                    <ThemedSelect aria-label={t("agentsConfig.thinkingLevel")} value={thinkingLevel} onChange={(nextValue) => setThinkingLevel(nextValue)} style={nativeSelectStyle}
+                      options={THINKING_LEVELS.map((lv) => ({ value: lv, label: lv || t("agentsConfig.defaultThinking") }))}
+                    />
                   </label>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>

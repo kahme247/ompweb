@@ -267,7 +267,6 @@ const ExplorerRow = memo(function ExplorerRow({
   onFocusRow,
 }: ExplorerRowProps) {
   const { t } = useI18n();
-  const [hovered, setHovered] = useState(false);
 
   if (row.kind === "empty") {
     return (
@@ -294,10 +293,9 @@ const ExplorerRow = memo(function ExplorerRow({
 
   return (
     <div
+      className="file-explorer-row"
       onClick={() => onActivate(node, index)}
       onKeyDown={(e) => onKeyDown(e, node, index)}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
       onFocus={(e) => { if (e.target === e.currentTarget) onFocusRow(index); }}
       role="treeitem"
       tabIndex={focused ? 0 : -1}
@@ -327,11 +325,10 @@ const ExplorerRow = memo(function ExplorerRow({
         height: rowHeight,
         cursor: blocked ? "default" : "pointer",
         opacity: blocked ? 0.5 : 1,
-        background: isActiveFile ? "var(--bg-selected)" : hovered && !blocked ? "var(--bg-hover)" : "transparent",
+        background: isActiveFile ? "var(--bg-selected)" : undefined,
         borderRadius: "var(--radius-control)",
         userSelect: "none",
-        boxShadow: focused ? "inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent)" : isActiveFile ? "inset 2px 0 0 var(--accent)" : "none",
-        outline: "none",
+        boxShadow: isActiveFile ? "inset 2px 0 0 var(--accent)" : undefined,
         transition: `background var(--dur-fast) var(--ease-out-warm)`,
       }}
     >
@@ -407,6 +404,7 @@ const ExplorerRow = memo(function ExplorerRow({
           {secondaryLabel}
         </span>
       )}
+      <span className="file-explorer-row-status">
       {highlighted && (
         <span
           title={t("fileExplorer.newlyUploaded")}
@@ -447,69 +445,37 @@ const ExplorerRow = memo(function ExplorerRow({
       {loading && (
         <Loader2 size={10} strokeWidth={2} color="var(--text-dim)" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true" />
       )}
+      </span>
+      <span className="file-explorer-row-actions">
       {onAtMention && (
         <Tooltip content={mentionLabel}>
           <button
+            type="button"
+            className="file-explorer-row-action"
             onClick={(e) => {
               e.stopPropagation();
               onAtMention(getRelativeFilePath(node.fullPath, cwd), node.isDir);
             }}
             aria-label={mentionLabel}
-            style={{
-              flexShrink: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 4,
-              padding: "0 8px",
-              minWidth: 24, height: 24,
-              background: "var(--bg-panel)",
-              border: "1px solid var(--border)",
-              borderRadius: "var(--radius-control)",
-              color: "var(--accent)",
-              cursor: "pointer",
-              fontSize: 11,
-              fontWeight: 600,
-              whiteSpace: "nowrap",
-              transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
-            }}
           >
-            <AtSign size={11} strokeWidth={2.2} aria-hidden="true" />
-            {t("fileExplorer.mention")}
+            <AtSign size={14} strokeWidth={1.8} aria-hidden="true" />
           </button>
         </Tooltip>
       )}
-      {!node.isDir && !blocked && (
+      {!node.isDir && !blocked ? (
         <Tooltip content={downloadLabel}>
           <a
             href={getFileApiUrl(node.fullPath, "download", hostId, sourceSessionId)}
             download
             onClick={(e) => e.stopPropagation()}
             aria-label={downloadLabel}
-            style={{
-              flexShrink: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 4,
-              padding: "0 5px",
-              minWidth: 24, height: 24,
-              background: "var(--bg-panel)",
-              border: "1px solid var(--border)",
-              borderRadius: "var(--radius-control)",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 11,
-              fontWeight: 600,
-              whiteSpace: "nowrap",
-              textDecoration: "none",
-              transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
-            }}
+            className="file-explorer-row-action"
           >
-            <Download size={11} strokeWidth={2.2} aria-hidden="true" />
+            <Download size={14} strokeWidth={1.8} aria-hidden="true" />
           </a>
         </Tooltip>
-      )}
+      ) : <span className="file-explorer-row-action-slot" aria-hidden="true" />}
+      </span>
     </div>
   );
 });

@@ -86,7 +86,9 @@ test("on another member a new agent can only be the user's", async (t) => {
   render(createElement(SettingsConfig, { ...settingsProps, activeTab: "agents", remoteHost: true, cluster: true }));
   const [create] = await screen.findAllByRole("button", { name: "New agent" });
   await waitFor(() => assert.equal(create.disabled, false));
-  await userEvent.setup().click(create);
+  const user = userEvent.setup();
+  await user.click(create);
+  await user.click(await screen.findByRole("combobox", { name: "scope" }));
   assert.ok(await screen.findByRole("option", { name: "user" }));
   assert.equal(screen.queryByRole("option", { name: "project" }), null);
 });

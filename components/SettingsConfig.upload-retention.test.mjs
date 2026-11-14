@@ -2,11 +2,22 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
-const { cleanup, fireEvent, render, within } = await import("@testing-library/react/pure.js");
+const { cleanup, fireEvent, render, waitFor, within } = await import("@testing-library/react/pure.js");
 const { SettingsConfig } = await import("./SettingsConfig");
 
 const noop = () => {};
 const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+const openChoices = async (select) => {
+  fireEvent.click(select);
+  return waitFor(() => within(document.body).getByRole("listbox"));
+};
+const choose = async (select, name) => {
+  if (select.getAttribute("aria-expanded") !== "true") await openChoices(select);
+  const option = within(within(document.body).getByRole("listbox")).getByRole("option", { name, exact: true });
+  fireEvent.pointerDown(option, { pointerType: "mouse" });
+  fireEvent.click(option);
+  await settle();
+};
 
 const settingsProps = {
   activeTab: "system",
@@ -46,19 +57,20 @@ test("the upload retention control offers Never, 7, 30 and 90 days, saves a chan
   const { container } = render(createElement(SettingsConfig, settingsProps));
   await settle();
   const select = within(container).getByRole("combobox", { name: "Delete sent uploads after" });
-  assert.deepEqual([...select.options].map((option) => [option.value, option.textContent]), [["null", "Never"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"]]);
-  assert.equal(select.value, "30");
+  const list = await openChoices(select);
+  assert.deepEqual(within(list).getAllByRole("option").map((option) => option.textContent), ["Never", "7 days", "30 days", "90 days"]);
+  assert.equal(select.textContent, "30 days");
 
-  fireEvent.change(select, { target: { value: "null" } });
+  await choose(select, "Never");
   await settle();
   assert.deepEqual(puts, ['{"uploadRetentionDays":null}']);
-  assert.equal(select.value, "null");
+  assert.equal(select.textContent, "Never");
 
   failPuts();
-  fireEvent.change(select, { target: { value: "90" } });
+  await choose(select, "90 days");
   await settle();
   assert.equal(puts.at(-1), '{"uploadRetentionDays":90}');
-  assert.equal(select.value, "null", "a failed save restores the previous choice");
+  assert.equal(select.textContent, "Never", "a failed save restores the previous choice");
 });
 
 test("a retention set through the API stays visible as its own choice", async (t) => {
@@ -66,6 +78,7 @@ test("a retention set through the API stays visible as its own choice", async (t
   const { container } = render(createElement(SettingsConfig, settingsProps));
   await settle();
   const select = within(container).getByRole("combobox", { name: "Delete sent uploads after" });
-  assert.equal(select.value, "14");
-  assert.equal([...select.options].at(-1).textContent, "14 days");
+  assert.equal(select.textContent, "14 days");
+  const list = await openChoices(select);
+  assert.equal(within(list).getAllByRole("option").at(-1).textContent, "14 days");
 });

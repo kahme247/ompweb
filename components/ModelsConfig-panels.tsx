@@ -6,6 +6,7 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
+  ThemedSelect,
 } from "@/components/ui/primitives";
 import { Plus, Trash2, ArrowDown, ArrowUp } from "lucide-react";
 import { toast } from "@/components/ui/toast";
@@ -139,12 +140,12 @@ export function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] })
     <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
       <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.enabled ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, enabled: event.target.checked } })} /> {t("modelsConfig.retryTransientErrors")}</label>
       <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, modelFallback: event.target.checked } })} /> {t("modelsConfig.allowModelFallback")}</label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.retryAttempts")} <select value={retry.maxRetries ?? 10} onChange={(event) => void save({ ...settings, retry: { ...retry, maxRetries: Number(event.target.value) } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{[0, 1, 2, 3, 5, 10, 15, 20].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.returnToPrimary")} <select value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(event) => void save({ ...settings, retry: { ...retry, fallbackRevertPolicy: event.target.value as "cooldown-expiry" | "never" } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="cooldown-expiry">{t("modelsConfig.afterCooldown")}</option><option value="never">{t("modelsConfig.never")}</option></select></label>
+      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.retryAttempts")} <ThemedSelect value={retry.maxRetries ?? 10} onChange={(nextValue) => void save({ ...settings, retry: { ...retry, maxRetries: Number(nextValue) } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }} options={[...[0, 1, 2, 3, 5, 10, 15, 20].map((count) => ({ value: count, label: count }))]} /></label>
+      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.returnToPrimary")} <ThemedSelect value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(nextValue) => void save({ ...settings, retry: { ...retry, fallbackRevertPolicy: nextValue as "cooldown-expiry" | "never" } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }} options={[{ value: "cooldown-expiry", label: t("modelsConfig.afterCooldown") }, { value: "never", label: t("modelsConfig.never") }]} /></label>
     </div>
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.fallbackChainFor")}</span><select aria-label={t("modelsConfig.fallbackChainFor")} value={role} onChange={(event) => setRole(event.target.value)} style={{ padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{NATIVE_MODEL_ROLES.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
-      <div style={{ padding: 12, display: "flex", gap: 8 }}><select aria-label={t("modelsConfig.selectFallbackModel")} value={candidate} onChange={(event) => setCandidate(event.target.value)} style={{ flex: 1, minWidth: 0, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="">{t("modelsConfig.selectFallbackModel")}</option>{modelOptions.filter((value) => !chain.includes(value)).map((value) => <option key={value} value={value}>{value}</option>)}</select><button type="button" disabled={!candidate} onClick={() => { updateChain([...chain, candidate]); setCandidate(""); }} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "white", cursor: "pointer", fontSize: 12 }}>{t("modelsConfig.add")}</button></div>
+      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.fallbackChainFor")}</span><ThemedSelect aria-label={t("modelsConfig.fallbackChainFor")} value={role} onChange={(nextValue) => setRole(nextValue)} style={{ padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }} options={[...NATIVE_MODEL_ROLES.map((value) => ({ value: value, label: value }))]} /></div>
+      <div style={{ padding: 12, display: "flex", gap: 8 }}><ThemedSelect aria-label={t("modelsConfig.selectFallbackModel")} value={candidate} onChange={(nextValue) => setCandidate(nextValue)} style={{ flex: 1, minWidth: 0, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }} options={[{ value: "", label: t("modelsConfig.selectFallbackModel") }, ...modelOptions.filter((value) => !chain.includes(value)).map((value) => ({ value: value, label: value }))]} /><button type="button" disabled={!candidate} onClick={() => { updateChain([...chain, candidate]); setCandidate(""); }} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "white", cursor: "pointer", fontSize: 12 }}>{t("modelsConfig.add")}</button></div>
       {chain.length === 0 ? (
         <div style={{ padding: "0 12px 12px", color: "var(--text-dim)", fontSize: 12 }}>{t("modelsConfig.noExplicitChain")}</div>
       ) : (
@@ -307,15 +308,19 @@ export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
           const model = models.find((item) => `${item.provider}/${item.id}` === selectedModel);
           const modelKnown = !selectedModel || Boolean(model);
           return <>
-            <select aria-label={`Model override for ${role}`} value={selectedModel} onChange={(event) => updateRoleModel(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}>
-              <option value="">{t("modelsConfig.noOverride")}</option>
-              {!modelKnown && <option value={selectedModel}>{selectedModel} (not currently available)</option>}
-              {models.map((item) => <option key={`${item.provider}:${item.id}`} value={`${item.provider}/${item.id}`}>{item.name || item.id} ({item.provider}/{item.id})</option>)}
-            </select>
-            <select aria-label={`Thinking level for ${role}`} value={selectedThinking} disabled={!model} onChange={(event) => updateRoleThinking(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, opacity: model ? 1 : 0.55 }}>
-              <option value="">{t("modelsConfig.modelDefault")}</option>
-              {(model?.thinkingLevels ?? []).filter((level) => level !== "off").map((level) => <option key={level} value={level}>{level}</option>)}
-            </select>
+            <ThemedSelect aria-label={`Model override for ${role}`} value={selectedModel} onChange={(nextValue) => updateRoleModel(role, nextValue)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
+              options={[
+                { value: "", label: t("modelsConfig.noOverride") },
+                ...(!modelKnown && [{ value: selectedModel, label: <>{selectedModel} (not currently available)</> }] || []),
+                ...models.map((item) => ({ value: `${item.provider}/${item.id}`, label: <>{item.name || item.id} ({item.provider}/{item.id})</> })),
+              ]}
+            />
+            <ThemedSelect aria-label={`Thinking level for ${role}`} value={selectedThinking} disabled={!model} onChange={(nextValue) => updateRoleThinking(role, nextValue)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, opacity: model ? 1 : 0.55 }}
+              options={[
+                { value: "", label: t("modelsConfig.modelDefault") },
+                ...(model?.thinkingLevels ?? []).filter((level) => level !== "off").map((level) => ({ value: level, label: level })),
+              ]}
+            />
           </>;
         })()}
       </div>

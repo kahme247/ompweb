@@ -101,6 +101,7 @@ export function useGlobalKeyboardShortcuts(
     const editorFocused = () => {
       const element = document.activeElement;
       return !!element?.matches("input, textarea, select, iframe")
+        || !!element?.closest(".themed-select-trigger, .themed-select-list")
         || (element instanceof HTMLElement && element.isContentEditable);
     };
     const rememberSelectionScope = () => {
@@ -161,7 +162,7 @@ export function useGlobalKeyboardShortcuts(
 
       const target = event.target;
       if (target instanceof Element && (
-        target.closest("input, textarea, select, iframe")
+        target.closest("input, textarea, select, iframe, .themed-select-trigger, .themed-select-list")
         || (target instanceof HTMLElement && target.isContentEditable)
       )) return;
 
@@ -211,6 +212,7 @@ export function useGlobalKeyboardShortcuts(
 
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
+      if (e.target instanceof Element && e.target.closest(".themed-select-trigger, .themed-select-list")) return;
       // ---- Esc: stop agent ----
       if (e.key === "Escape") {
         if (!globalAbortHandler) return;

@@ -484,19 +484,16 @@ export function GitChangesPanel({ cwd, hostId, sourceSessionId, refreshKey, onOp
                 title={t("fileExplorer.insertPathIntoChat")}
                 aria-label={t("fileExplorer.insertPathIntoChat")}
                 style={{
-                  display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
-                  height: 22, padding: "0 7px",
-                  background: "var(--bg-panel)",
-                  border: "1px solid var(--border)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 26, height: 22, padding: 0,
+                  border: "none",
                   borderRadius: "var(--radius-control)",
-                  color: selectedPath ? "var(--accent)" : "var(--text-dim)",
                   cursor: selectedPath ? "pointer" : "default",
                   opacity: selectedPath ? 1 : 0.6,
                   fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
                 }}
               >
-                <AtSign size={11} strokeWidth={2.2} aria-hidden="true" />
-                {t("fileExplorer.mention")}
+                <AtSign size={14} strokeWidth={1.8} aria-hidden="true" />
               </button>
             )}
             <button

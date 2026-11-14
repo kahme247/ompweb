@@ -27,7 +27,7 @@ import { translate, useI18n } from "@/lib/i18n";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { normalizeDisplayMath, useMarkdownPlugins } from "@/lib/markdown";
 import { markdownCodeRenderer } from "./MarkdownCode";
-import { Tooltip } from "./ui/primitives";
+import { ThemedSelect, Tooltip } from "./ui/primitives";
 import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { parseFrontmatter } from "@/lib/frontmatter";
@@ -1136,16 +1136,17 @@ function TextFileViewer({ filePath, hostId, cwd, sourceSessionId, onOpenFile, on
             {displayMode === "source" && (
               <>
                 <Tooltip content={t("fileViewer.highlightLanguage")}>
-                  <select
+                  <ThemedSelect
                     value={languageOverride ?? ""}
-                    onChange={(event) => setLanguageOverride(event.target.value || null)}
+                    onChange={(nextValue) => setLanguageOverride(nextValue || null)}
                     aria-label={t("fileViewer.highlightLanguage")}
                     className="file-viewer-language-select"
-                  >
-                    <option value="">{t("fileViewer.languageAuto", { language: data.language })}</option>
-                    <option value="plaintext">{t("fileViewer.plainText")}</option>
-                    {HIGHLIGHT_LANGUAGES.map((language) => <option key={language} value={language}>{language}</option>)}
-                  </select>
+                    options={[
+                      { value: "", label: t("fileViewer.languageAuto", { language: data.language }) },
+                      { value: "plaintext", label: t("fileViewer.plainText") },
+                      ...HIGHLIGHT_LANGUAGES.map((language) => ({ value: language, label: language })),
+                    ]}
+                  />
                 </Tooltip>
                 <Tooltip content={t("fileViewer.mentionSelectedLines")}>
                   <button

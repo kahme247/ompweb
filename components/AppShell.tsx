@@ -16,6 +16,7 @@ import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
 import { notificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
 import { ConfirmDialog } from "./ui/field";
+import { ThemedSelect } from "./ui/primitives";
 import { ChatWindow } from "./ChatWindow";
 import { type Tab } from "./TabBar";
 import { type FileExplorerHandle } from "./FileExplorer";
@@ -2564,26 +2565,26 @@ export function AppShell({ appName }: { appName: string }) {
                         <span className="new-session-workspace-icon" aria-hidden="true">
                           <Server size={17} strokeWidth={1.8} />
                         </span>
-                        <select
+                        <ThemedSelect
+                          className="workspace-select-trigger"
                           id="new-session-host"
                           value={newSessionGroupKey}
-                          onChange={(event) => {
-                            const matches = workspaceOptions.projects.filter((project) => projectTargetId(project, pools) === event.target.value);
+                          onChange={(key) => {
+                            const matches = workspaceOptions.projects.filter((project) => projectTargetId(project, pools) === key);
                             const first = matches.find((project) => project.poolId) ?? matches[0];
-                            if (!first || event.target.value === newSessionGroupKey) return;
+                            if (!first || key === newSessionGroupKey) return;
                             suppressCwdRef.current = first.path;
                             setActivePoolProject(first.poolId ? first : null);
                             setActiveCwd(first.poolId ? null : first.path);
                             setActiveHostId(first.poolId ? undefined : remoteHostId(first.hostId));
                             handleNewSession(crypto.randomUUID(), first.poolId ? null : first.path, first.hostId, first);
                           }}
-                        >
-                          {creationTargets.map((target) => (
-                            <option key={target.id} value={target.id} disabled={!workspaceOptions.projects.some((project) => projectTargetId(project, pools) === target.id)}>
-                              {target.label}
-                            </option>
-                          ))}
-                        </select>
+                          options={creationTargets.map((target) => ({
+                            value: target.id,
+                            label: target.label,
+                            disabled: !workspaceOptions.projects.some((project) => projectTargetId(project, pools) === target.id),
+                          }))}
+                        />
                         <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
                       </div>
                     </>
@@ -2595,12 +2596,12 @@ export function AppShell({ appName }: { appName: string }) {
                     <span className="new-session-workspace-icon" aria-hidden="true">
                       <Folder size={17} strokeWidth={1.8} />
                     </span>
-                    <select
+                    <ThemedSelect
+                      className="workspace-select-trigger"
                       id="new-session-workspace"
                       aria-describedby="new-session-workspace-path"
                       value={newSessionWorkspaceValue}
-                      onChange={(event) => {
-                        const key = event.target.value;
+                      onChange={(key) => {
                         if (!key) { openAddProject(true, newSessionGroupKey); return; }
                         const project = hostProjects.find((candidate) => projectIdentity(candidate) === key || (!candidate.poolId && hostProjectKey(candidate.hostId, candidate.path) === key));
                         if (!project) return;
@@ -2610,22 +2611,21 @@ export function AppShell({ appName }: { appName: string }) {
                         setActiveHostId(project.poolId ? undefined : remoteHostId(project.hostId));
                         handleNewSession(crypto.randomUUID(), project.poolId ? null : project.path, project.hostId, project);
                       }}
-                    >
-                      {!effectivePoolProject && effectiveNewSessionCwd && !hostProjects.some((project) => foldedHostProjectKey(project.hostId, project.path) === foldedHostProjectKey(newSessionHost, newSessionProject)) && (
-                        <option value={newSessionWorkspaceValue}>{projectLabel(effectiveNewSessionCwd)}</option>
-                      )}
-                      {hostProjects.map((project) => {
-                        const name = project.alias ?? project.name ?? projectLabel(project.path);
-                        // A member's pinned project: its option names the node.
-                        const node = !project.poolId && projectTargetId(project, pools) !== (project.hostId ?? LOCAL_HOST_ID) ? hosts?.find((host) => host.id === (project.hostId ?? LOCAL_HOST_ID)) : undefined;
-                        return (
-                          <option key={projectIdentity(project)} value={project.poolId ? projectIdentity(project) : hostProjectKey(project.hostId, foldedHostProjectKey(project.hostId, project.path) === foldedHostProjectKey(newSessionHost, newSessionProject) ? effectiveNewSessionCwd ?? project.path : project.path)}>
-                            {node ? t("hosts.projectOnNode", { name, node: hostName(t, node) }) : name}
-                          </option>
-                        );
-                      })}
-                      <option value="">+ {t("projects.add")}</option>
-                    </select>
+                      options={[
+                        ...(!effectivePoolProject && effectiveNewSessionCwd && !hostProjects.some((project) => foldedHostProjectKey(project.hostId, project.path) === foldedHostProjectKey(newSessionHost, newSessionProject))
+                          ? [{ value: newSessionWorkspaceValue, label: projectLabel(effectiveNewSessionCwd) }] : []),
+                        ...hostProjects.map((project) => {
+                          const name = project.alias ?? project.name ?? projectLabel(project.path);
+                          // A member's pinned project: its option names the node.
+                          const node = !project.poolId && projectTargetId(project, pools) !== (project.hostId ?? LOCAL_HOST_ID) ? hosts?.find((host) => host.id === (project.hostId ?? LOCAL_HOST_ID)) : undefined;
+                          return {
+                            value: project.poolId ? projectIdentity(project) : hostProjectKey(project.hostId, foldedHostProjectKey(project.hostId, project.path) === foldedHostProjectKey(newSessionHost, newSessionProject) ? effectiveNewSessionCwd ?? project.path : project.path),
+                            label: node ? t("hosts.projectOnNode", { name, node: hostName(t, node) }) : name,
+                          };
+                        }),
+                        { value: "", label: t("projects.add"), action: true },
+                      ]}
+                    />
                     <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
                   </div>
                   {/* The workspace's worktrees: picking one sets where the new
@@ -2636,16 +2636,14 @@ export function AppShell({ appName }: { appName: string }) {
                       <span className="new-session-workspace-icon" aria-hidden="true">
                         <GitBranch size={17} strokeWidth={1.8} />
                       </span>
-                      <select
+                      <ThemedSelect
+                        className="workspace-select-trigger"
                         aria-label={t("sessionSidebar.switchWorktree")}
                         aria-describedby="new-session-workspace-path"
                         value={worktreeCtx.currentPath}
-                        onChange={(event) => worktreeCtx.select(event.target.value)}
-                      >
-                        {worktreeCtx.worktrees.map((wt) => (
-                          <option key={wt.path} value={wt.path}>{wt.branch ?? getFileName(wt.path)}</option>
-                        ))}
-                      </select>
+                        onChange={(path) => worktreeCtx.select(path)}
+                        options={worktreeCtx.worktrees.map((wt) => ({ value: wt.path, label: wt.branch ?? getFileName(wt.path) }))}
+                      />
                       <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
                     </div>
                   )}
