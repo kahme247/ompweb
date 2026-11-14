@@ -490,6 +490,7 @@ export class AgentSessionWrapper {
   /** Retained until native adoption has replayed pending requests and released live frames. */
   private adoptionReplay?: string[];
   private restarting = false;
+  private restartingProc: RpcProcess | null = null;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Synchronous mutex for getMcpList: checked+set before any await, so two
    *  concurrent callers can never both enter (the waiter/promptRunning
@@ -634,6 +635,7 @@ export class AgentSessionWrapper {
     if (!this.hostOwnedLifecycle || !this.canReplaceAdvisor()) return null;
     const old = this.proc;
     this.restarting = true;
+    this.restartingProc = old;
     this.expectedExitProc = old;
     try {
       const spawned = await this.host.spawnRpc(launch, this._sessionId, { replaceAdvisor: true, preparing });
@@ -646,6 +648,7 @@ export class AgentSessionWrapper {
       throw error;
     } finally {
       if (this.expectedExitProc === old) this.expectedExitProc = null;
+      if (this.restartingProc === old) this.restartingProc = null;
       this.restarting = false;
     }
   }
@@ -758,8 +761,9 @@ export class AgentSessionWrapper {
   }
 
   start(): void {
-    this.unsubscribeFrames = this.proc.onFrame((frame) => this.handleFrame(frame));
-    this.watchResync(this.proc);
+    const proc = this.proc;
+    this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame, proc));
+    this.watchResync(proc);
     this.unsubscribeHostStatus = this.host.onStatus((status) => this.handleHostStatus(status));
     this.reportInterest();
     this.resetIdleTimer();
@@ -1199,7 +1203,7 @@ export class AgentSessionWrapper {
     }
   }
 
-  private handleFrame(frame: RpcFrame): void {
+  private handleFrame(frame: RpcFrame, sourceProc: RpcProcess = this.proc): void {
     this.resetIdleTimer();
     const event = frame;
     if (event.type === PEER_MESSAGE_FRAME) {
@@ -1361,7 +1365,7 @@ export class AgentSessionWrapper {
               result: { content: [{ type: "text", text: unknownOutcome(toolName) }] },
             });
           } else if (loadWebServerSettings().agentToolsEnabled) {
-            void this.answerServerAgentTool(event);
+            void this.answerServerAgentTool(event, sourceProc);
           } else {
             this.proc.sendFrame({
               type: "host_tool_result",
@@ -1958,11 +1962,11 @@ export class AgentSessionWrapper {
    * with host_tool_result — never via pendingHostTools, so a later tab
    * disconnect cannot settle it as a UI call.
    */
-  private async answerServerAgentTool(event: UnsequencedAgentEvent): Promise<void> {
+  private async answerServerAgentTool(event: UnsequencedAgentEvent, sourceProc: RpcProcess): Promise<void> {
     const id = typeof event.id === "string" ? event.id : "";
     const toolName = typeof event.toolName === "string" ? event.toolName : "";
     if (!id) return;
-    const proc = this.proc;
+    const proc = sourceProc;
     const sendResult = (text: string, isError = false) => {
       proc.sendFrame({
         type: "host_tool_result",
@@ -1971,8 +1975,8 @@ export class AgentSessionWrapper {
         result: { content: [{ type: "text", text }] },
       });
     };
-    if (this.restarting || !this._alive) {
-      sendResult(this.restarting ? RESTARTING_MESSAGE : "Session is no longer running", true);
+    if (!this._alive || sourceProc === this.restartingProc) {
+      sendResult(this._alive ? RESTARTING_MESSAGE : "Session is no longer running", true);
       return;
     }
     const sourceSessionId = this.sessionId;
@@ -2334,6 +2338,7 @@ export class AgentSessionWrapper {
     // Stays true for the whole restart so send() rejects commands that would
     // otherwise hit the disposed or half-built child.
     this.restarting = true;
+    this.restartingProc = old;
     this.abortServerToolCalls();
     let resumable: boolean;
     try {
@@ -2342,6 +2347,7 @@ export class AgentSessionWrapper {
       resumable = !!sessionFile && await this.host.sessionFileExists(sessionFile);
     } catch (error) {
       this.restarting = false;
+      this.restartingProc = null;
       throw error;
     }
     this.resetStream();
@@ -2407,7 +2413,7 @@ export class AgentSessionWrapper {
       this.deliveredCallbacks.clear();
       this.messageCommandGeneration += 1;
       this.confirmedMessageCommandGeneration = this.messageCommandGeneration;
-      this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
+      this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame, proc));
       this.watchResync(proc);
       this.reportInterest();
       try {
@@ -2450,6 +2456,7 @@ export class AgentSessionWrapper {
         throw error;
       }
     } finally {
+      this.restartingProc = null;
       this.restarting = false;
     }
     notifyRunningChange();
