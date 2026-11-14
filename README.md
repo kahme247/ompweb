@@ -698,10 +698,26 @@ protocol is blocked too. omp is part of each ompweb release and updates with it.
 Before updating a daemon, close its session processes: the updater refuses to
 interrupt sessions or subagents. **Settings → System** keeps the web server's
 own application update and service settings.
-Hosts need a daemon build that supports these update operations; older builds
-show an unsupported message and need one manual update first. If the daemon
-shares its installation with the web server, update the server first, then use
-the host's restart-only update. Unsupported service wrappers and detected restart
+
+**From 0.7.1 onward, maintenance API v1 is separate from application Protocol v12.**
+The daemon connects to `/api/hosts/maintenance` with the same host token; status,
+session inventory and activity, capabilities, update checks and installation do not
+require a compatible application connection. An application mismatch still blocks
+chat, workspace operations and session attachment, not maintenance.
+
+**Upgrading v10 and v11 daemons:** update the web server to 0.7.1 first, then use
+**Settings → Hosts → Update**. An upgrade-only shim welcomes each old daemon using
+its own protocol and speaks only its existing updater's requests. It never adopts
+or stops its sessions, and the old updater still refuses a busy host. Close those
+session processes before the cutover. If server and daemon share an installation,
+the server update puts the new files in place and the host update only restarts
+the daemon. A daemon that already exited after an earlier version rejection needs
+starting once; an exited process cannot be reached by the shim.
+
+Reverse proxies must forward WebSocket upgrades for `/api/hosts/maintenance`
+without an additional authentication prompt, just as for `/api/hosts/link`.
+Daemons below v10 or without the existing update operations need one manual update.
+Unsupported service wrappers and detected restart
 scripts show a manual-update reason. Stop external restart loops before updating
 a foreground daemon.
 

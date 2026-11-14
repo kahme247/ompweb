@@ -3,6 +3,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { browserLink, type BrowserLinkData } from "@/lib/browser-link";
 import { hostLinkSocket, type LinkSocketData } from "@/lib/hosts/hub";
+import { maintenanceSocket, type MaintenanceSocketData } from "@/lib/hosts/maintenance-hub";
 import { proxy } from "@/proxy";
 import { ensureOmpRunner } from "@/lib/omp/runner-fetch";
 import { register } from "../instrumentation.node";
@@ -25,6 +26,9 @@ type ServerSocket = Bun.ServerWebSocket<ServerSocketData>;
 /** Browser links and host links share Bun's one `websocket` handler; `ws.data` tells them apart. */
 function isBrowserSocket(ws: ServerSocket): ws is Bun.ServerWebSocket<BrowserLinkData> {
   return "kind" in ws.data && ws.data.kind === "browser";
+}
+function isMaintenanceSocket(ws: ServerSocket): ws is Bun.ServerWebSocket<MaintenanceSocketData> {
+  return "kind" in ws.data && ws.data.kind === "maintenance";
 }
 // Not a browser link: a host link (the only other upgrade).
 const asLink = (ws: ServerSocket) => ws as Bun.ServerWebSocket<LinkSocketData>;
@@ -157,10 +161,22 @@ export function startServer(options: { port: number; hostname: string; dev: bool
       ...hostLinkSocket,
       open: (ws: ServerSocket) => {
         if (isBrowserSocket(ws)) browserLink.open(ws);
+        else if (isMaintenanceSocket(ws)) maintenanceSocket.open(ws);
       },
-      message: (ws: ServerSocket, data: string | Uint8Array) => (isBrowserSocket(ws) ? browserLink.message(ws, data) : hostLinkSocket.message(asLink(ws), data)),
-      drain: (ws: ServerSocket) => (isBrowserSocket(ws) ? browserLink.drain(ws) : hostLinkSocket.drain(asLink(ws))),
-      close: (ws: ServerSocket, code: number) => (isBrowserSocket(ws) ? browserLink.close(ws, code) : hostLinkSocket.close(asLink(ws))),
+      message: (ws: ServerSocket, data: string | Uint8Array) => {
+        if (isBrowserSocket(ws)) browserLink.message(ws, data);
+        else if (isMaintenanceSocket(ws)) maintenanceSocket.message(ws, data);
+        else hostLinkSocket.message(asLink(ws), data);
+      },
+      drain: (ws: ServerSocket) => {
+        if (isBrowserSocket(ws)) browserLink.drain(ws);
+        else if (!isMaintenanceSocket(ws)) hostLinkSocket.drain(asLink(ws));
+      },
+      close: (ws: ServerSocket, code: number) => {
+        if (isBrowserSocket(ws)) browserLink.close(ws, code);
+        else if (isMaintenanceSocket(ws)) maintenanceSocket.close(ws);
+        else hostLinkSocket.close(asLink(ws));
+      },
     },
     fetch: async (request, server) => {
       const response = await handle(request, server, async ({ gate }) => {

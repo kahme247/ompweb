@@ -6,6 +6,16 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+## [v0.7.1] - 2026-11-14
+
+### Fixed
+
+- **Upgrade v10 and v11 hosts from Settings again.** Update the web server first, then use **Settings → Hosts → Update**. An isolated shim welcomes old daemons as their own version and speaks only their existing update contract; chat, workspace operations and old session frames remain disabled. Native busy-host, preflight and restart safeguards are unchanged. Shared installations use the existing restart-only update after the server's files are replaced. An old daemon that already exited needs starting once.
+
+### Added
+
+- **Maintenance API v1, independent of application Protocol v12.** A separate host-token-authenticated connection provides status, session inventory and activity, capabilities and software updates even when application protocols differ. Session traffic uses Protocol v12; future application incompatibility no longer needs to disconnect maintenance. Reverse proxies must forward `/api/hosts/maintenance` WebSocket upgrades as well as `/api/hosts/link`.
+
 ## [v0.7.0] - 2026-11-14
 
 ### Breaking changes

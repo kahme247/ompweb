@@ -26,9 +26,11 @@ import * as hostsBrokerPath from "@/app/api/hosts/broker/[...path]/route";
 import * as hostsClusterConfigFileHash from "@/app/api/hosts/cluster-config/file/[hash]/route";
 import * as hostsClusterConfigManifest from "@/app/api/hosts/cluster-config/manifest/route";
 import * as hostsLink from "@/app/api/hosts/link/route";
+import * as hostsMaintenance from "@/app/api/hosts/maintenance/route";
 import * as hosts from "@/app/api/hosts/route";
 import * as hostsIdCluster from "@/app/api/hosts/[id]/cluster/route";
 import * as hostsIdUpdates from "@/app/api/hosts/[id]/updates/route";
+import * as hostsIdMaintenance from "@/app/api/hosts/[id]/maintenance/route";
 import * as manifest from "@/app/api/manifest/route";
 import * as mcp from "@/app/api/mcp/route";
 import * as mediaHash from "@/app/api/media/[hash]/route";
@@ -82,9 +84,10 @@ import * as windowsService from "@/app/api/windows-service/route";
 import * as worktrees from "@/app/api/worktrees/route";
 import type { BrowserLinkData } from "@/lib/browser-link";
 import type { LinkSocketData } from "@/lib/hosts/hub";
+import type { MaintenanceSocketData } from "@/lib/hosts/maintenance-hub";
 
-/** What Bun keeps on an upgraded socket (`ws.data`): a host link's or a browser link's. */
-export type ServerSocketData = LinkSocketData | BrowserLinkData;
+/** What Bun keeps on an upgraded socket: application, maintenance API, or browser transport. */
+export type ServerSocketData = LinkSocketData | MaintenanceSocketData | BrowserLinkData;
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 // never: each handler narrows its own params; the router passes Record<string, string | string[]>.
@@ -126,8 +129,10 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "hosts/cluster-config/file/[hash]": hostsClusterConfigFileHash,
   "hosts/cluster-config/manifest": hostsClusterConfigManifest,
   "hosts/link": hostsLink,
+  "hosts/maintenance": hostsMaintenance,
   "hosts": hosts,
   "hosts/[id]/cluster": hostsIdCluster,
+  "hosts/[id]/maintenance": hostsIdMaintenance,
   "hosts/[id]/updates": hostsIdUpdates,
   "manifest": manifest,
   "mcp": mcp,

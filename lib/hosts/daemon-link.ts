@@ -54,6 +54,8 @@ export function dialable(url: string, allowHttp: boolean): boolean {
 }
 export type LinkDeps = {
   allowHttp: boolean; primary: boolean;
+  /** Maintenance has its own lifecycle, so an application mismatch must not end this host. */
+  keepOnVersionMismatch?: boolean;
   hello(link: DaemonLink, replay: boolean): string;
   handleDown(link: DaemonLink, message: DownMessage | UnknownMessage): void;
   onEnd(link: DaemonLink, reason: "revoked" | "replaced" | "version"): void;
@@ -89,6 +91,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
   const linkUrl = serverUrl + "/api/hosts/link";
   let authorization = "Bearer " + owner.login.token;
   const log = deps.log;
+  let mismatched = false;
   const channels = new Map<string, { buffered: number }>();
   // Uplink messages wait in `sender` until they go out, then here until main acks them; a dropped socket resends
   // them after the next welcome.
@@ -338,6 +341,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
       case "welcome":
         if (message.v < MIN_LINK_PROTOCOL_VERSION || message.v > owner.version) throw new LinkProtocolError("Invalid welcome protocol version");
         owner.version = message.v;
+        mismatched = false;
         log("linked to " + serverUrl);
         acknowledgeHostUpdateHealth(); unknownLog.reset(); linked = socket; redialDelay = FIRST_RETRY_MS;
         resend = outbox.pending(); resendAt = 0; sender.dropBlobs();
@@ -454,6 +458,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
         if (stopped) return;
         const closed = await connect(sent, hello);
         if (stopped) return;
+        if (sent !== authorization) continue;
         if (typeof closed !== "string" && closed.code === LINK_CLOSE.versionMismatch) {
           let newest: unknown; try { newest = JSON.parse(closed.reason)?.serverVersion; } catch {}
           if (typeof newest === "number" && Number.isInteger(newest) && newest >= MIN_LINK_PROTOCOL_VERSION && newest < owner.version) {
@@ -462,13 +467,16 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
           log(typeof newest === "number" && newest < LINK_PROTOCOL_VERSION
             ? "this host's ompweb is newer than the server's: update ompweb on the server"
             : "the server speaks a different link protocol: update ompweb on this host");
-          endLink("version"); return;
+          if (!deps.keepOnVersionMismatch) { endLink("version"); return; }
+          // Rejected application replies cannot be delivered, but remain queued if compatibility returns.
+          mismatched = true;
         }
         if (typeof closed !== "string" && closed.code === LINK_CLOSE.replaced) { log("another ompweb host linked with this token; exiting this link"); endLink("replaced"); return; }
         if (typeof closed !== "string" && closed.code === 1000) { endLink("revoked"); return; }
         if (typeof closed !== "string" && !closed.opened) {
           const { status, body } = await fetch(linkUrl, { headers: { authorization: sent }, signal: AbortSignal.any([stopSignal.signal, AbortSignal.timeout(LINK_LIMITS.offlineMs)]) });
           void body?.cancel().catch(() => {});
+          if (sent !== authorization) continue;
           if (status === 401) { if (deps.reload?.(owner, true)) continue; endLink("revoked"); return; }
           log(status === 503 ? "the server is unavailable (503); redialing" : "the server did not accept the WebSocket upgrade (HTTP " + status + "): check that a reverse proxy forwards Upgrade and Connection, and that the server runs an ompweb at least as new as this host's");
         } else log(typeof closed === "string" ? "link lost (" + closed + "); redialing" : "link lost (code " + closed.code + "); redialing");
@@ -485,7 +493,7 @@ function linkRuntime(owner: DaemonLink, deps: LinkDeps) {
     stopped = true; stopSignal.abort(); socket?.close(); clearTimeout(flushTimer); clearTimeout(statsTimer);
     await loop;
   }
-  return { queue, output, discard, result, report, busy: () => reliablePending > 0, ackedDown: () => down.acked, isUp: () => linked !== null && !stopped,
+  return { queue, output, discard, result, report, busy: () => !mismatched && reliablePending > 0, ackedDown: () => down.acked, isUp: () => linked !== null && !stopped,
     rekey: (token: string) => { owner.login.token = token; authorization = "Bearer " + token; socket?.close(1001, "credentials changed"); },
     start: () => { if (!started && !stopped) { started = true; loop = keepLinked(); } }, stop };
 }
