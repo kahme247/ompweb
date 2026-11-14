@@ -4435,9 +4435,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (localOutboxRef.current.some((entry) => entry.replaces === id && entry.state === "sending")) return;
     heldRetriesRef.current.add(id);
     try {
-      const serverIds = new Set(serverOutboxRef.current.entries
-        .filter((entry) => entry.sessionId === sid)
-        .map((entry) => entry.id));
+      const serverIds = serverOutboxRef.current.seen;
       const confirmedIds = new Set(localOutboxRef.current
         .filter((entry) => entry.sessionId === sid && entry.replaces !== undefined && serverIds.has(entry.id))
         .map((entry) => entry.id));

@@ -8506,6 +8506,56 @@ test("dismissing an uncertain bridge deletes the browser copy the worker still h
   assert.equal(world.outbox.some((held) => held.id === entry.id), false, "the browser copy is gone, so a reload cannot bring the row back");
   assert.equal(world.calls.some((call) => ["prompt", "steer", "follow_up", "outbox_remove"].includes(call.body?.type)), false, "dismissal neither resends nor touches the server row");
 });
+test("Retry of a native-settled server copy waits for lineage reconciliation before creating D", async (t) => {
+  resetWorld();
+  const sid = "native-settled-retry-lineage";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  world.outboxHold = true;
+  world.lastOutboxAdd = undefined;
+  const root = { id: "native-retry-root", sessionId: sid, mode: "followUp", message: "retry this", state: "failed", createdAt: 1 };
+  const copy = { ...root, id: "native-retry-copy", state: "failed", replaces: root.id, createdAt: 2 };
+  world.outbox = [root, copy];
+  world.clientMessageStatuses.set(sid, clientMessageStatus({ unresolvedClientMessageIds: [copy.id] }));
+  const pendingReconciliations = [];
+  world.outboxReconcile = (message, commit) => pendingReconciliations.push({ message, commit, released: false });
+  const release = async (reconciliation) => {
+    if (reconciliation.released) return;
+    reconciliation.released = true;
+    await act(async () => { reconciliation.commit(); await settle(); });
+  };
+  t.after(async () => {
+    for (const reconciliation of pendingReconciliations) await release(reconciliation);
+  });
+
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  await act(() => workerPort.onmessage({ data: { outbox: world.outbox.map((entry) => ({ ...entry, scope: "test-scope" })) } }));
+  await act(() => es.emit({ type: "outbox_update", entries: [], settledIds: [copy.id], nativeSettledIds: [copy.id] }));
+  await until(() => w.latest.heldMessages.some((held) => held.id === copy.id && held.state === "failed" && held.mayHaveBeenSent),
+    "the native-settled copy becomes an uncertain bridge");
+  const proactiveReconciliations = pendingReconciliations.length;
+  assert.ok(proactiveReconciliations > 0, "the empty settled snapshot starts local lineage cleanup");
+
+  let retry;
+  await act(async () => { retry = w.latest.retryHeldMessage(copy.id); await Promise.resolve(); });
+  await until(() => pendingReconciliations.length > proactiveReconciliations, "Retry waits on its own reconciliation acknowledgement");
+  assert.equal(world.lastOutboxAdd, undefined, "D is not held before the worker commits reconciliation");
+  const retryReconciliation = pendingReconciliations.at(-1);
+  assert.deepEqual(retryReconciliation.message.confirmedIds, [copy.id]);
+
+  await release(retryReconciliation);
+  await retry;
+  assert.equal(world.lastOutboxAdd.entry.replaces, copy.id, "D names the native-settled C");
+  for (const reconciliation of pendingReconciliations) await release(reconciliation);
+
+  await act(async () => { refuseCopy("upload_missing"); });
+  assert.equal(w.latest.heldMessages.some((held) => held.id === copy.id && held.local === false && held.state === "failed"), true,
+    "refusing D leaves server bridge C visible");
+  assert.equal(w.latest.heldMessages.some((held) => held.id === root.id), false, "the browser-only O is no longer actionable");
+});
 
 test("an offline send follows its held bubble when the worker list arrives before the commit ACK", async () => {
   resetWorld();
