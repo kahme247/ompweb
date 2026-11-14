@@ -583,10 +583,18 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
         savedUploads,
         sessionId, retryDigest, payloadBytes,
       );
+      let retiredRoot = replaceable;
       if (replaceable) retire(replaceable.id, "none", id, retryDigest);
+      else if (!original && typeof replaces === "string") {
+        // A browser-only root needs the same durable identity even when this copy's acknowledgement is lost.
+        database.prepare(`INSERT INTO entries (${COLUMNS}, done_at) VALUES (?, ?, ?, '', NULL, NULL, ?, ?, 'delivered', NULL, 0, ?, NULL, NULL, ?, 'none', ?, ?, 0, ?)`)
+          .run(replaces, sessionId, mode, entryOwner, advisor ? 1 : 0, now, sessionId, id, retryDigest, now);
+        retiredRoot = row(replaces);
+        if (!retiredRoot) throw new Error("The browser retry mapping could not be read after commit");
+      }
       const entry = row(id);
       if (!entry) throw new Error("The accepted outbox entry could not be read after commit");
-      return { kind: "inserted", entry, replaced: replaceable };
+      return { kind: "inserted", entry, replaced: retiredRoot };
     }).immediate();
   } catch (error) {
     return commandErrorResponse(error);
