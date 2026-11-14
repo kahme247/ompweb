@@ -88,12 +88,18 @@ interface GqlItem {
   commits?: { nodes: ({ commit: { oid: string; statusCheckRollup: { id: string; contexts: GqlContexts } | null } } | null)[] };
 }
 
-async function graphql<T>(run: GhRunner, query: string, variables: Record<string, unknown>): Promise<T> {
+async function graphql<T>(
+  run: GhRunner,
+  query: string,
+  variables: Record<string, unknown>,
+  onRateLimit?: (rateLimit: NonNullable<ItemSnapshot["rateLimit"]>) => void,
+): Promise<T> {
   const out = JSON.parse(await run(["api", "graphql", "--input", "-"], JSON.stringify({ query, variables }))) as {
-    data?: T;
+    data?: T & { rateLimit?: ItemSnapshot["rateLimit"] };
     errors?: { message: string }[];
   };
   if (out.errors?.length || !out.data) throw new Error(out.errors?.map((e) => e.message).join("; ") || "GitHub returned no data.");
+  if (out.data.rateLimit) onRateLimit?.(out.data.rateLimit);
   return out.data;
 }
 
@@ -136,6 +142,7 @@ const SNAPSHOT_THREAD_COMMENTS_QUERY = `query($id: ID!, $after: String) {
   node(id: $id) { ... on PullRequestReviewThread {
     comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ${COMMENT} state } }
   } }
+  rateLimit { remaining resetAt }
 }`;
 
 const CONTEXTS_QUERY = `query($id: ID!, $after: String) {
@@ -144,6 +151,7 @@ const CONTEXTS_QUERY = `query($id: ID!, $after: String) {
     ... on CheckRun { name conclusion status }
     ... on StatusContext { context state }
   } } } }
+  rateLimit { remaining resetAt }
 }`;
 
 const lower = (value: string | null | undefined) => (value == null ? null : value.toLowerCase());
@@ -173,13 +181,14 @@ async function allThreadComments<T extends GqlComment>(
   threadId: string,
   first: GqlForwardPage<T>,
   query: string,
+  onRateLimit?: (rateLimit: NonNullable<ItemSnapshot["rateLimit"]>) => void,
 ): Promise<T[]> {
   const nodes = present(first.nodes);
   const seenCursors = new Set<string>();
   let pageInfo = first.pageInfo;
   while (pageInfo.hasNextPage) {
     const after = nextPageCursor(pageInfo.endCursor, seenCursors);
-    const data = await graphql<{ node: { comments: GqlForwardPage<T> } | null }>(run, query, { id: threadId, after });
+    const data = await graphql<{ node: { comments: GqlForwardPage<T> } | null }>(run, query, { id: threadId, after }, onRateLimit);
     const page = data.node?.comments;
     if (!page) throw new Error(`Review thread ${threadId} was not found.`);
     nodes.push(...present(page.nodes));
@@ -198,10 +207,18 @@ async function allThreadComments<T extends GqlComment>(
 export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?: ReadonlySet<string>): Promise<ItemSnapshot> {
   const vars = { owner: target.owner, repo: target.repo, number: target.number };
   let rateLimit: ItemSnapshot["rateLimit"];
+  const rememberRateLimit = (next: NonNullable<ItemSnapshot["rateLimit"]>) => {
+    if (
+      !rateLimit ||
+      next.remaining < rateLimit.remaining ||
+      (next.remaining === rateLimit.remaining && Date.parse(next.resetAt) > Date.parse(rateLimit.resetAt))
+    ) {
+      rateLimit = next;
+    }
+  };
   const query = async (extra: Record<string, unknown>) => {
     const flags = { wc: false, wr: false, wt: false, wh: false, cc: null, rc: null, tc: null, ...extra };
-    const data = await graphql<{ repository: { issueOrPullRequest: GqlItem | null } | null; rateLimit?: ItemSnapshot["rateLimit"] }>(run, SNAPSHOT_QUERY, { ...vars, ...flags });
-    rateLimit = data.rateLimit ?? rateLimit;
+    const data = await graphql<{ repository: { issueOrPullRequest: GqlItem | null } | null }>(run, SNAPSHOT_QUERY, { ...vars, ...flags }, rememberRateLimit);
     const item = data.repository?.issueOrPullRequest;
     if (!item) throw new Error(`${target.owner}/${target.repo}#${target.number} was not found.`);
     return item;
@@ -226,7 +243,7 @@ export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?:
     collect<GqlThread>("reviewThreads", "wt", "tc", false),
   ]);
   for (const thread of threads) {
-    thread.comments.nodes = await allThreadComments(run, thread.id, thread.comments, SNAPSHOT_THREAD_COMMENTS_QUERY);
+    thread.comments.nodes = await allThreadComments(run, thread.id, thread.comments, SNAPSHOT_THREAD_COMMENTS_QUERY, rememberRateLimit);
   }
 
   // A draft (pending) review and its comments are left out, so their submission is new later.
@@ -244,7 +261,6 @@ export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?:
         .map((c) => ({ id: c.id, url: c.url, author: actorOf(c.author, c.authorAssociation), threadId: t.id, path: t.path, line: t.line })),
     ),
   };
-  if (rateLimit) snapshot.rateLimit = rateLimit;
   // Issues closed before GitHub recorded a reason have none; they were closed as done.
   if (first.state === "CLOSED" && first.__typename === "Issue") snapshot.closedReason = first.stateReason === "NOT_PLANNED" ? "not_planned" : "completed";
 
@@ -256,12 +272,13 @@ export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?:
     const seenCursors = new Set<string>();
     while (rollup && info?.hasNextPage) {
       const after = nextPageCursor(info.endCursor, seenCursors);
-      const next = await graphql<{ node: { contexts: GqlContexts } }>(run, CONTEXTS_QUERY, { id: rollup.id, after });
+      const next = await graphql<{ node: { contexts: GqlContexts } }>(run, CONTEXTS_QUERY, { id: rollup.id, after }, rememberRateLimit);
       nodes = [...nodes, ...present(next.node.contexts.nodes)];
       info = next.node.contexts.pageInfo;
     }
     snapshot.head = { sha: commit.oid, checks: nodes.map(checkOf) };
   }
+  if (rateLimit) snapshot.rateLimit = rateLimit;
   return snapshot;
 }
 
