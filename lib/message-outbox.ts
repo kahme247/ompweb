@@ -527,7 +527,8 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
         return { kind: "existing", entry: concurrent, ...(confirmsReplacement ? { replaces: confirmsReplacement } : {}) };
       }
       const original = typeof replaces === "string" ? row(replaces) : null;
-      if (original && entryBelongsToSession(original, sessionId) && original.replacement_id) {
+      const originalMatchesSession = original !== null && entryBelongsToSession(original, sessionId);
+      if (original && originalMatchesSession && original.replacement_id) {
         if (original.replacement_digest !== retryDigest) {
           throw new UploadError(409, "outbox_replacement_conflict", "A retry must keep its original mode, message and attachments");
         }
@@ -540,7 +541,10 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
         if (!entry) throw new Error("The replacement receipt could not be read after commit");
         return { kind: "duplicate", entry, originalSession: original.session_id, replaces: original.id };
       }
-      const replaceable = original && original.state === "failed" && entryBelongsToSession(original, sessionId) ? original : null;
+      if (original && originalMatchesSession && original.state !== "failed" && original.state !== "delivered") {
+        throw new UploadError(409, "outbox_original_pending", "The original message is still waiting or being delivered. Check the outbox before retrying.");
+      }
+      const replaceable = original && original.state === "failed" && originalMatchesSession ? original : null;
       const matchesOriginal = replaceable !== null
         && createHmac("sha256", digestKey).update(JSON.stringify([replaceable.mode, replaceable.message, replaceable.images, replaceable.uploads])).digest("base64url") === retryDigest;
       let uploadReceipts: OutboxUploadReceipt[];
@@ -585,7 +589,12 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
       );
       let retiredRoot = replaceable;
       if (replaceable) retire(replaceable.id, "none", id, retryDigest);
-      else if (!original && typeof replaces === "string") {
+      else if (original && originalMatchesSession && original.state === "delivered") {
+        // Explicit retry is a new send, but the old native disposition must stay intact.
+        database.prepare("UPDATE entries SET replacement_id = ?, replacement_digest = ?, done_at = ? WHERE id = ?")
+          .run(id, retryDigest, now, original.id);
+        retiredRoot = original;
+      } else if (!original && typeof replaces === "string") {
         // A browser-only root needs the same durable identity even when this copy's acknowledgement is lost.
         database.prepare(`INSERT INTO entries (${COLUMNS}, done_at) VALUES (?, ?, ?, '', NULL, NULL, ?, ?, 'delivered', NULL, 0, ?, NULL, NULL, ?, 'none', ?, ?, 0, ?)`)
           .run(replaces, sessionId, mode, entryOwner, advisor ? 1 : 0, now, sessionId, id, retryDigest, now);
