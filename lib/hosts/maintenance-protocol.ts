@@ -85,5 +85,5 @@ export function failure(error: unknown): { status: number; code: string; message
   const raw = e.status ?? e.httpStatus;
   const status = typeof raw === "number" && Number.isInteger(raw) && raw >= 400 && raw <= 599 ? raw : 500;
   const code = typeof e.code === "string" && /^[a-z0-9_]{1,64}$/.test(e.code) ? e.code : status === 500 ? "internal" : "host_error";
-  return { status, code, message: (typeof e.message === "string" ? e.message : String(error)).slice(0, 500) };
+  return { status, code, message: (typeof e.message === "string" ? e.message : "The host reported an error").slice(0, 500) };
 }
