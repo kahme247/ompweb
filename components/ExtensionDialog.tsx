@@ -237,7 +237,7 @@ function approvalChoices(request: Extract<UiDialogRequest, { method: "approve" }
 // attributes copied below; others contribute just their text, and dropped ones nothing at all.
 const FORM_TAGS: Record<string, true> = {
   fieldset: true, legend: true, p: true, label: true, div: true, span: true, section: true, strong: true, em: true, b: true, i: true,
-  code: true, small: true, br: true, hr: true, ul: true, ol: true, li: true, h1: true, h2: true, h3: true, h4: true, h5: true, h6: true,
+  code: true, pre: true, small: true, br: true, hr: true, ul: true, ol: true, li: true, h1: true, h2: true, h3: true, h4: true, h5: true, h6: true,
   input: true, select: true, option: true, optgroup: true, textarea: true,
 };
 const DROPPED_TAGS: Record<string, true> = {
