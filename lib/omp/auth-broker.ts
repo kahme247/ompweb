@@ -114,11 +114,14 @@ async function startBroker(state: AuthBrokerState, isCurrent: () => boolean): Pr
   });
 
   const { promise, resolve, reject } = Promise.withResolvers<Broker>();
-  const readyTimer = setTimeout(() => {
-    reject(new AuthBrokerUnavailableError("omp auth-broker did not become ready", "not_ready"));
-    terminate(child);
-  }, readyMs);
-  readyTimer.unref?.();
+  let readyTimer: NodeJS.Timeout | undefined;
+  child.once("spawn", () => {
+    readyTimer = setTimeout(() => {
+      reject(new AuthBrokerUnavailableError("omp auth-broker did not become ready", "not_ready"));
+      terminate(child);
+    }, readyMs);
+    readyTimer.unref?.();
+  });
   // Once it is ready (or gone) later rejects are no-ops.
   const gone = (what: string) => {
     clearTimeout(readyTimer);
