@@ -78,7 +78,7 @@ export function baselineCursor(snapshot: ItemSnapshot): WatchCursor {
   return {
     commentIds: remember([], snapshot.comments.map((c) => c.id)),
     reviewIds: snapshot.reviews.map((r) => r.id),
-    threadCommentIds: remember([], snapshot.threadComments.map((t) => t.id)),
+    threadCommentIds: snapshot.threadComments.map((t) => t.id),
     reportedHeads: settled(head) ? [head.sha] : [],
     final: false,
   };
@@ -143,7 +143,7 @@ export function diffSnapshot(
     cursor: {
       commentIds: remember(cursor.commentIds, snapshot.comments.map((c) => c.id)),
       reviewIds: [...seenReviews],
-      threadCommentIds: remember(cursor.threadCommentIds, snapshot.threadComments.map((t) => t.id)),
+      threadCommentIds: [...new Set([...cursor.threadCommentIds, ...snapshot.threadComments.map((t) => t.id)])],
       reportedHeads: ci ? [...cursor.reportedHeads, ci.sha].slice(-KEPT) : cursor.reportedHeads,
       final: cursor.final || ended,
     },
