@@ -3,18 +3,22 @@ import { BROWSER_TRANSPORTS } from "@/lib/event-stream-protocol";
 import { syncInterruptibleSessions } from "@/lib/rpc-manager";
 import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } from "@/lib/omp/agent-env";
 import { pushUploadRetention } from "@/lib/hosts/upload-retention-sync";
-import { browserTransportState, loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
+import { browserTransportState, loadWebServerSettings, readWebServerSettingsFromDisk, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
 import { isRecord } from "@/lib/type-guards";
 import { isUploadRetentionDays } from "@/lib/upload-limits";
 
 /** GET/PUT /api/web-settings - omp-web's own server-side settings. */
 export async function GET() {
-  return Response.json(readSettings());
+  try {
+    return Response.json(readSettings());
+  } catch {
+    return Response.json({ error: "Web settings could not be read", code: "settings_unavailable" }, { status: 503 });
+  }
 }
 
 /** Never surface a variable lib/omp/agent-env.ts would refuse to spawn with. */
 function readSettings(): WebServerSettings {
-  const settings = loadWebServerSettings();
+  const settings = readWebServerSettingsFromDisk();
   return { ...settings, agentEnv: sanitizeAgentEnvValues(settings.agentEnv).values };
 }
 
