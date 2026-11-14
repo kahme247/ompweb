@@ -7,7 +7,7 @@ import type { GithubActor, ItemSnapshot } from "./api";
  * and words it without any text GitHub users wrote.
  */
 
-/** Id lists keep the newest of each, so a long-lived watch stays bounded. */
+/** Comment/thread history is bounded; all review IDs stay in the cursor for late submissions. */
 const KEPT = 2000;
 const NAME_LIMIT = 100;
 const REVIEW_STATES: Record<string, string> = {
@@ -49,19 +49,12 @@ const unseen = <T extends { id: string }>(items: T[], known: string[], posted: R
   return items.filter((item) => !seen.has(item.id) && !posted.has(item.id));
 };
 
-// Comments and reviews arrive oldest-first; the earliest retained ID bounds an expanded shared snapshot.
-const unseenHistory = <T extends { id: string }>(
-  items: T[],
-  known: string[],
-  posted: ReadonlySet<string>,
-  postedAlias?: (item: T) => string | undefined,
-): T[] => {
+
+// Comments arrive oldest-first; the earliest retained ID bounds an expanded shared snapshot.
+const unseenHistory = <T extends { id: string }>(items: T[], known: string[], posted: ReadonlySet<string>): T[] => {
   const seen = new Set(known);
   const boundary = items.findIndex((item) => seen.has(item.id));
-  return items.filter((item, index) => {
-    const alias = postedAlias?.(item);
-    return index >= boundary && !seen.has(item.id) && !posted.has(item.id) && (alias === undefined || !posted.has(alias));
-  });
+  return items.filter((item, index) => index >= boundary && !seen.has(item.id) && !posted.has(item.id));
 };
 
 // For a confirm the user reads (a thread's file path): one line, no control or format characters, bounded length.
@@ -84,7 +77,7 @@ export function baselineCursor(snapshot: ItemSnapshot): WatchCursor {
   const head = snapshot.head;
   return {
     commentIds: remember([], snapshot.comments.map((c) => c.id)),
-    reviewIds: remember([], snapshot.reviews.map((r) => r.id)),
+    reviewIds: snapshot.reviews.map((r) => r.id),
     threadCommentIds: remember([], snapshot.threadComments.map((t) => t.id)),
     reportedHeads: settled(head) ? [head.sha] : [],
     final: false,
@@ -102,17 +95,26 @@ export function diffSnapshot(
   postedIds: ReadonlySet<string>,
 ): { events: GithubEvent[]; cursor: WatchCursor } {
   const reviews = snapshot.reviews as ReviewSnapshot[];
+  const seenReviews = new Set(cursor.reviewIds);
+  const reviewEvents: GithubEvent[] = [];
+  for (const review of reviews) {
+    const known = seenReviews.has(review.id);
+    seenReviews.add(review.id);
+    const posted = postedIds.has(review.id) || (review.databaseId !== undefined && postedIds.has(`review:${review.databaseId}`));
+    if (known || posted) continue;
+    reviewEvents.push({
+      kind: "review",
+      id: review.id,
+      url: review.url,
+      author: review.author,
+      state: review.state,
+      commentCount: review.commentCount,
+      ...(review.databaseId === undefined ? {} : { databaseId: review.databaseId }),
+    });
+  }
   const events: GithubEvent[] = [
     ...unseenHistory(snapshot.comments, cursor.commentIds, postedIds).map((c) => ({ kind: "comment" as const, id: c.id, url: c.url, author: c.author })),
-    ...unseenHistory(reviews, cursor.reviewIds, postedIds, (review) => review.databaseId === undefined ? undefined : `review:${review.databaseId}`).map((r) => ({
-      kind: "review" as const,
-      id: r.id,
-      url: r.url,
-      author: r.author,
-      state: r.state,
-      commentCount: r.commentCount,
-      ...(r.databaseId === undefined ? {} : { databaseId: r.databaseId }),
-    })),
+    ...reviewEvents,
     ...unseen(snapshot.threadComments, cursor.threadCommentIds, postedIds).map((t) => ({
       kind: "thread_comment" as const,
       id: t.id,
@@ -140,7 +142,7 @@ export function diffSnapshot(
     events,
     cursor: {
       commentIds: remember(cursor.commentIds, snapshot.comments.map((c) => c.id)),
-      reviewIds: remember(cursor.reviewIds, snapshot.reviews.map((r) => r.id)),
+      reviewIds: [...seenReviews],
       threadCommentIds: remember(cursor.threadCommentIds, snapshot.threadComments.map((t) => t.id)),
       reportedHeads: ci ? [...cursor.reportedHeads, ci.sha].slice(-KEPT) : cursor.reportedHeads,
       final: cursor.final || ended,
