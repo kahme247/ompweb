@@ -37,6 +37,7 @@ const MODES: Record<OutboxMode, true> = { prompt: true, followUp: true, steer: t
 
 
 const COLUMNS = "id, session_id, mode, message, images, uploads, owner, advisor, state, error, may_have_been_sent, created_at, upload_receipts, previous_entry_ids, source_session_id, settlement";
+const RECEIPT_PIN_SCHEMA = "CREATE TABLE IF NOT EXISTS github_receipt_pins (session_id TEXT NOT NULL, entry_id TEXT NOT NULL, PRIMARY KEY (entry_id, session_id))";
 
 /** `owner`: the web session whose uploads the entry attaches; `advisor`: the chat's spawn flag at Send. */
 interface Row {
@@ -95,7 +96,7 @@ function db(): Database {
   const path = join(dir, "outbox.db");
   const cached = globalThis.__ompOutboxStore;
   // A `bun --hot` reload keeps a connection the previous code migrated: reopen when the migration changed.
-  const schema = `${OUTBOX_SCHEMA}${OUTBOX_CHANGE_SCHEMA}${COLUMNS}`;
+  const schema = `${OUTBOX_SCHEMA}${OUTBOX_CHANGE_SCHEMA}${COLUMNS}${RECEIPT_PIN_SCHEMA}`;
   if (cached?.path === path && cached.schema === schema) return cached.db;
   mkdirSync(dir, { recursive: true });
   // Owner-only before SQLite opens it: it holds message texts. SQLite gives its -wal/-shm files the same mode.
@@ -117,6 +118,7 @@ function db(): Database {
     database.exec("PRAGMA synchronous = NORMAL");
     database.transaction(() => {
       database.exec(OUTBOX_SCHEMA);
+      database.exec(RECEIPT_PIN_SCHEMA);
       const columns = database.prepare("PRAGMA table_info(entries)").all() as { name: string }[];
       for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"], ["settlement", "TEXT"]]) {
         if (!columns.some((column) => column.name === name)) database.exec(`ALTER TABLE entries ADD COLUMN ${name} ${type}`);
@@ -139,6 +141,19 @@ function db(): Database {
   cached?.db.close(true);
   globalThis.__ompOutboxStore = { path, db: database, schema };
   return database;
+}
+
+/** Pending GitHub batches can replay after the browser's finite receipt-retention window. */
+export function pinOutboxReceipt(sessionId: string, entryId: string): void {
+  db().prepare("INSERT OR IGNORE INTO github_receipt_pins (session_id, entry_id) VALUES (?, ?)").run(sessionId, entryId);
+}
+
+export function releaseOutboxReceipt(sessionId: string, entryId: string): void {
+  db().prepare("DELETE FROM github_receipt_pins WHERE session_id = ? AND entry_id = ?").run(sessionId, entryId);
+}
+
+export function listOutboxReceiptPins(): { sessionId: string; entryId: string }[] {
+  return db().prepare("SELECT session_id AS sessionId, entry_id AS entryId FROM github_receipt_pins").all() as { sessionId: string; entryId: string }[];
 }
 
 /** Closes the cached store. `close(true)` finalizes the statements still alive: without it the file stays open until GC, and Windows keeps it locked. */
@@ -463,7 +478,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
 
   const now = Date.now();
   const database = db();
-  database.prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ?").run(now - KEEP_DELIVERED_MS);
+  database.prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ? AND NOT EXISTS (SELECT 1 FROM github_receipt_pins WHERE entry_id = entries.id)").run(now - KEEP_DELIVERED_MS);
   const keys = sessionKeys(sessionId);
   const entryBytes = Buffer.byteLength(JSON.stringify({ id, sessionId, mode, message, images, uploads, state: "waiting_host", createdAt: now })) + 8192;
   let accepted: boolean;
@@ -586,7 +601,7 @@ export function startOutbox(): void {
   try {
     db();
     recoverDelivering(undefined, true);
-    db().prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ?").run(Date.now() - KEEP_DELIVERED_MS);
+    db().prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ? AND NOT EXISTS (SELECT 1 FROM github_receipt_pins WHERE entry_id = entries.id)").run(Date.now() - KEEP_DELIVERED_MS);
     db().prepare("DELETE FROM completed_uploads WHERE at < ?").run(Date.now() - STAGED_MAX_AGE_MS);
   } catch (error) {
     console.warn(`[omp-web] outbox startup failed: ${error instanceof Error ? error.message : String(error)}`);
