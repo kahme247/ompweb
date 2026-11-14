@@ -6,6 +6,8 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+## [v0.7.0] - 2026-11-14
+
 ### Breaking changes
 
 - **ompweb ships its own omp, `ompweb-omp`; omp no longer needs installing.** Every session runs on ompweb's own omp build: omp's CLI from an `ompweb-dev/oh-my-pi` integration release (an upstream omp release plus the PRs it carries), with ompweb's channel instead of omp's RPC mode. It reads the same `~/.omp` settings, logins and sessions. Each release attaches `ompweb-omp-<platform>` for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and windows-x64, with their SHA-256 sums; every install, npm and npx included, downloads the one of its exact version on its first start, checks it and keeps it (beside the single binary, otherwise in `<agent dir>/omp-web/omp/<version>/`), and `ompweb fetch-omp` does so on demand. Sessions start once it is there. On any other platform ompweb cannot start sessions. The release archives do not contain it; prerelease archives do. omp updates with ompweb: both updaters fetch the new version's runner before its preflight. `OMP_WEB_OMP_BIN` now points at another `ompweb-omp` build, for example a copy of the release asset on a machine that cannot reach GitHub: a stock `omp` does not speak the channel and cannot run ompweb's sessions. On Linux and macOS, `ompweb-omp` run in a terminal works like omp's TUI, and its session also shows up live in the web.
