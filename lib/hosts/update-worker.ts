@@ -1,6 +1,6 @@
-// This file is copied outside the install before an update. Keep it self-contained and Node 24 compatible.
+// Old daemons copy only this file. Keep its startup Node-only and load lifecycle code before any swap, from private copies or the descriptor's verified installation.
 import { createHash, randomUUID } from "node:crypto";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile } from "node:child_process";
 import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -8,6 +8,12 @@ import { createGunzip, inflateRawSync } from "node:zlib";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import type { HostUpdateOperation, HostUpdateTarget } from "./update-types";
+import type { UpgradeLaunch, UpgradeProcess } from "../upgrade-process";
+import type * as ProcessRuntime from "../upgrade-process";
+import type * as IdentityRuntime from "../process-identity";
+import type * as JitiRuntime from "jiti";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { setTimeout as pause } from "node:timers/promises";
 const exec = promisify(execFile);
@@ -38,14 +44,49 @@ export interface HostUpdateDescriptor {
   hostArgs: string[];
   cwd: string;
   daemonPid: number;
-  /** The daemon's process start identity at claim time, so a recycled pid is never signalled. Not needed when a service stops it. */
+  /** The daemon as inspected when claimed: its process identity and verified supervisor, persisted verbatim. stop/restart re-verify it. Absent on a descriptor an earlier engine wrote: the worker inspects the still-running daemon itself. */
+  process?: UpgradeProcess;
+  /** Earlier engines' proof of the daemon's identity (a recycled pid is never signalled); only read when `process` is absent. */
   daemonIdentity?: string | null;
   managerPath?: string;
   restartOnly?: boolean;
-  systemd: { unit: string; user: boolean } | null;
   /** Binary release source; absent only on a legacy restart-only descriptor, which downloads nothing. */
   releaseRepo?: string;
+  /** Explicitly approved to end this host's activity: bypasses only the activity wait, never any release or process check. */
+  force?: boolean;
+  /** The protocol range the candidate must speak for a maintenance receipt to acknowledge it, while its application protocol may await the server's cutover. */
+  receipt?: { min: number; max: number };
+  /** Set by the recovery CLI: the old daemon was drained (idle proven) through its private control endpoint, and is resumed if this update fails before it is stopped. */
+  recovery?: { drained: boolean };
 }
+interface WorkerRuntime {
+  process: typeof ProcessRuntime;
+  identity: typeof IdentityRuntime;
+}
+
+async function workerRuntime(d: HostUpdateDescriptor): Promise<WorkerRuntime> {
+  // Runtime-selected: a copied worker cannot import these statically (its `../` specifiers resolve outside the attempt directory).
+  const embedded = async () => ({ process: await import("../upgrade-process"), identity: await import("../process-identity") });
+  // A compiled binary embeds these modules; its worker has no copies beside it.
+  if (typeof Bun !== "undefined" && Bun.isStandaloneExecutable) return embedded();
+  // A copied worker (Node or Bun alike) imports the private copies the engine made beside it.
+  const directory = dirname(fileURLToPath(import.meta.url));
+  const lifecycle = join(directory, "upgrade-process.mts");
+  const identity = join(directory, "process-identity.mts");
+  if (existsSync(lifecycle) && existsSync(identity)) {
+    return { process: await import(pathToFileURL(lifecycle).href), identity: await import(pathToFileURL(identity).href) };
+  }
+  // Run from source under Bun (the web server's own runtime, tests).
+  if (typeof Bun !== "undefined") return embedded();
+  // A legacy restart-only updater copied no dependencies. validateDescriptor checked this owned package and its identity first.
+  const { createJiti } = createRequire(join(d.installDir, "package.json"))("jiti") as typeof JitiRuntime;
+  const jiti = createJiti(import.meta.url);
+  return {
+    process: await jiti.import<typeof ProcessRuntime>(join(d.installDir, "lib", "upgrade-process.ts")),
+    identity: await jiti.import<typeof IdentityRuntime>(join(d.installDir, "lib", "process-identity.ts")),
+  };
+}
+
 
 export function hostUpdateRoot(): string {
   const agent = process.env.PI_CODING_AGENT_DIR ? resolve(process.env.PI_CODING_AGENT_DIR) : join(homedir(), process.env.PI_CONFIG_DIR || ".omp", "agent");
@@ -85,34 +126,6 @@ export function readHostUpdateState(): HostUpdateStoredState | null {
   const state = JSON.parse(readFileSync(file, "utf8")) as HostUpdateStoredState;
   if (!state.operation || !["ompweb", "omp"].includes(state.operation.target) || !["running", "failed", "succeeded"].includes(state.operation.state) || !/^[a-zA-Z0-9-]{1,80}$/.test(state.operation.id) || !HOST_VERSION_PATTERN.test(state.operation.version) || !Number.isFinite(state.startedAt)) throw new Error("Invalid host update status");
   return state;
-}
-export function isHostUpdateProcessAlive(pid: number | undefined): boolean {
-  if (!Number.isSafeInteger(pid) || !pid || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-/** A value that differs between two processes that ever shared a pid (the kernel start time, not the pid): null when unknown or gone. */
-export async function processStartIdentity(pid: number): Promise<string | null> {
-  if (!Number.isSafeInteger(pid) || pid <= 1) return null;
-  try {
-    if (process.platform === "linux") {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      // After the parenthesised command name: state is field 3, start time field 22.
-      const start = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-      return /^\d+$/.test(start ?? "") ? `linux:${readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim()}:${start}` : null;
-    }
-    if (process.platform === "darwin") {
-      const { stdout } = await exec("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: 5000, env: { ...process.env, LC_ALL: "C" } });
-      return stdout.trim() ? `darwin:${stdout.trim()}` : null;
-    }
-    if (process.platform === "win32") {
-      const { stdout } = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks`], { timeout: 10000, windowsHide: true });
-      return /^\d+$/.test(stdout.trim()) ? `win32:${stdout.trim()}` : null;
-    }
-  } catch {
-    // The process is gone or its start time is unreadable: no identity.
-  }
-  return null;
 }
 export function finishHostUpdate(id: string, error?: string): void {
   const state = readHostUpdateState();
@@ -291,14 +304,20 @@ export async function extractHostReleaseArchive(archive: string, root: string, s
   }
 }
 
-async function stageBinary(d: HostUpdateDescriptor, staging: string): Promise<string> {
+export interface HostReleaseSource {
+  version: string;
+  /** `owner/repository` of the official GitHub release. */
+  releaseRepo: string;
+}
+/** Downloads, digest-verifies and unpacks the official binary release `source` into the owned directory `staging`; returns the staged release directory. */
+export async function stageBinary(source: HostReleaseSource, staging: string): Promise<string> {
   const name = hostReleaseName();
   const assetName = `${name}${process.platform === "win32" ? ".zip" : ".tar.gz"}`;
-  const metadata = JSON.parse((await fetchHostUpdateBytes(`https://api.github.com/repos/${d.releaseRepo}/releases/tags/v${d.version}`, 2 * 1024 * 1024)).toString("utf8")) as { tag_name?: string; assets?: { name: string; digest?: string }[] };
+  const metadata = JSON.parse((await fetchHostUpdateBytes(`https://api.github.com/repos/${source.releaseRepo}/releases/tags/v${source.version}`, 2 * 1024 * 1024)).toString("utf8")) as { tag_name?: string; assets?: { name: string; digest?: string }[] };
   const asset = metadata.assets?.find((item) => item.name === assetName);
-  if (metadata.tag_name !== `v${d.version}` || !asset?.digest || !/^sha256:[a-f0-9]{64}$/.test(asset.digest)) throw new Error("Official release asset digest is unavailable");
+  if (metadata.tag_name !== `v${source.version}` || !asset?.digest || !/^sha256:[a-f0-9]{64}$/.test(asset.digest)) throw new Error("Official release asset digest is unavailable");
   const download = join(staging, assetName);
-  if (await downloadHostUpdateFile(`https://github.com/${d.releaseRepo}/releases/download/v${d.version}/${assetName}`, download, HOST_RELEASE_MAX_ARCHIVE) !== asset.digest) throw new Error("Official release asset digest mismatch or unavailable");
+  if (await downloadHostUpdateFile(`https://github.com/${source.releaseRepo}/releases/download/v${source.version}/${assetName}`, download, HOST_RELEASE_MAX_ARCHIVE) !== asset.digest) throw new Error("Official release asset digest mismatch or unavailable");
   const release = join(staging, name);
   mkdirSync(release, { mode: 0o700 });
   try { await extractHostReleaseArchive(download, name, staging); } finally { rmSync(download, { force: true }); }
@@ -308,10 +327,17 @@ async function stageBinary(d: HostUpdateDescriptor, staging: string): Promise<st
   // Releases from before the runner became its own asset (preflightHostRelease fetches it otherwise) carry it here.
   const runner = join(release, process.platform === "win32" ? "ompweb-omp.exe" : "ompweb-omp");
   if (existsSync(runner)) chmodSync(runner, 0o755);
-  if (!(await binaryReportsVersion(binary, release, d.version))) throw new Error("Downloaded host binary reports a different version");
+  if (!(await binaryReportsVersion(binary, release, source.version))) throw new Error("Downloaded host binary reports a different version");
   return release;
 }
-async function stagePackage(d: HostUpdateDescriptor, staging: string): Promise<string> {
+export interface HostPackageSource {
+  version: string;
+  installMethod: "npm" | "bun";
+  /** The package manager's absolute path; absent, `installMethod` is looked up on PATH. */
+  managerPath?: string;
+}
+/** Installs the pinned package `source` with its manager into the owned directory `staging`; returns the staged release directory with its `node_modules` moved inside. */
+export async function stagePackage(d: HostPackageSource, staging: string): Promise<string> {
   const prefix = join(staging, "fetch");
   mkdirSync(prefix, { mode: 0o700 });
   writeFileSync(join(prefix, "package.json"), '{"private":true}', { mode: 0o600 });
@@ -338,15 +364,31 @@ function workerEnvironment(additions: Record<string, string> = {}): NodeJS.Proce
   return env;
 }
 
-/** Refuse an install shared with another daemon or web process; swapping it changes their on-disk assets too. */
-export async function sharedHostInstallReason(installDir: string, ignoredPids: number[] = [process.pid]): Promise<string | null> {
+/** The reason sharedHostInstallReason returns for an install an independent process uses: the one that only a coordinated web-server cutover resolves (every other reason is an inventory that failed). */
+export const HOST_INSTALL_SHARED = "This installation is shared with another running process (possibly the web server); update it manually or use a dedicated host installation";
+/**
+ * Refuse an install shared with another daemon or web process; swapping it changes their on-disk assets too.
+ * `ignoredPids` are skipped. `ownedTrees` also skips every descendant of those pids: a daemon's sessions and subagents run
+ * the installed runner, and stopping that daemon (never an independent process) ends them.
+ */
+export async function sharedHostInstallReason(installDir: string, ignoredPids: number[] = [process.pid], ownedTrees: number[] = []): Promise<string | null> {
+  const shared = HOST_INSTALL_SHARED;
   const inside = (path: string) => {
     try { const value = relative(installDir, realpathSync(path)); return value === "" || (!value.startsWith(`..${sep}`) && value !== ".." && !isAbsolute(value)); } catch { return false; }
   };
+  const parents = new Map<number, number>();
+  const ignored = (pid: number) => {
+    if (ignoredPids.includes(pid)) return true;
+    for (let at = pid, hops = 0; at > 1 && hops < 256; at = parents.get(at) ?? 0, hops++) if (ownedTrees.includes(at)) return true;
+    return false;
+  };
   if (process.platform === "linux") {
-    for (const id of readdirSync("/proc")) {
-      const pid = Number(id);
-      if (!Number.isInteger(pid) || ignoredPids.includes(pid)) continue;
+    const pids = readdirSync("/proc").map(Number).filter((pid) => Number.isInteger(pid));
+    // After the parenthesised command name: state is field 3, parent pid field 4. A process that cannot be read keeps no parent, so it is never taken for a descendant.
+    for (const pid of pids) { try { parents.set(pid, Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()!.split(" ")[1])); } catch { /* gone or unreadable */ } }
+    for (const pid of pids) {
+      if (ignored(pid)) continue;
+      const id = String(pid);
       try {
         const args = readFileSync(`/proc/${id}/cmdline`, "utf8").split("\0").filter(Boolean);
         // A non-dumpable process (e.g. started with capabilities) hides its cwd and exe, not its arguments: resolve
@@ -354,7 +396,7 @@ export async function sharedHostInstallReason(installDir: string, ignoredPids: n
         // shortcut: misses a sharer started from a subdirectory with relative arguments; read the cwd via ptrace if seen.
         let cwd = installDir;
         try { cwd = readlinkSync(`/proc/${id}/cwd`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EACCES") throw error; }
-        if (inside(`/proc/${id}/exe`) || args.slice(0, 4).some((arg) => !arg.startsWith("-") && inside(isAbsolute(arg) ? arg : resolve(cwd, arg)))) return "This installation is shared with another running process (possibly the web server); update it manually or use a dedicated host installation";
+        if (inside(`/proc/${id}/exe`) || args.slice(0, 4).some((arg) => !arg.startsWith("-") && inside(isAbsolute(arg) ? arg : resolve(cwd, arg)))) return shared;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ESRCH") {
           try { if (!process.getuid || lstatSync(`/proc/${id}`).uid === process.getuid()) return "Cannot establish that this installation is host-only; update it manually"; } catch {}
@@ -363,37 +405,34 @@ export async function sharedHostInstallReason(installDir: string, ignoredPids: n
     }
     return null;
   }
-  if (process.platform === "darwin" && process.ppid === 1) return "A launchd-managed or orphaned host must be updated manually to avoid duplicate daemon starts";
   try {
     // Cold CIM startup can exceed five seconds on contended Windows hosts.
     const { stdout } = process.platform === "win32"
-      ? await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"], { timeout: 20000, maxBuffer: 8 * 1024 * 1024, windowsHide: true })
-      : await exec("ps", ["-axo", "pid=,command="], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 });
-    const rows: { pid: number; command: string; executable?: string }[] = process.platform === "win32"
-      ? (JSON.parse(stdout) as { ProcessId: number; CommandLine: string; ExecutablePath: string }[]).map((row) => ({ pid: row.ProcessId, command: row.CommandLine || "", executable: row.ExecutablePath }))
-      : stdout.split("\n").flatMap((line) => { const match = line.match(/^\s*(\d+)\s+(.*)$/); return match ? [{ pid: Number(match[1]), command: match[2] }] : []; });
+      ? await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"], { timeout: 20000, maxBuffer: 8 * 1024 * 1024, windowsHide: true })
+      : await exec("ps", ["-axo", "pid=,ppid=,command="], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 });
+    const rows: { pid: number; ppid: number; command: string; executable?: string }[] = process.platform === "win32"
+      ? (JSON.parse(stdout) as { ProcessId: number; ParentProcessId: number; CommandLine: string; ExecutablePath: string }[]).map((row) => ({ pid: row.ProcessId, ppid: row.ParentProcessId, command: row.CommandLine || "", executable: row.ExecutablePath }))
+      : stdout.split("\n").flatMap((line) => { const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/); return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }] : []; });
+    for (const row of rows) parents.set(row.pid, row.ppid);
     for (const row of rows) {
-      if (ignoredPids.includes(row.pid)) continue;
+      if (ignored(row.pid)) continue;
       const command = process.platform === "win32" ? row.command.toLowerCase().replaceAll("\\", "/") : row.command;
       const root = process.platform === "win32" ? installDir.toLowerCase().replaceAll("\\", "/") : installDir;
-      if ((row.executable && inside(row.executable)) || command.includes(`${root}/`) || row.command.split(/\s+/).some((arg) => inside(arg.replace(/^"|"$/g, "")))) return "This installation is shared with another running process (possibly the web server); update it manually or use a dedicated host installation";
+      if ((row.executable && inside(row.executable)) || command.includes(`${root}/`) || row.command.split(/\s+/).some((arg) => inside(arg.replace(/^"|"$/g, "")))) return shared;
     }
     return null;
   } catch { return "Cannot establish that this installation is host-only; update it manually"; }
 }
 
-export async function verifyHostServiceInstall(service: NonNullable<HostUpdateDescriptor["systemd"]>, installDir: string, binary: boolean, runtime: string): Promise<void> {
-  const { stdout } = await exec("systemctl", [...(service.user ? ["--user"] : []), "show", "--property=ExecStart", "--value", service.unit], { timeout: 2000, env: workerEnvironment(), maxBuffer: 1024 * 1024 });
-  const executable = stdout.match(/(?:^|\s)path=([^;]+);/)?.[1]?.trim();
-  const args = stdout.match(/argv\[\]=([^;]+);/)?.[1]?.trim();
-  if (!executable || !args) throw new Error("Cannot verify this host service's restart command");
-  const start = realpathSync(executable);
-  const launcher = join(installDir, "bin", "omp-web.js");
-  const host = join(installDir, "bin", "omp-web-host.js");
-  const expected = join(installDir, process.platform === "win32" ? "ompweb.exe" : "ompweb");
-  const hostFlag = /(?:^|\s)host(?:\s|$)/.test(args);
-  const valid = binary ? start === expected && hostFlag : ((start === launcher && hostFlag) || start === host || (start === realpathSync(runtime) && (args.includes(host) || (args.includes(launcher) && hostFlag))));
-  if (!valid) throw new Error("Host service restart targets a different installation or unsupported wrapper; update it manually");
+/** How a host in `installDir` is started: what the supervisor-aware restart runs, and what is inspected at claim time. */
+export function hostLaunch(d: Pick<HostUpdateDescriptor, "installMethod" | "installDir" | "runtime" | "hostArgs" | "cwd">): UpgradeLaunch {
+  const binary = d.installMethod === "binary";
+  return {
+    command: binary ? join(d.installDir, process.platform === "win32" ? "ompweb.exe" : "ompweb") : d.runtime,
+    args: binary ? ["host", ...d.hostArgs] : [join(d.installDir, "bin", "omp-web-host.js"), ...d.hostArgs],
+    cwd: d.cwd,
+    env: workerEnvironment(),
+  };
 }
 
 /** `<binary> --version` printed the exact version (a leading v is allowed). */
@@ -403,12 +442,20 @@ async function binaryReportsVersion(binary: string, packageDir: string, version:
 }
 /** PREFLIGHT_MARKER (lib/hosts/preflight.ts), encoded so this module, bundled into the same binary, does not embed it. */
 export const PREFLIGHT_MARKER_BASE64 = "b21wd2ViLXByZWZsaWdodC1zY3JhdGNoLQ==";
+export interface HostReleasePreflightInput {
+  installMethod: "npm" | "bun" | "binary";
+  version: string;
+  /** The JavaScript runtime that runs an npm/bun release; not used for a binary one. */
+  runtime?: string;
+  /** The release already runs here: a candidate that predates the preflight command is restarted unchecked instead of refused. */
+  restartOnly?: boolean;
+}
 /** The candidate's `ompweb fetch-omp` (lib/omp/runner-fetch.ts: its omp runner from its own release, unless it has
  * one), then its `ompweb preflight` (lib/hosts/preflight.ts) in this host's environment: the session omp it resolves
  * must start and say hello before the switch. A new binary release without the preflight command is refused (it
  * would run a runner unchecked); a restart-only update of an install that predates the command restarts what already
  * runs. */
-async function preflightHostRelease(d: HostUpdateDescriptor, release: string): Promise<void> {
+export async function preflightHostRelease(d: HostReleasePreflightInput, release: string): Promise<void> {
   const binary = d.installMethod === "binary";
   const entry = binary ? join(release, process.platform === "win32" ? "ompweb.exe" : "ompweb") : join(release, "bin", "omp-web.js");
   // Detected statically: an older ompweb takes `preflight` for a positional and starts the web server.
@@ -417,7 +464,7 @@ async function preflightHostRelease(d: HostUpdateDescriptor, release: string): P
     console.warn(`ompweb ${d.version} has no preflight command; its omp was not checked`);
     return;
   }
-  const command = (args: string[], timeout: number) => exec(binary ? entry : d.runtime, binary ? args : [entry, ...args], { cwd: release, timeout, env: workerEnvironment(), maxBuffer: 1024 * 1024, windowsHide: true });
+  const command = (args: string[], timeout: number) => exec(binary ? entry : d.runtime!, binary ? args : [entry, ...args], { cwd: release, timeout, env: workerEnvironment(), maxBuffer: 1024 * 1024, windowsHide: true });
   const detail = (error: unknown) => (String((error as { stderr?: unknown }).stderr ?? "").trim() || (error instanceof Error ? error.message : String(error))).slice(-500);
   // A binary release with the preflight command and no runner beside it has `fetch-omp`; every npm one that has
   // runner-fetch.ts does (an npm package never carries the runner).
@@ -497,94 +544,116 @@ export function pruneHostUpdateArtifacts(installDir: string, options: { keepAtte
   }
   for (const id of attempts.keys()) {
     const dir = join(root, id);
-    for (const heavy of ["runtime", "runtime.exe", "worker.mts"]) { try { rmSync(join(dir, heavy), { force: true }); } catch { /* locked: retried next update */ } }
+    for (const heavy of readdirSync(dir)) if (/^runtime(\.exe)?$|\.mts$/.test(heavy)) { try { rmSync(join(dir, heavy), { force: true }); } catch { /* locked: retried next update */ } }
     if (id !== state?.operation.id && id !== keepBackup && id !== options.keepAttempt && !leftover.has(id)) removeOwnedTree(dir);
   }
 }
 
 class UnsafeHostRestartError extends Error {}
-async function waitStopped(pid: number): Promise<void> {
-  const deadline = Date.now() + 10000;
-  while (isHostUpdateProcessAlive(pid)) {
-    if (Date.now() > deadline) throw new Error("Host daemon did not stop safely; refusing to kill sessions");
-    await pause(100);
+/**
+ * Stops the daemon through its inspected supervisor, which waits for it to end. A daemon ending many sessions can
+ * outlast one stop's wait; only a forced update gives it more, and only while it is still the process inspected (every
+ * attempt re-verifies that). An error after the daemon is gone is not one.
+ */
+async function stopDaemon(plan: UpgradeProcess, pid: number, force: boolean, runtime: WorkerRuntime): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await runtime.process.stopUpgradeProcess(plan); }
+    catch (error) { if (!runtime.identity.isProcessAlive(pid)) return; if (!force || attempt >= 5) throw error; }
   }
 }
-async function controlService(d: HostUpdateDescriptor, action: "stop" | "start"): Promise<void> {
-  if (!d.systemd) return;
-  await exec("systemctl", [...(d.systemd.user ? ["--user"] : []), action, d.systemd.unit], { timeout: 15000, env: workerEnvironment(), maxBuffer: 1024 * 1024 });
+/** After a stop, nothing may still hold the installation (an orphaned session, a scanner): the swap would fail or tear it. */
+async function waitUnshared(installDir: string): Promise<void> {
+  for (const deadline = Date.now() + 15000; ; await pause(500)) {
+    const sharing = await sharedHostInstallReason(installDir, [process.pid]);
+    if (!sharing) return;
+    if (Date.now() > deadline) throw new Error(`${sharing} Stopping the host did not free it.`);
+  }
 }
-/** The service's main process (the daemon itself: its ExecStart is verified to be the host runtime); 0 when none. */
-async function servicePid(service: NonNullable<HostUpdateDescriptor["systemd"]>): Promise<number> {
-  const { stdout } = await exec("systemctl", [...(service.user ? ["--user"] : []), "show", "--property=MainPID", "--value", service.unit], { timeout: 5000, env: workerEnvironment() });
-  return Number(stdout.trim()) || 0;
-}
-async function stopDaemon(d: HostUpdateDescriptor, pid: number): Promise<void> {
-  if (d.systemd) {
-    await verifyHostServiceInstall(d.systemd, d.installDir, d.installMethod === "binary", d.runtime);
-    if (await servicePid(d.systemd) !== pid) throw new Error("Host service main process changed during update; refusing to stop it");
-    await controlService(d, "stop");
-  } else if (isHostUpdateProcessAlive(pid)) {
-    const current = await processStartIdentity(pid);
-    if (!current || current !== d.daemonIdentity) {
-      if (!isHostUpdateProcessAlive(pid)) return; // it exited while the identity was read: nothing left to stop
-      throw new Error("The recorded host daemon is no longer the process with this pid (process identity mismatch); refusing to signal it");
+/** Renames a release directory. Windows keeps a directory while any file in it is open (a process still exiting, a virus scan): retry briefly, then fail with the original error. */
+export async function moveHostRelease(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try { return renameSync(from, to); }
+    catch (error) {
+      if (process.platform !== "win32" || !["EBUSY", "EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "") || attempt >= 40) throw error;
+      await pause(250);
     }
-    process.kill(pid, "SIGTERM");
   }
-  await waitStopped(pid);
 }
-async function launchDaemon(d: HostUpdateDescriptor, health: string, expected: string): Promise<number | undefined> {
+/** The daemon's verified process and supervisor: the snapshot the claim persisted or, for a descriptor an earlier engine wrote, inspected now against its recorded identity. */
+async function daemonProcess(d: HostUpdateDescriptor, runtime: WorkerRuntime): Promise<UpgradeProcess> {
+  if (d.process) return d.process;
+  if (!runtime.identity.isProcessAlive(d.daemonPid)) throw new Error("The host daemon is no longer running, so its supervisor cannot be inspected; restart it manually");
+  if (d.daemonIdentity && await runtime.identity.processStartIdentity(d.daemonPid) !== d.daemonIdentity) throw new Error("The recorded host daemon is no longer the process with this pid (process identity mismatch); refusing to signal it");
+  return runtime.process.inspectUpgradeProcess({ pid: d.daemonPid, installDir: d.installDir, role: "host", launch: hostLaunch(d) });
+}
+/** A forced update's commit: from here the daemon accepts no new sessions (it reads this file at each start). */
+function markCommitting(id: string): void {
+  const state = readHostUpdateState();
+  if (state?.operation.id !== id || state.operation.state !== "running") throw new Error("Host update no longer owns the operation");
+  writeHostUpdateJson(join(hostUpdateRoot(), "status.json"), { ...state, operation: { ...state.operation, committing: true } });
+}
+/** Proof that this operation's candidate passed its preflight: a candidate echoes `nonce` in a maintenance receipt. */
+function recordPreflight(d: HostUpdateDescriptor): string {
+  const nonce = randomUUID();
+  writeHostUpdateJson(join(hostUpdateRoot(), d.id, "preflight.json"), { id: d.id, version: d.version, nonce });
+  return nonce;
+}
+/** Only the recovery CLI's drained old daemon (descriptor.recovery): put it back to work, because nothing was stopped. A static import cannot work: this file is copied alone outside an npm install, which never has that descriptor and has no host-control module beside it; the binary that runs a recovery bundles it. */
+async function resumeDrainedDaemon(): Promise<void> {
+  const { requestHostControl } = await import("./host-control");
+  await requestHostControl("resume");
+}
+/**
+ * Restarts the host through its inspected supervisor and waits for its acknowledgement. Only the instance launched here
+ * may vouch. A maintenance receipt (marker.receipt) is accepted only when this operation asked for one (descriptor.receipt)
+ * and it carries the preflight nonce and a protocol inside the approved range: a bare maintenance connection never counts.
+ * Whatever fails, the candidate is stopped again through the same supervisor before anything is rolled back.
+ */
+async function launchDaemon(d: HostUpdateDescriptor, plan: UpgradeProcess, runtime: WorkerRuntime, health: string, expected: string, nonce?: string): Promise<number> {
   if (existsSync(health)) { assertOwnedPath(health); rmSync(health); }
-  let child: ChildProcess | undefined;
-  let spawnError: Error | undefined;
-  if (d.systemd) await controlService(d, "start");
-  else {
-    const runtime = d.installMethod === "binary" ? join(d.installDir, process.platform === "win32" ? "ompweb.exe" : "ompweb") : d.runtime;
-    const args = d.installMethod === "binary" ? ["host", ...d.hostArgs] : [join(d.installDir, "bin", "omp-web-host.js"), ...d.hostArgs];
-    child = spawn(runtime, args, { cwd: d.cwd, detached: true, stdio: "ignore", windowsHide: true, env: workerEnvironment() });
-    child.once("error", (error) => { spawnError = error; });
-    child.unref();
-  }
   const deadline = Date.now() + 30000;
   try {
+    const launched = (await runtime.process.restartUpgradeProcess(plan, hostLaunch(d))) ?? plan.current.pid ?? undefined;
     while (Date.now() < deadline) {
-      if (spawnError) throw spawnError;
-      if (child && child.exitCode !== null) throw new Error(`Updated host exited before health acknowledgement (${child.exitCode})`);
       if (existsSync(health)) {
         assertOwnedPath(health);
         const marker = JSON.parse(readFileSync(health, "utf8"));
-        // Only the daemon launched here may vouch for this attempt, not another daemon sharing the agent directory.
-        const launched = child ? child.pid : await servicePid(d.systemd!);
-        if (marker.id === d.id && marker.pid === launched && isHostUpdateProcessAlive(marker.pid)) {
+        const vouches = launched !== undefined
+          ? marker.pid === launched
+          : marker.pid !== d.daemonPid && marker.pid !== process.pid && (marker.identity === undefined || marker.identity === await runtime.identity.processStartIdentity(marker.pid));
+        if (marker.id === d.id && vouches && runtime.identity.isProcessAlive(marker.pid)) {
           if (marker.version !== expected) throw new Error(`Host acknowledged version ${marker.version}, expected ${expected}`);
+          if (marker.receipt !== undefined && (!d.receipt || !nonce || marker.receipt !== nonce || !(marker.protocol >= d.receipt.min && marker.protocol <= d.receipt.max))) throw new Error("The host's maintenance receipt does not match this operation's release proof and approved protocol range");
           return marker.pid;
         }
       }
+      if (launched !== undefined && !runtime.identity.isProcessAlive(launched)) throw new Error("Updated host exited before health acknowledgement");
       await pause(100);
     }
     throw new Error("Host launch did not acknowledge healthy reconnect within 30 seconds");
   } catch (error) {
-    try {
-      if (d.systemd) await controlService(d, "stop");
-      else if (child?.pid && isHostUpdateProcessAlive(child.pid)) { process.kill(child.pid, "SIGTERM"); await waitStopped(child.pid); }
-    } catch (stopError) { throw new UnsafeHostRestartError(`Failed candidate could not be stopped; backup retained, no duplicate daemon started: ${String(stopError)}`); }
+    try { await runtime.process.stopUpgradeProcess(plan); }
+    catch (stopError) { throw new UnsafeHostRestartError(`Failed candidate could not be stopped; backup retained, no duplicate daemon started: ${String(stopError)}`); }
     throw error;
   }
 }
 function validateDescriptor(path: string): HostUpdateDescriptor {
   const root = ensureHostUpdateRoot();
   assertOwnedPath(path);
-  const d = JSON.parse(readFileSync(path, "utf8")) as HostUpdateDescriptor;
+  const d = JSON.parse(readFileSync(path, "utf8")) as HostUpdateDescriptor & { systemd?: { unit?: unknown; user?: unknown } | null };
   if (!/^[a-zA-Z0-9-]{1,80}$/.test(d.id) || resolve(path) !== join(root, d.id, "descriptor.json") || !HOST_VERSION_PATTERN.test(d.version) || !HOST_VERSION_PATTERN.test(d.fromVersion) || d.target !== "ompweb" || !["npm", "bun", "binary"].includes(d.installMethod) || !isAbsolute(d.installDir) || !isAbsolute(d.runtime) || !isAbsolute(d.cwd) || !Number.isSafeInteger(d.daemonPid) || d.daemonPid <= 1 || !Array.isArray(d.hostArgs) || d.hostArgs.some((arg) => arg !== "--allow-http")) throw new Error("Invalid host update descriptor");
   // A v10 daemon copies this new worker after the shared web installation has already been replaced.
   if (d.releaseRepo === undefined ? d.restartOnly !== true : typeof d.releaseRepo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(d.releaseRepo)) throw new Error("Invalid host update descriptor");
   if (d.restartOnly !== undefined && typeof d.restartOnly !== "boolean") throw new Error("Invalid host restart-only descriptor");
-  if (!d.systemd && (typeof d.daemonIdentity !== "string" || !d.daemonIdentity || d.daemonIdentity.length > 200)) throw new Error("Invalid host update descriptor: the daemon's process identity is missing");
+  if (d.force !== undefined && typeof d.force !== "boolean") throw new Error("Invalid host update descriptor");
+  if (d.receipt !== undefined && (!d.receipt || !Number.isSafeInteger(d.receipt.min) || !Number.isSafeInteger(d.receipt.max) || d.receipt.min < 1 || d.receipt.max < d.receipt.min)) throw new Error("Invalid host update descriptor: the approved protocol range");
+  if (d.recovery !== undefined && (!d.recovery || typeof d.recovery.drained !== "boolean")) throw new Error("Invalid host update descriptor");
+  // The daemon's process snapshot, or what an earlier engine recorded instead: an identity, or the service it had verified.
+  if (d.process !== undefined ? typeof d.process !== "object" || d.process === null || Array.isArray(d.process) : !(d.systemd || (typeof d.daemonIdentity === "string" && d.daemonIdentity && d.daemonIdentity.length <= 200))) throw new Error("Invalid host update descriptor: the daemon's process identity is missing");
   assertOwnedPath(dirname(path), true);
   const state = readHostUpdateState();
   if (state?.operation.id !== d.id || state.operation.state !== "running" || state.operation.version !== d.version || state.daemonPid !== d.daemonPid) throw new Error("Host update descriptor does not own the running operation");
-  if (d.systemd && (!/^[a-zA-Z0-9_.@\\:-]+\.service$/.test(d.systemd.unit) || /^ompweb-api(?:[.@-]|$)/i.test(d.systemd.unit) || typeof d.systemd.user !== "boolean")) throw new Error("Refusing to control a non-host service");
+  if (d.systemd && (typeof d.systemd.unit !== "string" || !/^[a-zA-Z0-9_.@\\:-]+\.service$/.test(d.systemd.unit) || /^ompweb-api(?:[.@-]|$)/i.test(d.systemd.unit) || typeof d.systemd.user !== "boolean")) throw new Error("Refusing to control a non-host service");
   const info = lstatSync(d.installDir);
   if (!info.isDirectory() || info.isSymbolicLink() || realpathSync(d.installDir) !== resolve(d.installDir) || (process.getuid && info.uid !== process.getuid()) || (process.platform !== "win32" && (info.mode & 0o022))) throw new Error("Unsupported or unsafe host installation layout");
   const parent = lstatSync(dirname(d.installDir));
@@ -601,6 +670,8 @@ function validateDescriptor(path: string): HostUpdateDescriptor {
 }
 export async function runHostUpdateWorker(path: string): Promise<number> {
   let d: HostUpdateDescriptor | undefined;
+  let plan: UpgradeProcess | undefined;
+  let runtime: WorkerRuntime | undefined;
   let backup: string | undefined;
   let stopped = false;
   let swapped = false;
@@ -608,6 +679,7 @@ export async function runHostUpdateWorker(path: string): Promise<number> {
   let stagingCreated = false;
   try {
     d = validateDescriptor(path);
+    runtime = await workerRuntime(d);
     const workerLease = join(dirname(path), "worker.lock");
     try { writeFileSync(workerLease, String(process.pid), { flag: "wx", mode: 0o600 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return 1; throw error; }
@@ -618,31 +690,43 @@ export async function runHostUpdateWorker(path: string): Promise<number> {
     writeHostUpdateJson(join(hostUpdateRoot(), "status.json"), { ...state, workerPid: process.pid });
     // Give the host op response time to reach the web server before any stop.
     await pause(500);
+    plan = await daemonProcess(d, runtime);
     let release: string | undefined;
     if (!d.restartOnly) {
-      const sharing = await sharedHostInstallReason(d.installDir, [process.pid, d.daemonPid]);
+      // The daemon's own sessions and subagents run the installed runner; stopping the daemon ends them, so they are not sharers. Anything else is.
+      const sharing = await sharedHostInstallReason(d.installDir, [process.pid], [d.daemonPid]);
       if (sharing) throw new Error(`Update the web server first because this installation is shared. ${sharing}`);
       staging = join(dirname(d.installDir), `.ompweb-staging-${d.id}`);
       mkdirSync(staging, { mode: 0o700 });
       stagingCreated = true;
-      release = d.installMethod === "binary" ? await stageBinary(d, staging) : await stagePackage(d, staging);
-      const sharingAfterStage = await sharedHostInstallReason(d.installDir, [process.pid, d.daemonPid]);
+      if (!d.releaseRepo) throw new Error("The host update has no verified release repository");
+      release = d.installMethod === "binary"
+        ? await stageBinary({ version: d.version, releaseRepo: d.releaseRepo }, staging)
+        : await stagePackage({ version: d.version, installMethod: d.installMethod, managerPath: d.managerPath }, staging);
+      const sharingAfterStage = await sharedHostInstallReason(d.installDir, [process.pid], [d.daemonPid]);
       if (sharingAfterStage) throw new Error(sharingAfterStage);
     }
     await preflightHostRelease(d, release ?? d.installDir);
-    // The daemon blocks new children for the entire persisted running operation.
+    const nonce = d.receipt ? recordPreflight(d) : undefined;
+    // Normally the daemon blocks new children for the entire persisted running operation; a forced one only from its commit.
     if (readHostUpdateState()?.operation.id !== d.id || readHostUpdateState()?.operation.state !== "running") throw new Error("Host update no longer owns the operation");
     validateDescriptor(path);
     if (d.restartOnly && !(await installedHostVersionMatches(d.installMethod, d.installDir, d.version))) throw new Error(restartCandidateMissing);
-    await stopDaemon(d, d.daemonPid);
+    if (d.force) markCommitting(d.id);
+    // The supervisor stops the daemon (a forced one ends its sessions with it, after the daemon has preserved its resume manifest).
+    if (runtime.identity.isProcessAlive(d.daemonPid)) {
+      try { await stopDaemon(plan, d.daemonPid, d.force === true, runtime); }
+      catch (error) { stopped = !runtime.identity.isProcessAlive(d.daemonPid); throw error; }
+    }
     stopped = true;
     if (release) {
+      await waitUnshared(d.installDir);
       backup = join(dirname(d.installDir), `.ompweb-backup-${d.id}`);
       if (existsSync(backup)) throw new Error("Host backup directory already exists");
-      renameSync(d.installDir, backup);
-      try { renameSync(release, d.installDir); swapped = true; } catch (error) { renameSync(backup, d.installDir); backup = undefined; throw error; }
+      await moveHostRelease(d.installDir, backup);
+      try { await moveHostRelease(release, d.installDir); swapped = true; } catch (error) { await moveHostRelease(backup, d.installDir); backup = undefined; throw error; }
     }
-    await launchDaemon(d, join(dirname(path), "health.json"), d.version);
+    await launchDaemon(d, plan, runtime, join(dirname(path), "health.json"), d.version, nonce);
     finishHostUpdate(d.id);
     return 0;
   } catch (error) {
@@ -653,14 +737,18 @@ export async function runHostUpdateWorker(path: string): Promise<number> {
       } catch {}
     }
     let message = error instanceof Error ? error.message : String(error);
+    if (d?.recovery?.drained && !stopped) {
+      try { await resumeDrainedDaemon(); }
+      catch (resumeError) { message += `; the old host stays drained and must be resumed with \`ompweb host resume\`: ${resumeError instanceof Error ? resumeError.message : String(resumeError)}`; }
+    }
     if (d?.restartOnly && stopped) message += "; existing shared installation retained; the previous loaded runtime cannot be restored without reinstalling";
-    if (d && stopped && !d.restartOnly && !(error instanceof UnsafeHostRestartError)) {
+    if (d && plan && runtime && stopped && !d.restartOnly && !(error instanceof UnsafeHostRestartError)) {
       try {
         if (swapped && backup) {
-          renameSync(d.installDir, join(dirname(d.installDir), `.ompweb-failed-${d.id}`));
-          renameSync(backup, d.installDir);
+          await moveHostRelease(d.installDir, join(dirname(d.installDir), `.ompweb-failed-${d.id}`));
+          await moveHostRelease(backup, d.installDir);
         }
-        await launchDaemon(d, join(dirname(path), "health.json"), d.fromVersion);
+        await launchDaemon(d, plan, runtime, join(dirname(path), "health.json"), d.fromVersion);
         message += "; previous host release restored";
       } catch (rollbackError) { message += `; rollback/restart failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`; }
     }
@@ -674,6 +762,6 @@ export async function runHostUpdateWorker(path: string): Promise<number> {
   }
 }
 
-if (process.argv[2] === "--host-update-descriptor" && process.argv[3]) {
+if (process.argv[2] === "--host-update-descriptor" && process.argv[3] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   void runHostUpdateWorker(process.argv[3]).then((code) => { process.exitCode = code; });
 }

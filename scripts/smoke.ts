@@ -1,16 +1,17 @@
 // `npm run smoke [-- --package <dir> | --binary <path>]`: starts ompweb (`node <dir>/bin/omp-web.js`, or the compiled
-// binary) on a free port with a throwaway HOME, then `ompweb host` from the same install, and checks the shipped
+// binary) on a free port with a throwaway HOME, waits for its automatic local host, and checks the shipped
 // bundle, the SPA, a hashed asset, the API, a session listed through the daemon, a live session started through the
 // omp runner (no model call) and the SSE stream, then stops both.
 // <dir>: the repo root (after `npm run build` and `bun runner/scripts/build-binary.ts`) or a packed install;
 // <path>: release/ompweb-<os>-<arch>/ompweb, whose directory holds the static files and the runner (ompweb-omp) unless
 // built --no-runner. Prints one `ok <step>` / `FAIL <step>: <detail>` line per step.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { releaseRepo } from "../lib/release-repo";
+import { isProcessAlive } from "../lib/process-identity";
 
 const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" }, binary: { type: "string" }, omp: { type: "string" }, "second-server": { type: "boolean" } } });
 const binary = values.binary && path.resolve(values.binary);
@@ -93,10 +94,20 @@ for (const name of ["OMP_WEB_PASSWORD", "OMP_WEB_PASSWORD_HASH", "OMP_WEB_OMP_BI
 // --omp <path>: a packed install, or a --no-runner binary, fetches its runner from its release, which a build under
 // test has not published yet (lib/omp/runner-fetch.ts).
 if (values.omp) env.OMP_WEB_OMP_BIN = path.resolve(values.omp);
+// A private Windows runner lets cleanup identify this smoke's detached brokers without killing other installs' images.
+let privateRunner: string | undefined;
+if (process.platform === "win32") {
+  const runner = env.OMP_WEB_OMP_BIN || (binary ? path.join(dir, "ompweb-omp.exe") : path.join(dir, "runner", "release", "ompweb-omp-windows-x64.exe"));
+  if (existsSync(runner)) {
+    privateRunner = path.join(temp, "ompweb-omp.exe");
+    copyFileSync(runner, privateRunner);
+    env.OMP_WEB_OMP_BIN = privateRunner;
+  }
+}
 
 let log = "";
 let launcher: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
-let daemon: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+let daemonPid: number | undefined;
 let secondLauncher: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
 const stop = (child: Bun.Subprocess) => {
   if (process.platform === "win32") Bun.spawnSync(["taskkill", "/pid", String(child.pid), "/t", "/f"]);
@@ -155,19 +166,24 @@ try {
       await response.json();
     });
 
-    await step("`ompweb host` links this machine", async () => {
-      const child = Bun.spawn([...ompweb, "host"], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-      daemon = child;
-      void readText(child.stdout, (text) => { log += text; });
-      void readText(child.stderr, (text) => { log += text; });
+    await step("the server automatically starts and links this machine's host", async () => {
       const deadline = Date.now() + 60_000;
       for (;;) {
         const { hosts } = await (await fetch(`${base}/api/hosts`)).json() as { hosts: { id: string; status: string }[] };
         if (hosts.find((host) => host.id === "local")?.status === "online") break;
-        assert(child.exitCode === null, `ompweb host exited with ${child.exitCode}`);
-        assert(Date.now() < deadline, "this machine is not linked 60 s after `ompweb host` started");
+        assert(launcher?.exitCode === null, `server exited with ${launcher?.exitCode}`);
+        assert(Date.now() < deadline, "the automatic local host did not link within 60 s");
         await Bun.sleep(200);
       }
+      const result = Bun.spawnSync([...ompweb, "host", "status"], { env, stdout: "pipe", stderr: "pipe" });
+      assert(result.exitCode === 0, result.stderr.toString());
+      const status: unknown = JSON.parse(result.stdout.toString());
+      assert(status && typeof status === "object" && "pid" in status && typeof status.pid === "number" && status.pid > 1
+        && "entrypoint" in status && typeof status.entrypoint === "string" && "executable" in status && typeof status.executable === "string");
+      const expected = binary ? [binary] : [path.join(dir, "bin", "omp-web-host.js"), path.join(dir, "bin", "omp-web.js")];
+      const actual = path.resolve(binary ? status.executable : status.entrypoint);
+      assert(expected.some((file) => process.platform === "win32" ? path.resolve(file).toLowerCase() === actual.toLowerCase() : path.resolve(file) === actual), "the control endpoint belongs to another installation");
+      daemonPid = status.pid;
     });
 
     // Sessions list only through the daemon, so this also proves the server ran as production: it wrote the link.
@@ -222,9 +238,9 @@ try {
     });
 
     if (binary) {
-      await step("the binary points updates at the release page and offers no in-app update", async () => {
+      await step("the owned binary release supports GUI-coordinated updates", async () => {
         const update = await (await fetch(`${base}/api/app-update`)).json() as { installMethod?: string; selfUpdateSupported?: boolean; updateCommand?: string };
-        assert(update.installMethod === "binary" && update.selfUpdateSupported === false, JSON.stringify(update));
+        assert(update.installMethod === "binary" && update.selfUpdateSupported === true, JSON.stringify(update));
         assert(update.updateCommand?.startsWith(`https://github.com/${releaseRepo()}/releases`), `updateCommand ${update.updateCommand}`);
       });
     }
@@ -260,12 +276,15 @@ try {
       assert(outcome !== "running", "second launcher still runs after SIGTERM");
     });
   }
-  if (daemon) {
-    const child = daemon;
-    await step("`ompweb host` stops", async () => {
-      stop(child);
-      const outcome = await Promise.race([child.exited, Bun.sleep(15_000).then(() => "running")]);
-      assert(outcome !== "running", "ompweb host still runs 15 s after the stop");
+  if (daemonPid) {
+    const pid = daemonPid;
+    await step("the automatic host stops", async () => {
+      if (process.platform === "win32") Bun.spawnSync(["taskkill", "/pid", String(pid), "/t", "/f"]);
+      else process.kill(pid, "SIGTERM");
+      for (const deadline = Date.now() + 15_000; isProcessAlive(pid);) {
+        assert(Date.now() < deadline, "automatic host still runs 15 s after the stop");
+        await Bun.sleep(100);
+      }
     });
   }
   if (launcher) {
@@ -281,7 +300,12 @@ try {
   }
   // omp's shared brokers (daemon broker, LSP mux, embedding server) detach and outlive the session by design;
   // on Windows they keep the throwaway HOME locked, so stop every runner process this smoke started.
-  if (process.platform === "win32") Bun.spawnSync(["taskkill", "/f", "/t", "/im", "ompweb-omp.exe"]);
+  if (privateRunner) {
+    const escaped = privateRunner.replaceAll("'", "''");
+    const cleanup = Bun.spawnSync(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+      `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq '${escaped}' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`]);
+    assert(cleanup.exitCode === 0, "could not stop the smoke's private runner processes");
+  }
   await step("temp dirs removed", () => rmSync(temp, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 }));
 }
 

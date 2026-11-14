@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - name: Checkout repository
@@ -77,6 +77,13 @@ jobs:
             npx bun scripts/build-binary.ts --target bun-windows-x64-baseline
             bin=release/ompweb-windows-x64/ompweb.exe
             archive=release/ompweb-windows-x64.zip
+          elif [ "$RUNNER_OS" = macOS ]; then
+            arch=$(node -p process.arch)
+            target="bun-darwin-$arch"
+            if [ "$arch" = x64 ]; then target="$target-baseline"; fi
+            npx bun scripts/build-binary.ts --target "$target"
+            bin="release/ompweb-darwin-$arch/ompweb"
+            archive="release/ompweb-darwin-$arch.tar.gz"
           else
             npx bun scripts/build-binary.ts --target bun-linux-x64-baseline
             bin=release/ompweb-linux-x64/ompweb
@@ -88,7 +95,16 @@ jobs:
           # What the host updater checks on a new release before it switches (lib/hosts/update-worker.ts): the marker
           # it finds the command by, then the command itself against the bundled ompweb-omp.
           grep -qa ompweb-preflight-scratch- "$bin"
-          timeout 120 "$bin" preflight
+          node -e 'require("node:child_process").execFileSync(process.argv[1], ["preflight"], {stdio:"inherit",timeout:120000})' "$bin"
+
+      # Required on every supported runner, including macOS foreground. A skip fails the job.
+      - name: Native compiled coordinated upgrade and rollback
+        shell: bash
+        env:
+          OMPWEB_COMPILED_UPGRADE_E2E: "1"
+        run: |
+          export OMPWEB_UPGRADE_E2E_RUNNER="$(node -p "require('node:path').resolve('runner', 'release', 'ompweb-omp-' + (process.platform === 'win32' ? 'windows' : process.platform) + '-' + process.arch + (process.platform === 'win32' ? '.exe' : ''))")"
+          npx bun test --parallel --timeout 900000 lib/compiled-upgrade.integration.test.mjs
 
       - name: Packed install smoke test
         shell: bash

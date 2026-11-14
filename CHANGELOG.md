@@ -6,9 +6,14 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+## [v0.7.2] - 2026-11-14
+
 ### Fixed
 
 - **Restore HTTP LAN and VPN access.** Browser UUID generation now works without secure-context-only `crypto.randomUUID()`, preventing the "Something went wrong" crash when opening the app or creating a session.
+- **GUI server updates work for owned binary releases again.** Settings → System prepares a server-and-host compatibility plan before approval. Incompatible hosts must have a verified migration or recovery path; the local host participates in the initial migration and a shared-installation cutover. Progress survives a server restart, and failed replacement retains the previous installation for rollback.
+- **Old supervised hosts have an explicit forced recovery path.** Settings → Hosts offers Force update when recovery is available. Confirmation warns that sessions and subagents may end. A fixed, integrity-checked bootstrap uses the historical runner channel without enabling old application traffic. Windows uses native PowerShell/.NET and process/service/task controls; Linux and macOS retain their own supervisor semantics. Force never bypasses release integrity, ownership, process identity, update disablement or service permissions.
+- **Production starts its missing local host automatically.** It prepares the loopback link, reuses any answering daemon and otherwise starts an independent host. Concurrent starts keep one daemon, and a web-server exit leaves it running. Development does not take over production's host.
 
 ## [v0.7.1] - 2026-11-14
 

@@ -72,6 +72,21 @@ test("a binary install's ompweb update links the release page instead of showing
   assert.ok([...npm.querySelectorAll("code")].some((code) => code.textContent === "npm install -g @kahme247/ompweb"), "the npm command is gone");
 });
 
+test("a supported binary install gets the in-app Update action, not a download link, and clicking it only opens the review", async (t) => {
+  const releases = "https://github.com/ompweb-dev/ompweb/releases/latest";
+  let requested = 0;
+  const { container, requests } = await renderSystemTab(t, {
+    appUpdate: { currentVersion: "0.7.0", availableVersion: "0.8.0", updateAvailable: true, selfUpdateSupported: true, installMethod: "binary", updateCommand: releases },
+    onRequestAppUpdate: () => { requested += 1; },
+  });
+  assert.equal(container.querySelector(`a[href="${releases}"]`), null, "a supported binary must not be sent to the download page");
+  const updateButton = [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === "Update and restart");
+  assert.ok(updateButton, "no Update action for a supported binary install");
+  act(() => updateButton.click());
+  assert.equal(requested, 1);
+  assert.ok(!requests.some((url) => url.includes("app-update")), "the Settings click must not prepare or commit anything itself");
+});
+
 test("a host's omp row shows the omp its ompweb shipped and offers no update of its own", async (t) => {
   const { HostUpdates } = await import("./HostUpdates");
   const originalFetch = globalThis.fetch;
