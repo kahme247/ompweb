@@ -1340,6 +1340,8 @@ export class RemoteRpcTransport implements RpcTransport {
         if (value.streaming) this.deliverLine(value.streaming);
       });
     } catch (error) {
+      // A redial's hello reattaches this channel and retries its snapshot.
+      if (error instanceof HostOpError && error.code === "host_offline") return;
       this.close();
       console.warn(`[omp-web] closed shared channel ${this.ch}: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
