@@ -286,6 +286,11 @@ async function announceResumed(state: WatcherState): Promise<void> {
   outage.recovered ??= { minute: Math.floor(state.deps.now() / 60_000), told: new Set() };
   const { recovered } = outage;
   for (const sessionId of outage.paused) {
+    if (!listWatches().some((watch) => watch.sessionId === sessionId)) {
+      outage.paused.delete(sessionId);
+      recovered.told.delete(sessionId);
+      continue;
+    }
     if (recovered.told.has(sessionId)) continue;
     if (await notify(state, sessionId, "resumed", recovered.minute, "watching resumed")) recovered.told.add(sessionId);
   }
