@@ -1,10 +1,9 @@
 import { useId } from "react";
 
-// omp-web brand mark: the omp π glyph on its midnight tile.
-// Artwork matches the omp.sh favicon (https://omp.sh/favicon.svg).
+// ompweb brand mark: a rounded π inside an open orbit on its midnight tile.
 export default function OmpWebLogo({
   size = 20,
-  label = "omp logo",
+  label = "ompweb logo",
 }: {
   size?: number;
   label?: string;
@@ -27,8 +26,11 @@ export default function OmpWebLogo({
           <stop offset="1" stopColor="#5ad8e6" />
         </linearGradient>
       </defs>
-      <rect width="64" height="64" rx="12" fill="#0f0a14" />
-      <path fill={`url(#${g})`} d="M14 16h36v8H40v32h-8V24h-6v22h-8V24h-4z" />
+      <rect width="64" height="64" rx="15" fill="#0f0a14" />
+      <g fill="none" stroke={`url(#${g})`} strokeWidth="5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M49 17A23 23 0 1 0 55 34" />
+        <path d="M21 24H43M26 24V39M37 24V44" />
+      </g>
     </svg>
   );
 }

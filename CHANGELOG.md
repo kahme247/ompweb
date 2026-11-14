@@ -16,6 +16,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Added
 
+- **A distinct ompweb icon.** The rounded π inside an open orbit retains the pink–purple–cyan palette. The sidebar logo, SVG/PNG artwork, favicons, installed-app icons and tray icon now use the same mark.
 - **Upgrades check the session omp before they switch.** `ompweb preflight` resolves omp exactly as the host does for a new session (`OMP_WEB_OMP_BIN` or this version's downloaded `ompweb-omp`), starts it headless with `--no-session`, and waits up to 30 s for its hello: it prints `preflight ok: <omp> <version>`, or exits 1 naming the binary and why (not found, not executable, exited with its code, or no hello with omp's last stderr). The host updater and the web app's in-app update run the new release's preflight in the live environment before they stop anything, and abort with the current install still running when it fails. Before the preflight, both run the new release's `ompweb fetch-omp`, so its runner is in place first. A release without the preflight command is checked only if it ships `ompweb-omp`; then the update fails.
 - **Rename the cluster.** Settings → Hosts shows the cluster's name with a **Rename cluster** button; the sidebar group follows. The cluster is still created as "Cluster" when the first host joins, so rename it afterwards. `PATCH /api/hosts { poolId, label }` renames a pool without replacing the pool registry.
 - **Cluster members use this machine's omp configuration.**
