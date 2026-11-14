@@ -18,6 +18,7 @@ const REVIEW_STATES: Record<string, string> = {
 };
 
 type Head = NonNullable<ItemSnapshot["head"]>;
+type ReviewSnapshot = ItemSnapshot["reviews"][number] & { databaseId?: string };
 
 export interface WatchCursor {
   commentIds: string[];
@@ -29,7 +30,7 @@ export interface WatchCursor {
 
 export type GithubEvent =
   | { kind: "comment"; id: string; url: string; author: GithubActor }
-  | { kind: "review"; id: string; url: string; author: GithubActor; state: string; commentCount: number }
+  | { kind: "review"; id: string; url: string; author: GithubActor; state: string; commentCount: number; databaseId?: string }
   | { kind: "thread_comment"; id: string; url: string; author: GithubActor; threadId: string; line: number | null }
   | { kind: "ci"; id: string; url: string; sha: string; counts: Record<string, number> }
   | { kind: "merged"; id: string; url: string }
@@ -46,6 +47,21 @@ const remember = (known: string[], seen: string[]): string[] => {
 const unseen = <T extends { id: string }>(items: T[], known: string[], posted: ReadonlySet<string>): T[] => {
   const seen = new Set(known);
   return items.filter((item) => !seen.has(item.id) && !posted.has(item.id));
+};
+
+// Comments and reviews arrive oldest-first; the earliest retained ID bounds an expanded shared snapshot.
+const unseenHistory = <T extends { id: string }>(
+  items: T[],
+  known: string[],
+  posted: ReadonlySet<string>,
+  postedAlias?: (item: T) => string | undefined,
+): T[] => {
+  const seen = new Set(known);
+  const boundary = items.findIndex((item) => seen.has(item.id));
+  return items.filter((item, index) => {
+    const alias = postedAlias?.(item);
+    return index >= boundary && !seen.has(item.id) && !posted.has(item.id) && (alias === undefined || !posted.has(alias));
+  });
 };
 
 // For a confirm the user reads (a thread's file path): one line, no control or format characters, bounded length.
@@ -85,15 +101,17 @@ export function diffSnapshot(
   snapshot: ItemSnapshot,
   postedIds: ReadonlySet<string>,
 ): { events: GithubEvent[]; cursor: WatchCursor } {
+  const reviews = snapshot.reviews as ReviewSnapshot[];
   const events: GithubEvent[] = [
-    ...unseen(snapshot.comments, cursor.commentIds, postedIds).map((c) => ({ kind: "comment" as const, id: c.id, url: c.url, author: c.author })),
-    ...unseen(snapshot.reviews, cursor.reviewIds, postedIds).map((r) => ({
+    ...unseenHistory(snapshot.comments, cursor.commentIds, postedIds).map((c) => ({ kind: "comment" as const, id: c.id, url: c.url, author: c.author })),
+    ...unseenHistory(reviews, cursor.reviewIds, postedIds, (review) => review.databaseId === undefined ? undefined : `review:${review.databaseId}`).map((r) => ({
       kind: "review" as const,
       id: r.id,
       url: r.url,
       author: r.author,
       state: r.state,
       commentCount: r.commentCount,
+      ...(r.databaseId === undefined ? {} : { databaseId: r.databaseId }),
     })),
     ...unseen(snapshot.threadComments, cursor.threadCommentIds, postedIds).map((t) => ({
       kind: "thread_comment" as const,
@@ -164,6 +182,29 @@ function describe(event: GithubEvent): string {
 /** Header, then one line per event. Only logins, association, review states, line numbers, ids and URLs come from GitHub; never check names or file paths, which a fork writes. */
 export function formatUpdate(targetText: string, url: string, events: GithubEvent[]): string {
   return [`GitHub update (omp-web): ${targetText} ${url}`, ...events.map(describe)].join("\n");
+}
+
+const jsonStringContentBytes = (value: string): number => Buffer.byteLength(JSON.stringify(value)) - 2;
+
+/** Splits events without losing any; the caller supplies space left after its complete JSON command envelope. */
+export function splitUpdateEvents(targetText: string, url: string, events: GithubEvent[], maxMessageContentBytes: number): GithubEvent[][] {
+  const headerBytes = jsonStringContentBytes(`GitHub update (omp-web): ${targetText} ${url}`);
+  const batches: GithubEvent[][] = [];
+  let batch: GithubEvent[] = [];
+  let bytes = headerBytes;
+  for (const event of events) {
+    const lineBytes = 2 + jsonStringContentBytes(describe(event)); // JSON escapes the joining newline as two bytes.
+    if (headerBytes + lineBytes > maxMessageContentBytes) throw new RangeError("A GitHub event exceeds the agent command size limit.");
+    if (bytes + lineBytes > maxMessageContentBytes) {
+      batches.push(batch);
+      batch = [];
+      bytes = headerBytes;
+    }
+    batch.push(event);
+    bytes += lineBytes;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
 }
 
 /** Stable for the same watch and events, so re-adding after a crash finds the stored entry. */
