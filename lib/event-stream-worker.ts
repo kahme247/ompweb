@@ -42,7 +42,7 @@
 //                 { outbox: LocalOutboxEntry[], partial?: true }  (every entry, in submission order: on attach once loaded
 //                   if any, back from the bfcache, and on every change; partial: the last shared read failed, so earlier
 //                   entries of other workers may be missing and the tab must not keepalive from it)
-//                 { outboxStored: OutboxEntry }  (the server stored one; the list without it follows)
+//                 { outboxStored: OutboxEntry & { replaces? } }  (the server stored one; the list without it follows)
 import {
   BROWSER_LINK_PATH,
   BROWSER_LINK_VERSION,
@@ -1905,8 +1905,8 @@ async function sendOutbox(sessionId: string): Promise<void> {
   if (Date.now() - item.entry.createdAt > OUTBOX_MAX_AGE_MS) return failOutbox(item, "Not sent within 7 days.");
   if (typeof item.entry.scope !== "string" || !item.entry.scope) return failOutbox(item, "This message has no saved installation or sign-in scope and cannot be sent.");
   item.inFlight = true;
-  const { id, scope, advisor, mode, message, images, uploads, uploadProofs } = item.entry;
-  const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs });
+  const { id, scope, advisor, mode, message, images, uploads, uploadProofs, replaces } = item.entry;
+  const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs, replaces });
   // A tab of the worker's own (not in `clients`): the command takes the current transport as a tab's would.
   const port: Port = {
     onmessage: null,
@@ -1954,14 +1954,22 @@ function acceptedOutboxEntry(body: unknown, id: string): unknown {
  * delay. Any other refusal is final (O6): "failed" until a tab drops it, and the session's next entry goes.
  */
 async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Promise<void> {
-  const { id, sessionId } = item.entry;
+  const { id, sessionId, replaces } = item.entry;
   if (outboxItems.get(id) !== item) return;
   const reply = (body ?? {}) as { error?: unknown };
   const accepted = acceptedOutboxEntry(body, id);
   if (status >= 200 && status < 300 && !accepted) status = 0;
   if (status >= 200 && status < 300) {
-    if (!(await writeOutbox((store) => store.delete(id)))) return outboxAnswer(item, 0, null);
+    // A Retry's copy: the server retired its original with this add, and the browser's copy of that goes with this commit.
+    if (!(await writeOutbox((store) => {
+      store.delete(id);
+      if (replaces) store.delete(replaces);
+    }))) return outboxAnswer(item, 0, null);
     outboxItems.delete(id);
+    if (replaces) {
+      clearTimeout(outboxItems.get(replaces)?.retryTimer);
+      outboxItems.delete(replaces);
+    }
     const stored = isRecord(accepted) && accepted.state === "delivered"
       && (accepted.settlement === "native" || accepted.settlement === "uncorrelated")
       ? {
@@ -1971,7 +1979,7 @@ async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Pr
           ...(item.entry.uploads ? { uploads: item.entry.uploads } : {}),
         }
       : accepted;
-    for (const client of clients) post(client, { outboxStored: stored });
+    for (const client of clients) post(client, { outboxStored: replaces && isRecord(stored) ? { ...stored, replaces } : stored });
   } else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
     item.inFlight = false;
     item.retryTimer = setTimeout(() => {

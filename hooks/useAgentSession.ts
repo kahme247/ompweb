@@ -66,7 +66,6 @@ import {
 export type { SubagentInfo } from "@/lib/subagent-types";
 
 // Pure helpers extracted to sibling modules (extraction only — no logic changes).
-import type { HeldMessage } from "./useAgentSession-queue";
 import { EMPTY_QUEUE, EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, isQueuedWhileShellRunning, markOutboxUncertain, mergeHeldMessages, rememberLocalOutbox, rememberOutboxEntries, representOutboxIds } from "./useAgentSession-queue";
 import { readQueueSnapshot } from "@/lib/client-message-ids";
 import type { QueuedMessages, ServerOutbox } from "./useAgentSession-queue";
@@ -1742,12 +1741,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   useEffect(() => subscribeOutbox((event) => {
     if ("entries" in event) {
+      // Read by a Retry before React renders: a copy waiting in IndexedDB must block another at once.
+      localOutboxRef.current = event.entries;
       setLocalOutbox(event.entries);
       serverOutboxRef.current = rememberLocalOutbox(serverOutboxRef.current, event.entries, sessionIdRef.current);
       setServerOutbox(serverOutboxRef.current);
       return;
     }
     const { stored } = event;
+    // A Retry's copy is stored and its original retired with it: hide the original now, not when outbox_update arrives.
+    if (stored.replaces) markOutboxRepresented([stored.replaces]);
     const sid = sessionIdRef.current;
     if (stored.sessionId !== sid) return;
     serverOutboxRef.current = rememberOutboxEntries(serverOutboxRef.current, [stored]);
@@ -1756,7 +1759,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!serverOutboxRef.current.seen.has(stored.id)) setStoredOutbox((current) => [...current.filter((entry) => entry.id !== stored.id), stored]);
     // The server holds it now, so the channel opens even without a wrapper (a first try may have been refused).
     if (hookAliveRef.current && !eventSourceRef.current) void connectEvents(sid, "connected");
-  }), [connectEvents]);
+  }), [connectEvents, markOutboxRepresented]);
 
   // ---------------------------------------------------------------------
   // Host-tool bridge: omp-web registers tools the AGENT can call. The server
@@ -3274,10 +3277,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   /** Holds a message in the outbox (docs/specs/2026-11-04-message-outbox-design.md): true once this browser has
    * stored it, after which omp-web delivers it whatever this tab does next. It shows as a held bubble until omp has it. */
-  const holdMessage = useCallback(async (sid: string, mode: OutboxMode, message: string, images?: Pick<AttachedImage, "data" | "mimeType">[], uploads?: string[], uploadProofs?: Record<string, string>, id = newOutboxId()) => {
+  const holdMessage = useCallback(async (sid: string, mode: OutboxMode, message: string, images?: Pick<AttachedImage, "data" | "mimeType">[], uploads?: string[], uploadProofs?: Record<string, string>, replaces?: string) => {
     try {
       await addToOutbox({
-        id,
+        id: newOutboxId(),
         sessionId: sid,
         scope: await getOutboxScope(sid),
         advisor: advisorEnabled,
@@ -3286,6 +3289,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(images?.length ? { images: images.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })) } : {}),
         ...(uploads?.length ? { uploads } : {}),
         ...(uploadProofs ? { uploadProofs } : {}),
+        ...(replaces ? { replaces } : {}),
         createdAt: Date.now(),
       });
     } catch (e) {
@@ -4383,16 +4387,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const localOutboxRef = useRef(localOutbox);
   localOutboxRef.current = localOutbox;
   const heldDeletionsRef = useRef(new Set<string>());
-  /** Ids this hook removed: removing one again (a Retry after Delete won the race) is done, not an error. */
-  const heldRemovedRef = useRef(new Set<string>());
   /** Delete of a held bubble: one this browser still holds leaves IndexedDB; the server's only until dispatched (omp
    * may have it from then on, answered 409 outbox_dispatched). An uncertain bridge is a view of an id the server
    * settled, so only the browser's own copy of it (the worker still holds it if the server settled the id before the
    * worker saw its add receipt) leaves IndexedDB, and the row hides once that commits: a reload cannot bring it back. */
-  const removeHeldMessage = useCallback(async (sid: string, held: HeldMessage): Promise<boolean> => {
-    const { id } = held;
-    if (heldRemovedRef.current.has(id)) return true;
-    if (heldDeletionsRef.current.has(id)) return false;
+  const deleteHeldMessage = useCallback(async (id: string) => {
+    const sid = sessionIdRef.current;
+    const held = heldMessagesRef.current.find((entry) => entry.id === id);
+    if (!sid || !held || held.state === "sending" || held.state === "delivering" || heldDeletionsRef.current.has(id)) return;
     heldDeletionsRef.current.add(id);
     try {
       if (serverOutboxRef.current.uncertain.has(id)) {
@@ -4402,57 +4404,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setLocalOutbox((entries) => entries.filter((entry) => entry.id !== id));
       } else if (held.local) await dropFromOutbox(id);
       else await sendAgentCommand(sid, { type: "outbox_remove", id });
-      heldRemovedRef.current.add(id);
-      return true;
     } catch (e) {
       if (hookAliveRef.current && sessionIdRef.current === sid) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      return false;
     } finally {
       heldDeletionsRef.current.delete(id);
     }
   }, [addNotice, markOutboxRepresented]);
-  const deleteHeldMessage = useCallback(async (id: string) => {
-    const sid = sessionIdRef.current;
-    const held = heldMessagesRef.current.find((entry) => entry.id === id);
-    if (!sid || !held || held.state === "sending" || held.state === "delivering" || heldDeletionsRef.current.has(id)) return;
-    await removeHeldMessage(sid, held);
-  }, [removeHeldMessage]);
 
   const heldRetriesRef = useRef(new Set<string>());
-  /** Failed originals whose new copy the server accepted: a later Retry only removes them, never holds another copy. */
-  const heldReplacedRef = useRef(new Set<string>());
-  /** Retry of a failed held bubble: hold a new message with the same text, images, files and mode, then delete the
-   * failed one in the session it was in, even if the chat switched meanwhile. The original goes only once the server
-   * accepted the copy (outbox_add can still refuse its files, e.g. after a sign-in changed their owner), so a refused
-   * copy leaves it in place; a second click while it runs adds no third copy. */
+  /** Retry of a failed held bubble (spec O1): hold a copy with the same text, images, files and mode that names the
+   * original in `replaces`. The server retires the original in the transaction that stores the copy, and the worker
+   * drops this browser's row of it in the commit that deletes the copy, so a refused copy leaves it in place and no
+   * state exists in which both can run. One rule keeps it to one copy: none while a copy of it waits in IndexedDB
+   * (`replaces` survives a remount, a reload and a closed page), none once a copy was stored (its receipt marks the
+   * original represented before its outbox_update arrives), and none while this tab's own add is still committing. */
   const retryHeldMessage = useCallback(async (id: string) => {
     const sid = sessionIdRef.current;
     const held = heldMessagesRef.current.find((entry) => entry.id === id);
     if (!sid || !held || held.state !== "failed" || editInFlightRef.current || heldRetriesRef.current.has(id) || heldDeletionsRef.current.has(id)) return;
+    if (serverOutboxRef.current.represented.has(id)) return;
+    if (localOutboxRef.current.some((entry) => entry.replaces === id && entry.state === "sending")) return;
     heldRetriesRef.current.add(id);
     try {
-      if (!heldReplacedRef.current.has(id)) {
-        const copy = newOutboxId();
-        let unsubscribe = () => {};
-        // Subscribed before the add: the server's verdict cannot arrive unheard.
-        const accepted = new Promise<boolean>((resolve) => {
-          unsubscribe = subscribeOutbox((event) => {
-            if ("stored" in event) { if (event.stored.id === copy) resolve(true); }
-            else if (event.entries.some((entry) => entry.id === copy && entry.state === "failed")) resolve(false);
-          });
-        });
-        try {
-          if (!await holdMessage(sid, held.mode, held.message, held.images, held.uploads, held.uploadProofs, copy) || !await accepted) return;
-        } finally {
-          unsubscribe();
-        }
-        heldReplacedRef.current.add(id);
-      }
-      if (await removeHeldMessage(sid, held)) heldReplacedRef.current.delete(id);
+      await holdMessage(sid, held.mode, held.message, held.images, held.uploads, held.uploadProofs, id);
     } finally {
       heldRetriesRef.current.delete(id);
     }
-  }, [holdMessage, removeHeldMessage]);
+  }, [holdMessage]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;

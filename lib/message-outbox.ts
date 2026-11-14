@@ -431,7 +431,10 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
     if (!entryBelongsToSession(known, sessionId)) return Response.json({ error: "This message id belongs to another session", code: "outbox_id_conflict" }, { status: 409 });
     return Response.json({ success: true, data: { entry: toEntry(known) } });
   }
-  const { mode, message, images, uploads } = command;
+  const { mode, message, images, uploads, replaces } = command;
+  if (replaces !== undefined && (typeof replaces !== "string" || !ENTRY_ID_RE.test(replaces) || replaces === id)) {
+    return invalid("replaces must be another entry's id");
+  }
   if (typeof mode !== "string" || !Object.hasOwn(MODES, mode)) return invalid("mode must be prompt, followUp or steer");
   if (typeof message !== "string") return invalid("message must be a string");
   if (Buffer.byteLength(JSON.stringify(command)) > MAX_AGENT_COMMAND_REQUEST_BYTES) {
@@ -466,6 +469,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
   const keys = sessionKeys(sessionId);
   const entryBytes = Buffer.byteLength(JSON.stringify({ id, sessionId, mode, message, images, uploads, state: "waiting_host", createdAt: now })) + 8192;
   let accepted: boolean;
+  let replaced: Row | null = null;
   try {
     accepted = database.transaction(() => {
       if (row(id)) return true; // a concurrent repeat takes no capacity or renewed proof
@@ -484,6 +488,12 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
         savedUploads,
         sessionId, payloadBytes,
       );
+      // A Retry's copy (spec O1): its failed original goes with this commit, so no state exists in which both can run.
+      const original = typeof replaces === "string" ? row(replaces) : null;
+      if (original && original.state === "failed" && entryBelongsToSession(original, sessionId)) {
+        retire(original.id, "none");
+        replaced = original;
+      }
       return true;
     }).immediate();
   } catch (error) {
@@ -492,6 +502,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
   if (!accepted) return Response.json({ error: "The message outbox is full. It will accept more messages after held entries drain or are deleted.", code: "outbox_full" }, { status: 429 });
   if (!entryBelongsToSession(row(id)!, sessionId)) return Response.json({ error: "This message id belongs to another session", code: "outbox_id_conflict" }, { status: 409 });
   publish(sessionId);
+  if (replaced && (replaced as Row).session_id !== sessionId) publish((replaced as Row).session_id);
   pumpOutbox(sessionId);
   return Response.json({ success: true, data: { entry: toEntry(row(id)!) } });
 }

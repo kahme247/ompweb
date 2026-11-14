@@ -78,6 +78,8 @@ export interface LocalOutboxEntry {
   images?: { type: "image"; data: string; mimeType: string }[];
   uploads?: string[];
   uploadProofs?: Record<string, string>;
+  /** A Retry's copy: the failed entry it replaces, retired when the server stores this one (spec O1). */
+  replaces?: string;
   createdAt: number;
   /** Allocated atomically by IndexedDB acceptance; absent only on preexisting rows. */
   enqueueOrder?: number;
@@ -88,10 +90,13 @@ export interface LocalOutboxEntry {
 }
 
 /** Every local entry (on subscribe once known, then on every change), or one the server answered 200 for. */
-export type OutboxEvent = { entries: LocalOutboxEntry[] } | { stored: OutboxEntry };
+export type OutboxEvent = { entries: LocalOutboxEntry[] } | { stored: StoredOutboxEntry };
+
+/** The server's receipt for an add; `replaces` when it was a Retry's copy, whose original the add retired. */
+export type StoredOutboxEntry = OutboxEntry & { replaces?: string };
 
 /** The worker about the outbox: an add committed, the whole list, or one the server stored. */
-type OutboxMessage = { outboxAdded: number; error?: string } | { outboxDropped: number; error?: string } | { outbox: LocalOutboxEntry[]; partial?: true } | { outboxStored: OutboxEntry };
+type OutboxMessage = { outboxAdded: number; error?: string } | { outboxDropped: number; error?: string } | { outbox: LocalOutboxEntry[]; partial?: true } | { outboxStored: StoredOutboxEntry };
 
 type WakeReason = "init" | "visible" | "hidden" | "online" | "network";
 
@@ -370,11 +375,11 @@ function postOutboxOnExit(): void {
   if (outboxPartial) return;
   let left = KEEPALIVE_BYTES;
   const sessions = new Set<string>();
-  for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, state, createdAt } of outboxEntries ?? []) {
+  for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, replaces, state, createdAt } of outboxEntries ?? []) {
     if (state !== "sending" || typeof scope !== "string" || !scope || Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 || sessions.has(sessionId)) continue;
     sessions.add(sessionId);
     if (!addedHere.has(id)) continue;
-    const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs });
+    const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs, replaces });
     const bytes = new Blob([body]).size;
     if (bytes > left) continue;
     left -= bytes;
