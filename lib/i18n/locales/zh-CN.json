@@ -87,6 +87,7 @@
   "settingsConfig.autoResumeSessionsSaveFailed": "无法保存恢复设置",
   "settingsConfig.autoResumeSessionsDesc": "如果 omp-web 在智能体工作时重启，将重新启动这些会话并告知每个智能体：“Session interrupted and resumed. Continue as you would have done without the interruption.”重启时正在进行的工作（例如正在运行的命令）会丢失。",
   "settingsConfig.autoResumeSessions": "重启后恢复正在运行的会话",
+  "settingsConfig.agentToolsDesc": "允许智能体通过 list_sessions、new_session 和 send_to_session 与其他 omp-web 会话通信，即使未打开浏览器标签页也可使用。通过此方式传递的消息会带有发送会话 ID 前缀。每个会话的速率限制和调用链深度限制可防止会话之间循环发送消息。GitHub 工具 watch_github、unwatch_github、github_read、github_comment 和 github_resolve_thread 也受此设置控制，并要求本服务器已安装 GitHub CLI（gh）且已登录。保存后启动或重新连接的会话才会应用此设置。",
   "settingsConfig.uploadRetention": "已发送的上传文件保留时间",
   "settingsConfig.uploadRetentionDesc": "以“作为文件”方式附加的文件，超过此时间后会从所有主机上每个会话的 local://uploads 文件夹（包括已归档的会话）中删除。选择“从不”则一直保留。",
   "settingsConfig.uploadRetentionNever": "从不",

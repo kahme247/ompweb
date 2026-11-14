@@ -87,6 +87,7 @@
   "settingsConfig.autoResumeSessionsSaveFailed": "再開設定を保存できませんでした",
   "settingsConfig.autoResumeSessionsDesc": "エージェントの作業中に omp-web が再起動した場合、それらのセッションを再開し、各エージェントに「Session interrupted and resumed. Continue as you would have done without the interruption.」と伝えます。再起動の時点で進行中だった作業（実行中のコマンドなど）は失われます。",
   "settingsConfig.autoResumeSessions": "再起動後に実行中のセッションを再開",
+  "settingsConfig.agentToolsDesc": "ブラウザーのタブを開いていなくても、エージェントが list_sessions、new_session、send_to_session を使って他の omp-web セッションとやり取りできるようにします。この方法で届くメッセージには送信元セッションの ID が先頭に付きます。セッションごとの送信回数と連鎖の深さを制限し、相互送信のループを防ぎます。GitHub ツール watch_github、unwatch_github、github_read、github_comment、github_resolve_thread もこの設定で制御され、このサーバーに GitHub CLI（gh）をインストールしてログインしておく必要があります。保存後に開始または再接続したセッションに適用されます。",
   "settingsConfig.uploadRetention": "送信済みのアップロードを削除するまで",
   "settingsConfig.uploadRetentionDesc": "「ファイルとして」添付したファイルは、この期間が過ぎると、すべてのホストの各セッションの local://uploads フォルダー（アーカイブ済みセッションを含む）から削除されます。「しない」を選ぶと削除されません。",
   "settingsConfig.uploadRetentionNever": "しない",

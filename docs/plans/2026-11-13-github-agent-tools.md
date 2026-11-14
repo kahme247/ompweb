@@ -65,7 +65,7 @@
   - `type ItemKind = "pull_request" | "issue"`.
   - `interface GithubActor { login: string; bot: boolean; association: string }`.
   - `interface ItemSnapshot { kind; url; state: "open" | "closed" | "merged"; closedReason?: "completed" | "not_planned"; comments: { id: string; url: string; author: GithubActor }[]; reviews: { id; url; author; state: string; commentCount: number }[]; threadComments: { id; url; author; threadId: string; path: string; line: number | null }[]; head?: { sha: string; checks: { name: string; conclusion: string | null; status: string }[] } }` — metadata only; no bodies.
-  - `fetchSnapshot(run, target): Promise<ItemSnapshot>`: one `gh api graphql` request using `repository.issueOrPullRequest(number:)`; pages comments/reviews/thread comments (`last: 100` windows, then `before:` cursors until an id older than the stored cursor appears, or all pages on baseline). Builder chooses the query text.
+  - `fetchSnapshot(run, target): Promise<ItemSnapshot>` starts with `repository.issueOrPullRequest(number:)`. Only ordinary comment paging may stop at a known ID. Review threads and their nested comments page fully so replies in old threads are not missed; reviews also page fully because a draft submitted later may precede known reviews.
   - `readItem(run, target, include: ReadPart[], ids?: string[]): Promise<unknown>` with `ReadPart = "summary" | "comments" | "reviews" | "threads" | "checks" | "files" | "diff"`; every user-authored field carries `author` + `association`; `diff` via `gh api -H "Accept: application/vnd.github.diff" repos/O/R/pulls/N`, truncated at 1 MiB with `"…[diff truncated at 1 MiB]"`.
   - `postComment(run, target, body, replyTo?): Promise<{ id: string; url: string }>`: REST `repos/O/R/issues/N/comments` (body via `--input -` JSON on stdin, never argv); `replyTo` a numeric review comment id → `repos/O/R/pulls/N/comments/{id}/replies`; a thread node id (`PRRT_…`) → GraphQL `addPullRequestReviewThreadReply`. Returns the node id the snapshot uses for the new comment.
   - `resolveThread(run, threadId): Promise<void>` (GraphQL `resolveReviewThread`).
@@ -106,13 +106,13 @@
 
 **Interfaces:**
 - Consumes: `WatchCursor`.
-- Defines: `PendingUpdate = { entryId: string; message: string; cursor: WatchCursor; final: boolean }`.
-- Produces (tables `watches(session_id, item_key, kind, cursor_json, created_at, PRIMARY KEY(session_id, item_key))`, `pending(session_id, item_key, entry_id, message, cursor_json, final, PRIMARY KEY(session_id, item_key))`, `posted(item_key, comment_id)`, `read_grants(session_id, repo_key)`; `item_key` = `owner/repo#n` lower-cased owner/repo):
+- Defines durable pending updates with a root entry ID, cursor, final state, bounded message batches and acknowledged batch index.
+- Tables and current exported types live in `lib/github/watch-store.ts`. Watch registrations have UUID identities; provisional request intents allow unwatch to invalidate fetches still in flight. Item keys are `owner/repo#n` with lower-cased owner/repo.
   - `addWatch(sessionId, itemKey, kind, cursor): "added" | "exists" | "limit"` (limit 20 per session).
   - `removeWatch(sessionId, itemKey): boolean`; `removeSessionWatches(sessionId): void`.
   - `listWatches(): { sessionId; itemKey; kind; cursor }[]`.
-  - `setPending(sessionId, itemKey, pending): boolean` persists `{ entryId, message, cursor, final }` before outbox delivery; `getPending(sessionId, itemKey): PendingUpdate | null`.
-  - `commitUpdate(sessionId, itemKey, cursor, final): void` saves the cursor, or deletes the watch when `final`, and clears pending atomically. A retry keeps the exact pending batch and id for reuse after restart; never recompute it before retrying delivery.
+  - `claimPending` atomically persists the exact batches before delivery, conditional on the registration, base cursor and posting fences; `getPending` retrieves the winning persisted update.
+  - `advancePendingBatch` fences acknowledgement by registration, pending identity and expected index. Only after every batch is acknowledged may `commitUpdate` save the cursor or remove a final watch and clear pending atomically. Retries reuse the stored batch IDs and messages.
   - `recordPosted(itemKey, commentId)`, `postedIds(itemKey): Set<string>`.
   - `hasReadGrant(sessionId, repoKey)`, `grantRead(sessionId, repoKey)`.
   - `renameSession(oldId, newId)` (for session moves), `closeWatchStore()`.
@@ -132,11 +132,12 @@
 - Test: `lib/github/watcher.test.mjs`
 
 **Interfaces:**
-- Consumes: Tasks 1–4; `runOutboxCommand`, `outboxScope` (`lib/message-outbox.ts`); `loadWebServerSettings().agentToolsEnabled`.
-- Produces:
-  - `startGithubWatcher(deps?: { run?: GhRunner; deliver?: (sessionId: string, entryId: string, message: string) => Promise<"ok" | "gone" | "retry">; now?; schedule? }): void` and `stopGithubWatcher(): void` (`globalThis` singleton).
-  - default `deliver` = `runOutboxCommand(sessionId, { type: "outbox_add", id, scope: outboxScope(), mode: "prompt", message }, false, "omp-web:github-watch")`: 2xx → `"ok"`, 404 → `"gone"`, anything else → `"retry"`.
-- `pollOnce(): Promise<void>` (exported for tests): skips everything while `agentToolsEnabled` is false; groups watches by item, one `fetchSnapshot` per item, spreads items across the 60 s interval; per watch with new events, persist the exact batch and id via `setPending` before outbox delivery. On startup or retry, deliver any stored pending batch before fetching or diffing new activity. `"ok"`: atomically commit cursor and clear pending; `"gone"`: `removeSessionWatches`; `"retry"`: leave pending unchanged. Reusing the stored id and message lets the outbox return an already-added entry after a crash instead of delivering a recomputed batch under a new id. On `GhUnavailableError`, deliver one notice per session (`GitHub update (omp-web): watching paused: <message>`), and one "resumed" notice once it recovers (state in `globalThis`, not persisted).
+- Consumes: Tasks 1–4; `runOutboxCommand`, `outboxScope` and the receipt-pin API in `lib/message-outbox.ts`; fresh Agent-tools permission reads.
+- `startGithubWatcher` and `stopGithubWatcher` manage one global poller; runner, delivery, clock and scheduler dependencies support deterministic tests.
+- The default delivery submits a prompt-mode outbox entry owned by `omp-web:github-watch`. Accepted writes advance batch progress; 404 ends the session's watches; retryable failures retain pending work. Permanent refusals follow `deliveryOf`; an unexpected 413 retains the batch rather than losing events.
+- Persist deterministic, bounded batches before the first submission. Pin each batch's outbox receipt before submitting it. Release that pin only after the matching batch-index acknowledgement is durable; commit the cursor and final removal only after all batches finish. A restart replays the same IDs even beyond the ordinary receipt TTL.
+- Production cycles and `pollOnce` reconcile captured pins against one SQLite snapshot of unacknowledged pending batch IDs, preserving active pins across session moves and releasing orphan pins. Polling and delivery pause while Agent tools is off.
+- On `GhUnavailableError`, deliver one paused notice per session and one resumed notice after recovery; notice state is held in `globalThis`, not persisted.
 
 - [ ] **Step 1: Write failing tests** (fake run/deliver/schedule): `a new review is delivered once and the cursor advances`, `a retry leaves the pending batch and id for the next poll`, `a restarted poller reuses the exact pending message and id before diffing new events`, `a gone session ends its watches only`, `two sessions watching one item fetch it once and each get an entry`, `agent tools off pauses polling and turning it on catches up`, `gh unavailability is announced once and its recovery once`.
 - [ ] **Step 2: Run** — FAIL.
