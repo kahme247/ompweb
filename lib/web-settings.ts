@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { getAgentDir } from "./omp/paths";
@@ -134,7 +134,7 @@ export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebSer
   const lockPath = settingsLockPath();
   closeSync(openSync(lockPath, "a", 0o600));
   chmodSync(lockPath, 0o600);
-  const lock = new Database(lockPath);
+  const lock = new DatabaseSync(lockPath);
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
     lock.exec("PRAGMA busy_timeout = 5000");
@@ -146,7 +146,7 @@ export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebSer
     lock.exec("COMMIT");
     return settings;
   } catch (error) {
-    if (lock.inTransaction) lock.exec("ROLLBACK");
+    if (lock.isTransaction) lock.exec("ROLLBACK");
     throw error;
   } finally {
     try {
@@ -154,6 +154,6 @@ export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebSer
     } catch {
       // ignore cleanup failures
     }
-    lock.close(true);
+    lock.close();
   }
 }
