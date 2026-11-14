@@ -179,7 +179,9 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
     return whilePosting(item, async () => {
       const posted = await postComment(ops.run, t, body, replyId);
       recordPosted(item, posted.id);
-      return posted;
+      if (posted.reviewId) recordPosted(item, posted.reviewId);
+      if (posted.reviewDatabaseId) recordPosted(item, `review:${posted.reviewDatabaseId}`);
+      return { id: posted.id, url: posted.url };
     });
   }
 

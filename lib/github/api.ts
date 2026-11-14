@@ -24,7 +24,7 @@ export interface ItemSnapshot {
   state: "open" | "closed" | "merged";
   closedReason?: "completed" | "not_planned";
   comments: { id: string; url: string; author: GithubActor }[];
-  reviews: { id: string; url: string; author: GithubActor; state: string; commentCount: number }[];
+  reviews: { id: string; databaseId?: string; url: string; author: GithubActor; state: string; commentCount: number }[];
   threadComments: { id: string; url: string; author: GithubActor; threadId: string; path: string; line: number | null }[];
   /** Checks are lower-cased: `conclusion` "success" | "failure" | ..., `status` "completed" | "in_progress" | ... Commit statuses map to the same words. */
   head?: { sha: string; checks: { name: string; conclusion: string | null; status: string }[] };
@@ -49,6 +49,7 @@ interface GqlComment {
 interface GqlReview extends GqlComment {
   state: string;
   comments: { totalCount: number };
+  fullDatabaseId: string | null;
 }
 interface GqlThread {
   id: string;
@@ -113,7 +114,7 @@ const SNAPSHOT_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $c
       ... on PullRequest {
         url state
         comments(last: 100, before: $cc) @include(if: $wc) { pageInfo { hasPreviousPage startCursor } nodes { ${COMMENT} } }
-        reviews(last: 100, before: $rc) @include(if: $wr) { pageInfo { hasPreviousPage startCursor } nodes { ${COMMENT} state comments { totalCount } } }
+        reviews(last: 100, before: $rc) @include(if: $wr) { pageInfo { hasPreviousPage startCursor } nodes { ${COMMENT} fullDatabaseId state comments { totalCount } } }
         reviewThreads(last: 100, before: $tc) @include(if: $wt) {
           pageInfo { hasPreviousPage startCursor }
           nodes { id path line comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { ${COMMENT} state } } }
@@ -224,7 +225,7 @@ export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?:
     comments: comments.map((c) => ({ id: c.id, url: c.url, author: actorOf(c.author, c.authorAssociation) })),
     reviews: reviews
       .filter((r) => r.state !== "PENDING")
-      .map((r) => ({ id: r.id, url: r.url, author: actorOf(r.author, r.authorAssociation), state: r.state, commentCount: r.comments.totalCount })),
+      .map((r) => ({ id: r.id, ...(typeof r.fullDatabaseId === "string" && /^\d+$/.test(r.fullDatabaseId) && { databaseId: r.fullDatabaseId }), url: r.url, author: actorOf(r.author, r.authorAssociation), state: r.state, commentCount: r.comments.totalCount })),
     threadComments: threads.flatMap((t) =>
       present(t.comments.nodes)
         .filter((c) => c.state !== "PENDING")
@@ -433,7 +434,7 @@ export async function readItem(run: GhRunner, target: GithubTarget, include: Rea
 // --- Writes -----------------------------------------------------------------
 
 const REPLY_MUTATION = `mutation($threadId: ID!, $body: String!) {
-  addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id url } }
+  addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id url pullRequestReview { id fullDatabaseId } } }
 }`;
 const RESOLVE_MUTATION = `mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }`;
 const THREAD_QUERY = `query($id: ID!) {
@@ -499,16 +500,39 @@ export async function fetchReviewComment(run: GhRunner, commentId: string): Prom
 }
 
 /** The body always travels on stdin as JSON, never in argv. */
-export async function postComment(run: GhRunner, target: GithubTarget, body: string, replyTo?: string): Promise<{ id: string; url: string }> {
+export async function postComment(
+  run: GhRunner,
+  target: GithubTarget,
+  body: string,
+  replyTo?: string,
+): Promise<{ id: string; url: string; reviewId?: string; reviewDatabaseId?: string }> {
   const base = `repos/${target.owner}/${target.repo}`;
   if (replyTo?.startsWith("PRRT_")) {
-    const data = await graphql<{ addPullRequestReviewThreadReply: { comment: { id: string; url: string } } }>(run, REPLY_MUTATION, { threadId: replyTo, body });
-    return data.addPullRequestReviewThreadReply.comment;
+    const data = await graphql<{
+      addPullRequestReviewThreadReply: {
+        comment: { id: string; url: string; pullRequestReview: { id: string; fullDatabaseId: string | null } | null };
+      };
+    }>(run, REPLY_MUTATION, { threadId: replyTo, body });
+    const { id, url, pullRequestReview } = data.addPullRequestReviewThreadReply.comment;
+    return {
+      id,
+      url,
+      ...(pullRequestReview?.id && { reviewId: pullRequestReview.id }),
+      ...(typeof pullRequestReview?.fullDatabaseId === "string" && /^\d+$/.test(pullRequestReview.fullDatabaseId) && { reviewDatabaseId: pullRequestReview.fullDatabaseId }),
+    };
   }
   if (replyTo !== undefined && !/^\d+$/.test(replyTo)) throw new Error("replyTo must be a review comment id or a review thread id.");
   const path = replyTo === undefined ? `${base}/issues/${target.number}/comments` : `${base}/pulls/${target.number}/comments/${replyTo}/replies`;
-  const posted = JSON.parse(await run(["api", "-X", "POST", path, "--input", "-"], JSON.stringify({ body }))) as { node_id: string; html_url: string };
-  return { id: posted.node_id, url: posted.html_url };
+  const posted = JSON.parse(await run(["api", "-X", "POST", path, "--input", "-"], JSON.stringify({ body }))) as {
+    node_id: string;
+    html_url: string;
+    pull_request_review_id?: number | null;
+  };
+  return {
+    id: posted.node_id,
+    url: posted.html_url,
+    ...(replyTo !== undefined && Number.isSafeInteger(posted.pull_request_review_id) && { reviewDatabaseId: String(posted.pull_request_review_id) }),
+  };
 }
 
 
