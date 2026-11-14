@@ -207,7 +207,7 @@ export function commitUpdate(sessionId: string, itemKey: string, registrationId:
   const d = db();
   return transaction(d, () => {
     const match = d.prepare(
-      "SELECT 1 FROM watches JOIN pending USING (session_id, item_key) WHERE watches.session_id = ? AND watches.item_key = ? AND watches.registration_id = ? AND pending.entry_id = ? AND pending.batch_index = json_array_length(pending.batches_json)",
+      "SELECT 1 FROM watches JOIN pending USING (session_id, item_key) WHERE watches.session_id = ? AND watches.item_key = ? AND watches.registration_id = ? AND pending.entry_id = ? AND pending.batch_index > 0 AND pending.batch_index = json_array_length(pending.batches_json)",
     ).get(sessionId, itemKey, registrationId, entryId);
     if (!match) return false;
     d.prepare("DELETE FROM pending WHERE session_id = ? AND item_key = ? AND entry_id = ?").run(sessionId, itemKey, entryId);
@@ -239,7 +239,7 @@ export function advanceCursor(sessionId: string, itemKey: string, registrationId
 
 // ---------------------------------------------------------------- pending updates
 
-type PendingRow = { entry_id: string; cursor_json: string; final: number; batches_json: string; batch_index: number };
+type PendingRow = { entry_id: string; message: string; cursor_json: string; final: number; batches_json: string; batch_index: number };
 
 const toPending = (row: PendingRow): PendingUpdate => ({
   entryId: row.entry_id,
@@ -281,10 +281,28 @@ export function claimPending(
 
 export function getPending(sessionId: string, itemKey: string, registrationId?: string): PendingUpdate | null {
   const d = db();
-  const row = registrationId === undefined
-    ? d.prepare<PendingRow, [string, string]>("SELECT entry_id, cursor_json, final, batches_json, batch_index FROM pending WHERE session_id = ? AND item_key = ?").get(sessionId, itemKey)
-    : d.prepare<PendingRow, [string, string, string]>("SELECT entry_id, cursor_json, final, batches_json, batch_index FROM pending p WHERE p.session_id = ? AND p.item_key = ? AND EXISTS (SELECT 1 FROM watches w WHERE w.session_id = p.session_id AND w.item_key = p.item_key AND w.registration_id = ?)").get(sessionId, itemKey, registrationId);
-  return row ? toPending(row) : null;
+  const select = d.prepare<PendingRow, [string, string, string | null, string | null]>(
+    "SELECT entry_id, message, cursor_json, final, batches_json, batch_index FROM pending p WHERE p.session_id = ? AND p.item_key = ? AND (? IS NULL OR EXISTS (SELECT 1 FROM watches w WHERE w.session_id = p.session_id AND w.item_key = p.item_key AND w.registration_id = ?))",
+  );
+  const registration = registrationId ?? null;
+  const row = select.get(sessionId, itemKey, registration, registration);
+  if (!row) return null;
+  if (row.batches_json !== "[]") return toPending(row);
+
+  return transaction(d, () => {
+    const current = select.get(sessionId, itemKey, registration, registration);
+    if (!current) return null;
+    if (current.batches_json !== "[]") return toPending(current);
+    const batchesJson = JSON.stringify([{ entryId: current.entry_id, message: current.message }]);
+    const { changes } = d
+      .prepare("UPDATE pending SET batches_json = ?, batch_index = 0 WHERE session_id = ? AND item_key = ? AND entry_id = ? AND batches_json = '[]'")
+      .run(batchesJson, sessionId, itemKey, current.entry_id);
+    if (!changes) {
+      const refreshed = select.get(sessionId, itemKey, registration, registration);
+      return refreshed ? toPending(refreshed) : null;
+    }
+    return toPending({ ...current, batches_json: batchesJson, batch_index: 0 });
+  });
 }
 
 // ---------------------------------------------------------------- posted comments
