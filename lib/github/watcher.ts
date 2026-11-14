@@ -82,9 +82,12 @@ const outboxReceipts = () => import("../message-outbox");
 
 /** Reconciles orphaned receipts only after snapshotting the pins, so newly claimed batches are not unpinned. */
 async function reconcileOutboxReceiptPins(): Promise<void> {
+  if (!readAgentToolsEnabledFromDisk()) return;
   const { listOutboxReceiptPins, releaseOutboxReceipt } = await outboxReceipts();
+  if (!readAgentToolsEnabledFromDisk()) return;
   const pins = listOutboxReceiptPins();
   for (const { entryId } of pins) {
+    if (!readAgentToolsEnabledFromDisk()) return;
     let pending = false;
     for (const watch of listWatches()) {
       const update = getPending(watch.sessionId, watch.itemKey, watch.registrationId);
@@ -97,7 +100,7 @@ async function reconcileOutboxReceiptPins(): Promise<void> {
       }
       if (pending) break;
     }
-    if (!pending) releaseOutboxReceipt(entryId);
+    if (!pending && readAgentToolsEnabledFromDisk()) releaseOutboxReceipt(entryId);
   }
 }
 
@@ -302,16 +305,21 @@ async function announceResumed(state: WatcherState): Promise<void> {
 
 const itemsOf = (): string[] => [...new Set(listWatches().map((w) => w.itemKey))];
 
-/** One pass over every watched item, now. Does nothing while Agent tools is off. */
-export async function pollOnce(): Promise<void> {
-  const state = globalThis.__ompGithubWatcher;
-  if (!state || !readAgentToolsEnabledFromDisk()) return;
+async function preparePoll(state: WatcherState): Promise<boolean> {
+  if (state.stopped || !readAgentToolsEnabledFromDisk()) return false;
   try {
     await reconcileOutboxReceiptPins();
   } catch (error) {
     warn("outbox receipts could not be reconciled", error);
-    return;
+    return false;
   }
+  return !state.stopped && readAgentToolsEnabledFromDisk();
+}
+
+/** One pass over every watched item, now. Does nothing while Agent tools is off. */
+export async function pollOnce(): Promise<void> {
+  const state = globalThis.__ompGithubWatcher;
+  if (!state || !(await preparePoll(state))) return;
   for (const itemKey of itemsOf()) await pollItem(state, itemKey);
 }
 
@@ -324,15 +332,24 @@ function cycle(state: WatcherState): void {
     }, ms);
     state.cancels.add(cancel);
   };
+  const enabled = readAgentToolsEnabledFromDisk();
   let items: string[] = [];
-  try {
-    items = readAgentToolsEnabledFromDisk() ? itemsOf() : [];
-  } catch (error) {
-    warn("watches could not be read", error); // the next cycle is still scheduled below
+  if (enabled) {
+    try {
+      items = itemsOf();
+    } catch (error) {
+      warn("watches could not be read", error); // the next cycle is still scheduled below
+    }
   }
   const interval = Math.max(INTERVAL_MS, items.length * ITEM_SPACING_MS);
   track(() => cycle(state), interval);
-  items.forEach((itemKey, index) => track(() => void pollItem(state, itemKey), Math.floor((index * interval) / items.length)));
+  if (!enabled) return;
+  const ready = preparePoll(state);
+  items.forEach((itemKey, index) => track(() => {
+    void ready.then((canPoll) => {
+      if (canPoll) return pollItem(state, itemKey);
+    });
+  }, Math.floor((index * interval) / items.length)));
 }
 
 export function startGithubWatcher(deps: WatcherDeps = {}): void {
