@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { Database } from "bun:sqlite";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { getAgentDir } from "./omp/paths";
 import { BROWSER_TRANSPORTS, type BrowserTransport, type BrowserTransportState } from "./event-stream-protocol";
@@ -57,6 +58,10 @@ function readAgentEnvRecord(value: unknown): Record<string, string> {
 
 function settingsPath(): string {
   return resolve(getAgentDir(), "omp-web-settings.json");
+}
+
+function settingsLockPath(): string {
+  return resolve(getAgentDir(), "omp-web-settings.lock.sqlite");
 }
 
 function normalizeSettings(raw: Record<string, unknown>): WebServerSettings {
@@ -125,19 +130,30 @@ export function readGithubWritesUnaskedFromDisk(): boolean {
 /** Atomic write (temp file + rename), like the project registry. Private to its user: it holds agentEnv. */
 export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebServerSettings {
   const path = settingsPath();
-  const settings = { ...readWebServerSettingsFromDisk(), ...patch };
   mkdirSync(resolve(path, ".."), { recursive: true });
+  const lockPath = settingsLockPath();
+  closeSync(openSync(lockPath, "a", 0o600));
+  chmodSync(lockPath, 0o600);
+  const lock = new Database(lockPath);
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
+    lock.exec("PRAGMA busy_timeout = 5000");
+    lock.exec("BEGIN IMMEDIATE");
+    const settings = { ...readWebServerSettingsFromDisk(), ...patch };
     writeFileSync(temp, `${JSON.stringify(settings, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     renameSync(temp, path);
+    globalThis.__ompWebSettingsCache = { path, settings };
+    lock.exec("COMMIT");
+    return settings;
+  } catch (error) {
+    if (lock.inTransaction) lock.exec("ROLLBACK");
+    throw error;
   } finally {
     try {
       if (existsSync(temp)) rmSync(temp);
     } catch {
       // ignore cleanup failures
     }
+    lock.close(true);
   }
-  globalThis.__ompWebSettingsCache = { path, settings };
-  return settings;
 }
