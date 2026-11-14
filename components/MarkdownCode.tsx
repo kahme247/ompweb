@@ -1,5 +1,6 @@
 import type { HTMLAttributes } from "react";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
+import { SvgBlock } from "./SvgBlock";
 
 /** Build the `code` renderer shared by MarkdownBody and FileViewer's
  * ReactMarkdown configs (the two previously inlined near-identical copies).
@@ -22,6 +23,9 @@ export function markdownCodeRenderer(options: {
     if (isBlock) {
       if (lang === "mermaid") {
         return <MermaidBlock code={raw.replace(/\n$/, "")} isStreaming={options.isStreaming} defaultPreview={options.defaultPreview} />;
+      }
+      if (lang === "svg") {
+        return <SvgBlock code={raw.replace(/\n$/, "")} isStreaming={options.isStreaming} />;
       }
       return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} isStreaming={options.isStreaming} />;
     }
