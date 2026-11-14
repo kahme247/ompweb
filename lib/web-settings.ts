@@ -90,6 +90,16 @@ export function loadWebServerSettings(): WebServerSettings {
   return settings;
 }
 
+/** Fresh, fail-closed Agent-tools gate for cross-process watcher checks; does not change the process cache. */
+export function readAgentToolsEnabledFromDisk(): boolean {
+  try {
+    const raw: unknown = JSON.parse(readFileSync(settingsPath(), "utf8"));
+    return isRecord(raw) && raw.agentToolsEnabled === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Atomic write (temp file + rename), like the project registry. Private to its user: it holds agentEnv. */
 export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebServerSettings {
   const path = settingsPath();
