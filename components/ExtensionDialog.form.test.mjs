@@ -59,6 +59,8 @@ test("form options preserve preformatted text and indentation", () => {
   const pre = screen.getByRole("radio", { name: /Example/ }).closest("label").querySelector("pre");
   assert.ok(pre);
   assert.equal(pre.textContent, "first line\n  indented second line");
+  assert.equal(pre.tabIndex, 0);
+  assert.ok(screen.getByRole("radio", { name: /indented second line/ }));
 });
 
 test("changed answers are submitted, an unchecked radio group is omitted", async () => {

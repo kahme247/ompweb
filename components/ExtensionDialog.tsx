@@ -360,6 +360,7 @@ function formElement(element: Element, ctx: FormCtx, key: string): ReactNode {
   const props: Record<string, unknown> = { key };
   const id = attr("id");
   if (id) props.id = `${ctx.prefix}-${id}`;
+  if (tag === "pre") props.tabIndex = 0;
   if (tag === "label" && attr("for")) props.htmlFor = `${ctx.prefix}-${attr("for")}`;
   // Each radio/checkbox option sits on its own row, its control spaced from its label. The row is a
   // flex container, so everything but the control goes into one text block: on their own, each text
