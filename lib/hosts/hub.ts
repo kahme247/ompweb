@@ -139,6 +139,8 @@ interface Link {
   configOwned: boolean;
   /** `clusterConfig` ops sent and not answered: the sync never piles another on. */
   configOps: number;
+  /** v10: a `config_state` arrived since the link came up: from then on reports, never op answers, set `configState`. */
+  configReported: boolean;
   ompVersion: string | null;
   ompwebVersion: string | null;
   workspaceOps: Set<string>;
@@ -270,6 +272,7 @@ function linkFor(id: string): Link {
       configState: null,
       configOwned: false,
       configOps: 0,
+      configReported: false,
       ompVersion: null,
       ompwebVersion: null,
       workspaceOps: new Set(),
@@ -699,6 +702,7 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   link.capacity = null;
   link.configState = null;
   link.configOwned = false;
+  link.configReported = false;
   previous?.close(LINK_CLOSE.replaced, "replaced by a newer link");
   if (previous) {
     // Upload bytes the old socket may have lost must not be followed by later ones on this socket: they resume instead.
@@ -906,6 +910,7 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
     return;
   }
   if (message.type === "config_state") {
+    link.configReported = true;
     noteConfigState(link, message.state, message.owned);
     return;
   }
@@ -1679,7 +1684,9 @@ export async function masterConfigVersion(): Promise<string> {
 
 const CLUSTER_CONFIG_OP_MS = 60_000;
 
-/** `clusterConfig` on a host's daemon (v10), waiting at most 60 s; the state it answers is kept like a `config_state` report. */
+/** `clusterConfig` on a host's daemon (v10), waiting at most 60 s. The state it answers is kept only while the link has
+ * sent no `config_state` since it came up: the daemon reports each change at once, ahead of its sequenced answer, so a
+ * report that arrived first may already be newer (the plugin step finishing) and an answer must not take it back. */
 export async function clusterConfigOp(hostId: string, args: { action: "apply"; version: string } | { action: "restore" }): Promise<{ state: ConfigState; owned: boolean }> {
   const link = linkFor(hostId);
   link.configOps += 1;
@@ -1696,7 +1703,7 @@ export async function clusterConfigOp(hostId: string, args: { action: "apply"; v
   } catch {
     throw new HostOpError(502, "host_bad_result", `${labelOf(hostId)} sent an invalid clusterConfig result`);
   }
-  noteConfigState(link, state, result.owned);
+  if (!link.configReported) noteConfigState(link, state, result.owned);
   return { state, owned: result.owned };
 }
 
