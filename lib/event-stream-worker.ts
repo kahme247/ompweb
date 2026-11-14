@@ -1696,7 +1696,27 @@ const OUTBOX_DB = "omp-web-outbox";
 const OUTBOX_STORE = "entries";
 /** The server keeps delivered ids 8 days: an older entry is never sent again, or a resend could deliver it twice. */
 const OUTBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-// Only a failed local parent proves refusal; missing or sending parents stay server anchors.
+/** The immutable intent used by server retry validation: mode, text, images and upload IDs. */
+function sameOutboxIntent(a: LocalOutboxEntry, b: LocalOutboxEntry): boolean {
+  if (a.mode !== b.mode || a.message !== b.message) return false;
+  const aImages = a.images;
+  const bImages = b.images;
+  const imageCount = aImages?.length ?? 0;
+  if (imageCount !== (bImages?.length ?? 0)) return false;
+  for (let index = 0; index < imageCount; index++) {
+    const left = aImages?.[index];
+    const right = bImages?.[index];
+    if (left?.type !== right?.type || left?.data !== right?.data || left?.mimeType !== right?.mimeType) return false;
+  }
+  const aUploads = a.uploads;
+  const bUploads = b.uploads;
+  const uploadCount = aUploads?.length ?? 0;
+  if (uploadCount !== (bUploads?.length ?? 0)) return false;
+  for (let index = 0; index < uploadCount; index++) if (aUploads?.[index] !== bUploads?.[index]) return false;
+  return true;
+}
+
+// A local failed ancestor proves lineage only in the same session with the exact original intent.
 function replacementRoot(entry: LocalOutboxEntry, entries: ReadonlyMap<string, LocalOutboxEntry>): string | null {
   if (entry.replaces === undefined) return entry.id;
   const seen = new Set([entry.id]);
@@ -1706,7 +1726,9 @@ function replacementRoot(entry: LocalOutboxEntry, entries: ReadonlyMap<string, L
     if (seen.has(id)) return null;
     seen.add(id);
     const parent = entries.get(id);
-    if (!parent || parent.sessionId !== entry.sessionId || parent.state !== "failed" || parent.replaces === undefined) return id;
+    if (!parent || parent.sessionId !== entry.sessionId || parent.state !== "failed") return id;
+    if (!sameOutboxIntent(parent, entry)) return null;
+    if (parent.replaces === undefined) return id;
     id = parent.replaces;
     if (!id) return null;
   }
@@ -1855,6 +1877,7 @@ function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
   void ensureOutboxReady().then(async (loaded) => {
     const item: OutboxItem = { entry: { ...entry, state: "sending" }, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS };
     let invalidRetry = false;
+    let reused: LocalOutboxEntry | undefined;
     const committed = loaded && await writeOutbox((store) => {
       const request = store.getAll();
       request.onsuccess = () => {
@@ -1866,6 +1889,25 @@ function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
           return;
         }
         const normalized = entry.replaces === undefined ? entry : { ...entry, replaces: root };
+        if (entry.replaces !== undefined) {
+          let pending: LocalOutboxEntry | undefined;
+          for (const saved of entries) {
+            if (saved.sessionId !== entry.sessionId || saved.state !== "sending" || saved.replaces === undefined
+              || replacementRoot(saved, byId) !== root) continue;
+            if (!pending || compareOutbox(saved, pending) < 0) pending = saved;
+          }
+          if (pending) {
+            if (sameOutboxIntent(pending, normalized)) reused = pending;
+            else invalidRetry = true;
+            return;
+          }
+          const localRoot = byId.get(root);
+          if (localRoot?.sessionId === entry.sessionId
+            && (localRoot.state !== "failed" || !sameOutboxIntent(localRoot, normalized))) {
+            invalidRetry = true;
+            return;
+          }
+        }
         item.entry = {
           ...normalized,
           state: "sending",
@@ -1879,6 +1921,14 @@ function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
         outboxAdded: n,
         error: invalidRetry ? "This retry chain is invalid. Retry the original message instead." : "The message could not be saved to this browser. Send it again.",
       });
+      return;
+    }
+    if (reused) {
+      if (!outboxItems.has(reused.id)) outboxItems.set(reused.id, { entry: reused, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS });
+      await refreshOutbox();
+      broadcastOutbox();
+      post(client, { outboxAdded: n });
+      // The original add owns this row's send; duplicate callers only share its committed entry.
       return;
     }
     // Committed: the entry is accepted whatever follows, or a resend from the composer would duplicate it under a new id.
@@ -2026,20 +2076,34 @@ async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Pr
   const accepted = acceptedOutboxEntry(body, id);
   if (status >= 200 && status < 300 && !accepted) status = 0;
   if (status >= 200 && status < 300) {
-    // Commit the accepted ID and only the server-confirmed retry lineage together.
+    // Commit the accepted ID and only server-confirmed or locally proven retry lineage together.
     const confirmedReplaces = isRecord(accepted) && typeof accepted.replaces === "string" && accepted.replaces === replaces
       ? accepted.replaces : undefined;
     const removedIds = new Set([id]);
-    if (confirmedReplaces !== undefined) removedIds.add(confirmedReplaces);
+    let localReplaces: string | undefined;
     if (!(await writeOutbox((store) => {
       const request = store.getAll();
       request.onsuccess = () => {
         const entries = request.result as LocalOutboxEntry[];
         const byId = new Map(entries.map((entry) => [entry.id, entry] as const));
+        let lineageRoot = confirmedReplaces;
+        if (lineageRoot === undefined && replaces !== undefined) {
+          const localRoot = replacementRoot(item.entry, byId);
+          const original = localRoot === null ? undefined : byId.get(localRoot);
+          if (localRoot !== null && original?.sessionId === sessionId && original.state === "failed" && sameOutboxIntent(original, item.entry)) {
+            lineageRoot = localRoot;
+            localReplaces = localRoot;
+          }
+        } else localReplaces = confirmedReplaces;
         for (const entry of entries) {
           if (entry.sessionId !== sessionId) continue;
-          if (entry.id !== id && (confirmedReplaces === undefined
-            || entry.id !== confirmedReplaces && replacementRoot(entry, byId) !== confirmedReplaces)) continue;
+          if (entry.id === id) {
+            removedIds.add(entry.id);
+            store.delete(entry.id);
+            continue;
+          }
+          if (lineageRoot === undefined || !sameOutboxIntent(entry, item.entry)
+            || entry.id !== lineageRoot && replacementRoot(entry, byId) !== lineageRoot) continue;
           removedIds.add(entry.id);
           store.delete(entry.id);
         }
@@ -2058,8 +2122,9 @@ async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Pr
           ...(item.entry.uploads ? { uploads: item.entry.uploads } : {}),
         }
       : accepted;
+    const representedRoot = confirmedReplaces ?? localReplaces;
     for (const client of clients) post(client, {
-      outboxStored: confirmedReplaces && isRecord(stored) ? { ...stored, replaces: confirmedReplaces } : stored,
+      outboxStored: representedRoot && isRecord(stored) ? { ...stored, replaces: representedRoot } : stored,
     });
   } else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
     item.inFlight = false;
