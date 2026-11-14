@@ -739,6 +739,7 @@ const SessionItem = memo(function SessionItem({
   const renameCancelRef = useRef(false);
  const [confirmDelete, setConfirmDelete] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const [menuPoint, setMenuPoint] = useState<{ x: number; y: number } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const contentButtonRef = useRef<HTMLButtonElement>(null);
@@ -834,10 +835,24 @@ const SessionItem = memo(function SessionItem({
     <>
     <div
       className="session-item-row"
+      onContextMenu={(event) => {
+        if (renaming || confirmDelete || deleting) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuPoint({ x: event.clientX, y: event.clientY });
+        setActionMenuOpen(true);
+      }}
  onClick={confirmDelete || renaming ? undefined : onClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onKeyDown={(event) => {
+        if (!renaming && !confirmDelete && !deleting
+          && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+          event.preventDefault();
+          event.stopPropagation();
+          setMenuPoint(null);
+          setActionMenuOpen(true);
+        }
         if ((confirmDelete || actionMenuOpen) && event.key === "Escape") {
           event.stopPropagation();
           closeConfirmation();
@@ -926,14 +941,14 @@ const SessionItem = memo(function SessionItem({
                 {relativeTime && <span className="session-item-time" title={new Date(session.modified).toLocaleString(locale)} style={{ flexShrink: 0, whiteSpace: "nowrap", textAlign: "right", color: isSelected ? "var(--accent)" : "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums" }}>{relativeTime}</span>}
               </div>
               <div className="session-item-actions" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
-                <button type="button" ref={menuButtonRef} className="session-item-icon-button session-item-menu-button" onClick={(event) => { event.stopPropagation(); setActionMenuOpen((open) => !open); }} title={t("projects.actions")} aria-label={t("projects.actions")} aria-expanded={actionMenuOpen} style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 0, lineHeight: 0, border: "none", borderRadius: "var(--radius-control)", background: actionMenuOpen ? "var(--bg-selected)" : "transparent", color: actionMenuOpen ? "var(--text)" : "var(--text-dim)", cursor: "pointer" }}>
+                <button type="button" ref={menuButtonRef} className="session-item-icon-button session-item-menu-button" onClick={(event) => { event.stopPropagation(); setMenuPoint(null); setActionMenuOpen((open) => !open); }} title={t("projects.actions")} aria-label={t("projects.actions")} aria-expanded={actionMenuOpen} style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 0, lineHeight: 0, border: "none", borderRadius: "var(--radius-control)", background: actionMenuOpen ? "var(--bg-selected)" : "transparent", color: actionMenuOpen ? "var(--text)" : "var(--text-dim)", cursor: "pointer" }}>
                   <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
                 </button>
-                <SidebarPortalMenu anchor={menuButtonRef} open={actionMenuOpen} onClose={() => setActionMenuOpen(false)} placement="below" minWidth={128}>
- <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={archiveBlocked} title={archiveTitle} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: archiveBlocked ? "var(--text-dim)" : "var(--text-muted)", cursor: archiveBlocked ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: archiveBlocked ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
-                  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
-                  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleCopyTranscript(); }} disabled={copyingTranscript} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: copyingTranscript ? "default" : "pointer", textAlign: "left", fontSize: 11, opacity: copyingTranscript ? 0.55 : 1 }}>{t("sessionSidebar.copyTranscript")}</button>
-                  <button type="button" role="menuitem" className="sidebar-menu-item" disabled={deleting} onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
+                <SidebarPortalMenu anchor={menuButtonRef} open={actionMenuOpen} onClose={() => setActionMenuOpen(false)} placement="below" point={menuPoint} minWidth={150}>
+ <button type="button" role="menuitem" data-menu-shortcut="a" aria-keyshortcuts="A" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={archiveBlocked} title={archiveTitle} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: archiveBlocked ? "var(--text-dim)" : "var(--text-muted)", cursor: archiveBlocked ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: archiveBlocked ? 0.55 : 1 }}><span>{t("sessionSidebar.archive")}</span><kbd style={{ float: "right", marginLeft: 16, color: "var(--text-dim)", fontFamily: "inherit" }}>A</kbd></button>
+                  <button type="button" role="menuitem" data-menu-shortcut="r" aria-keyshortcuts="R" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}><span>{t("sessionSidebar.rename")}</span><kbd style={{ float: "right", marginLeft: 16, color: "var(--text-dim)", fontFamily: "inherit" }}>R</kbd></button>
+                  <button type="button" role="menuitem" data-menu-shortcut="c" aria-keyshortcuts="C" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleCopyTranscript(); }} disabled={copyingTranscript} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: copyingTranscript ? "default" : "pointer", textAlign: "left", fontSize: 11, opacity: copyingTranscript ? 0.55 : 1 }}><span>{t("sessionSidebar.copyTranscript")}</span><kbd style={{ float: "right", marginLeft: 16, color: "var(--text-dim)", fontFamily: "inherit" }}>C</kbd></button>
+                  <button type="button" role="menuitem" data-menu-shortcut="d" aria-keyshortcuts="D" className="sidebar-menu-item" disabled={deleting} onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}><span>{t("sessionSidebar.delete")}</span><kbd style={{ float: "right", marginLeft: 16, color: "var(--text-dim)", fontFamily: "inherit" }}>D</kbd></button>
                 </SidebarPortalMenu>
               </div>
             </div>

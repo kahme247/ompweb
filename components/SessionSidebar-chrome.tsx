@@ -108,6 +108,7 @@ function SidebarPortalMenu({
   placement = "below",
   align = "end",
   minWidth = 136,
+  point,
   style,
   children,
 }: {
@@ -118,6 +119,7 @@ function SidebarPortalMenu({
   /** "end" right-aligns to the anchor, "start" left-aligns to it. */
   align?: "start" | "end";
   minWidth?: number;
+  point?: { x: number; y: number } | null;
   style?: CSSProperties;
   children: ReactNode;
 }) {
@@ -164,11 +166,14 @@ function SidebarPortalMenu({
       }
     }
     if (top < MENU_VIEWPORT_PAD) top = MENU_VIEWPORT_PAD;
-    const left = align === "start"
-      ? Math.max(MENU_VIEWPORT_PAD, Math.min(ru.left, vw - width - MENU_VIEWPORT_PAD))
-      : Math.max(MENU_VIEWPORT_PAD, Math.min(ru.right - width, vw - width - MENU_VIEWPORT_PAD));
+    const left = point
+      ? Math.max(MENU_VIEWPORT_PAD, Math.min(point.x / scale, vw - width - MENU_VIEWPORT_PAD))
+      : align === "start"
+        ? Math.max(MENU_VIEWPORT_PAD, Math.min(ru.left, vw - width - MENU_VIEWPORT_PAD))
+        : Math.max(MENU_VIEWPORT_PAD, Math.min(ru.right - width, vw - width - MENU_VIEWPORT_PAD));
+    if (point) top = Math.max(MENU_VIEWPORT_PAD, Math.min(point.y / scale, vh - height - MENU_VIEWPORT_PAD));
     setPos({ top, left });
-  }, [placement, align]);
+  }, [placement, align, point]);
 
   // Measure on open: the portal is mounted during commit, so the menu's own
   // size is available synchronously in the layout effect.
@@ -205,6 +210,17 @@ function SidebarPortalMenu({
       onClose();
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing
+        && e.key.length === 1 && menuRef.current?.contains(e.target as Node)) {
+        const button = Array.from(menuRef.current.querySelectorAll<HTMLButtonElement>("button[data-menu-shortcut]:not([disabled])"))
+          .find((item) => item.dataset.menuShortcut === e.key.toLowerCase());
+        if (button) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!e.repeat) button.click();
+          return;
+        }
+      }
       if (e.key === "Escape") {
         e.stopPropagation();
         e.preventDefault();
