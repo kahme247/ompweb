@@ -504,20 +504,17 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
       }
       const original = typeof replaces === "string" ? row(replaces) : null;
       if (original && entryBelongsToSession(original, sessionId) && original.replacement_id) {
-        const winner = row(original.replacement_id);
-        if (winner) {
-          if (original.replacement_digest !== retryDigest) {
-            throw new UploadError(409, "outbox_replacement_conflict", "A retry must keep its original mode, message and attachments");
-          }
-          const settledAt = Date.now();
-          database.prepare("UPDATE entries SET done_at = ? WHERE id = ? AND replacement_id = ?").run(settledAt, original.id, winner.id);
-          // Persist a matching-ID terminal receipt so this browser can replay after a lost acknowledgement.
-          database.prepare(`INSERT INTO entries (${COLUMNS}, done_at) VALUES (?, ?, ?, '', NULL, NULL, ?, ?, 'delivered', NULL, 0, ?, NULL, NULL, ?, 'none', ?, NULL, 0, ?)`)
-            .run(id, winner.session_id, winner.mode, winner.owner, winner.advisor, settledAt, winner.source_session_id, winner.id, settledAt);
-          const entry = row(id);
-          if (!entry) throw new Error("The replacement receipt could not be read after commit");
-          return { kind: "duplicate", entry, originalSession: winner.session_id, replaces: original.id };
+        if (original.replacement_digest !== retryDigest) {
+          throw new UploadError(409, "outbox_replacement_conflict", "A retry must keep its original mode, message and attachments");
         }
+        const settledAt = Date.now();
+        database.prepare("UPDATE entries SET done_at = ? WHERE id = ? AND replacement_id = ?").run(settledAt, original.id, original.replacement_id);
+        // Persist a matching-ID terminal receipt so this browser can replay after a lost acknowledgement.
+        database.prepare(`INSERT INTO entries (${COLUMNS}, done_at) VALUES (?, ?, ?, '', NULL, NULL, ?, ?, 'delivered', NULL, 0, ?, NULL, NULL, ?, 'none', ?, NULL, 0, ?)`)
+          .run(id, original.session_id, original.mode, original.owner, original.advisor, settledAt, original.source_session_id, original.replacement_id, settledAt);
+        const entry = row(id);
+        if (!entry) throw new Error("The replacement receipt could not be read after commit");
+        return { kind: "duplicate", entry, originalSession: original.session_id, replaces: original.id };
       }
       const replaceable = original && original.state === "failed" && entryBelongsToSession(original, sessionId) ? original : null;
       const matchesOriginal = replaceable !== null
