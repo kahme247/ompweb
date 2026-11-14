@@ -437,10 +437,15 @@ const REPLY_MUTATION = `mutation($threadId: ID!, $body: String!) {
 }`;
 const RESOLVE_MUTATION = `mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }`;
 const THREAD_QUERY = `query($id: ID!) {
+  node(id: $id) { ... on PullRequestReviewThread { id path line pullRequest { number repository { nameWithOwner } } } }
+}`;
+
+const REVIEW_COMMENT_QUERY = `query($id: ID!) {
   node(id: $id) {
-    ... on PullRequestReviewThread { id path line pullRequest { number repository { nameWithOwner } } }
     ... on PullRequestReviewComment {
-      pullRequestReviewThread { id path line pullRequest { number repository { nameWithOwner } } }
+      id fullDatabaseId
+      pullRequest { number repository { nameWithOwner } }
+      replyTo { id }
     }
   }
 }`;
@@ -459,6 +464,38 @@ export async function fetchThread(run: GhRunner, threadId: string): Promise<{ th
   if (!thread || !pr) throw new Error(`Review thread ${threadId} was not found.`);
   const [owner, repo] = pr.repository.nameWithOwner.split("/");
   return { threadId: thread.id, target: { owner, repo, number: pr.number }, path: thread.path ?? "", line: thread.line ?? null };
+}
+
+export async function fetchReviewComment(run: GhRunner, commentId: string): Promise<{ replyId: string; target: GithubTarget }> {
+  type ReviewCommentNode = {
+    id: string;
+    fullDatabaseId: string | null;
+    pullRequest: { number: number; repository: { nameWithOwner: string } };
+    replyTo: { id: string } | null;
+  };
+  let nodeId: string | null = commentId;
+  let rootId: string | undefined;
+  let target: GithubTarget | undefined;
+  const seen = new Set<string>();
+  while (nodeId) {
+    if (seen.has(nodeId)) throw new Error(`Review comment ${commentId} was not found.`);
+    seen.add(nodeId);
+    const data: { node: ReviewCommentNode | null } = await graphql<{ node: ReviewCommentNode | null }>(run, REVIEW_COMMENT_QUERY, { id: nodeId });
+    const comment: ReviewCommentNode | null = data.node;
+    if (!comment || comment.id !== nodeId || typeof comment.fullDatabaseId !== "string" || !/^\d+$/.test(comment.fullDatabaseId)) {
+      throw new Error(`Review comment ${commentId} was not found.`);
+    }
+    const [owner, repo] = comment.pullRequest.repository.nameWithOwner.split("/");
+    const commentTarget = { owner, repo, number: comment.pullRequest.number };
+    if (target && (target.owner.toLowerCase() !== owner.toLowerCase() || target.repo.toLowerCase() !== repo.toLowerCase() || target.number !== commentTarget.number)) {
+      throw new Error(`Review comment ${commentId} was not found.`);
+    }
+    target = commentTarget;
+    rootId = comment.fullDatabaseId;
+    nodeId = comment.replyTo?.id ?? null;
+  }
+  if (!target || !rootId) throw new Error(`Review comment ${commentId} was not found.`);
+  return { replyId: rootId, target };
 }
 
 /** The body always travels on stdin as JSON, never in argv. */

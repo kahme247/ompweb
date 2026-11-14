@@ -5,7 +5,7 @@ import { startsUnasked, type AgentToolHost } from "../agent-tool-hosts";
 import { loadWebServerSettings } from "../web-settings";
 import { baselineCursor, capName } from "./events";
 import { checkGh, defaultGhRunner, formatTarget, parseGithubTarget, type GhRunner, type GithubTarget } from "./gh";
-import { fetchSnapshot, fetchThread, postComment, readItem, resolveThread, type ReadPart } from "./api";
+import { fetchReviewComment, fetchSnapshot, fetchThread, postComment, readItem, resolveThread, type ReadPart } from "./api";
 import { MAX_WATCHES_PER_SESSION, addWatch, grantRead, hasReadGrant, itemKeyOf, recordPosted, removeWatch, repoKeyOf, whilePosting } from "./watch-store";
 
 /**
@@ -162,18 +162,22 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
     // A remote session reaches the target only through a read grant, before the thread lookup reads it.
     await allowRead(ops, ctx, t);
     const item = itemKeyOf(t);
-    let replyThreadId = replyTo;
-    if (replyTo?.startsWith("PRRT_") || replyTo?.startsWith("PRRC_")) {
+    let replyId = replyTo;
+    if (replyTo?.startsWith("PRRT_")) {
       const thread = await fetchThread(ops.run, replyTo);
       if (itemKeyOf(thread.target) !== item) throw new Error("The reply target does not match the requested pull request.");
-      replyThreadId = thread.threadId;
+      replyId = thread.threadId;
+    } else if (replyTo?.startsWith("PRRC_")) {
+      const comment = await fetchReviewComment(ops.run, replyTo);
+      if (itemKeyOf(comment.target) !== item) throw new Error("The reply target does not match the requested pull request.");
+      replyId = comment.replyId;
     }
     const preview = body.split("\n", 3).map((line) => line.slice(0, 200)).join("\n");
     const cut = body.length - preview.length;
     const what = replyTo === undefined ? `Post on ${label}` : `Reply in review thread ${replyTo} on ${label}`;
     await allowWrite(ops, ctx, `${what} as the server's GitHub account?\n${preview}${cut > 0 ? `\n… (+${cut} more characters)` : ""}`);
     return whilePosting(item, async () => {
-      const posted = await postComment(ops.run, t, body, replyThreadId);
+      const posted = await postComment(ops.run, t, body, replyId);
       recordPosted(item, posted.id);
       return posted;
     });
