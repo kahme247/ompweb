@@ -315,9 +315,8 @@ function unrecordedHeldBash<T extends { command: string; after: number }>(messag
     return !run;
   });
 }
-function reconcileConfirmedLocalOutbox(sessionId: string, localEntries: LocalOutboxEntry[], serverEntries: OutboxEntry[]): Promise<void> {
-  const confirmed = new Set(serverEntries.filter((entry) => entry.sessionId === sessionId).map((entry) => entry.id));
-  const ids = localEntries.filter((entry) => entry.sessionId === sessionId && entry.replaces !== undefined && confirmed.has(entry.id)).map((entry) => entry.id);
+function reconcileConfirmedLocalOutbox(sessionId: string, localEntries: LocalOutboxEntry[], confirmedIds: ReadonlySet<string>): Promise<void> {
+  const ids = localEntries.filter((entry) => entry.sessionId === sessionId && entry.replaces !== undefined && confirmedIds.has(entry.id)).map((entry) => entry.id);
   return ids.length ? reconcileOutbox(sessionId, ids) : Promise.resolve();
 }
 
@@ -1741,7 +1740,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       serverOutboxRef.current = applyOutboxSnapshot(serverOutboxRef.current, entries, settledIds, nativeSettledIds);
       setServerOutbox(serverOutboxRef.current);
     }
-    void reconcileConfirmedLocalOutbox(sid, localOutbox, serverOutboxRef.current.entries)
+    void reconcileConfirmedLocalOutbox(sid, localOutbox, serverOutboxRef.current.seen)
       .catch((error) => console.warn(`[omp-web] browser outbox reconciliation failed: ${error instanceof Error ? error.message : String(error)}`));
     // Held messages open the session channel even without a wrapper: subscribe to follow them.
     if (entries.length > 0 && !eventSourceRef.current) void connectEvents(sid, "connected");
@@ -1755,7 +1754,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       serverOutboxRef.current = rememberLocalOutbox(serverOutboxRef.current, event.entries, sessionIdRef.current);
       setServerOutbox(serverOutboxRef.current);
       const sid = sessionIdRef.current;
-      if (sid) void reconcileConfirmedLocalOutbox(sid, event.entries, serverOutboxRef.current.entries)
+      if (sid) void reconcileConfirmedLocalOutbox(sid, event.entries, serverOutboxRef.current.seen)
         .catch((error) => console.warn(`[omp-web] browser outbox reconciliation failed: ${error instanceof Error ? error.message : String(error)}`));
       return;
     }
@@ -2532,7 +2531,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           );
           setServerOutbox(serverOutboxRef.current);
           const sid = sessionIdRef.current;
-          if (sid) void reconcileConfirmedLocalOutbox(sid, localOutboxRef.current, serverOutboxRef.current.entries)
+          if (sid) void reconcileConfirmedLocalOutbox(sid, localOutboxRef.current, serverOutboxRef.current.seen)
             .catch((error) => console.warn(`[omp-web] browser outbox reconciliation failed: ${error instanceof Error ? error.message : String(error)}`));
           // Retire only confirmations the server has listed or settled; an older empty snapshot can overtake an ACK.
           setStoredOutbox((current) => current.filter((entry) => !serverOutboxRef.current.seen.has(entry.id)));
