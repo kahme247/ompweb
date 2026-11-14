@@ -15,7 +15,7 @@
 - Every tool description begins: "Requires the GitHub CLI (`gh`) on the PATH of the omp-web server machine, logged in (`gh auth login`); acts as that account."
 - `gh` missing: "`gh` (GitHub CLI) is not installed on the omp-web server machine. Ask the user to install it and run `gh auth login` there."
 - `gh` logged out: "`gh` is not logged in on the omp-web server machine. Ask the user to run `gh auth login` there."
-- `gh` runs with `createChildProcessEnvironment` (`lib/project-command-env.ts`): never omp-web's secrets. Never read or store a GitHub token.
+- `gh` uses `createChildProcessEnvironment` (`lib/project-command-env.ts`) for its child environment, then `defaultGhRunner` removes `GH_TOKEN` and `GITHUB_TOKEN` from that environment only (not the shared sanitizer), so GitHub tools use the server machine's stored `gh` login. Never read or store a GitHub token.
 - Update messages start `GitHub update (omp-web): OWNER/REPO#N <URL>` and never contain text written on GitHub (no bodies, titles, branch names). No check names or thread file paths (a fork controls its workflow files and its branch).
 - At most 20 watches per session. Poll interval 60 s. `gh auth status` result cached 60 s. `github_read` diff capped at 1 MiB with a truncation marker. `github_comment` body capped at 65 536 characters.
 - Store: `<agent dir>/omp-web/github-watches.sqlite`, WAL, busy timeout, closed with `close(true)`.
@@ -42,12 +42,12 @@
 **Interfaces:**
 - Produces:
   - `type GhRunner = (args: string[], input?: string) => Promise<string>` (stdout; rejects with `GhError { message, stderr, code }`).
-  - `defaultGhRunner: GhRunner` (`execFile("gh", args, { env: createChildProcessEnvironment(...), timeout: 30_000, maxBuffer: 16 MiB })`, stdin from `input`).
+  - `defaultGhRunner: GhRunner` (`execFile("gh", args, { env, timeout: 30_000, maxBuffer: 16 MiB })`, stdin from `input`): build `env` with `createChildProcessEnvironment(...)`, then delete `GH_TOKEN` and `GITHUB_TOKEN` from this runner's environment only (do not change the shared sanitizer), so `gh` uses the server machine's stored login.
   - `checkGh(run?: GhRunner, now?: () => number): Promise<{ login: string }>`: runs `gh api user --jq .login` (covers installed + logged in), caches success 60 s (`globalThis`); throws `GhUnavailableError` with exactly the Global Constraints texts (ENOENT → not installed; exit with "auth"/"login"/HTTP 401 in stderr → not logged in).
   - `parseGithubTarget(value: string): { owner: string; repo: string; number: number }` accepting `OWNER/REPO#N` and `https://github.com/OWNER/REPO/(pull|issues)/N` (trailing path/query/fragment ignored); throws `Error("Agent tool argument \"target\" must be OWNER/REPO#N or a GitHub pull request or issue URL.")`.
   - `formatTarget(t): string` → `OWNER/REPO#N`.
 
-- [ ] **Step 1: Write failing tests** `checkGh maps a missing binary and a logged-out gh to the spec's messages`, `checkGh caches a success for 60 s`, `parseGithubTarget accepts both forms and refuses others` (refuses `owner/repo`, `owner/repo#0`, `https://gitlab.com/...`, `owner/repo#12abc`).
+- [ ] **Step 1: Write failing tests** `defaultGhRunner does not pass inherited GH_TOKEN or GITHUB_TOKEN`, `checkGh maps a missing binary and a logged-out gh to the spec's messages`, `checkGh caches a success for 60 s`, `parseGithubTarget accepts both forms and refuses others` (refuses `owner/repo`, `owner/repo#0`, `https://gitlab.com/...`, `owner/repo#12abc`).
 - [ ] **Step 2: Run** `bun test --parallel lib/github/gh.test.mjs` — FAIL (module missing).
 - [ ] **Step 3: Implement** as above. Runner faked in tests by passing `run`.
 - [ ] **Step 4: Run** the test — PASS.
@@ -106,16 +106,18 @@
 
 **Interfaces:**
 - Consumes: `WatchCursor`.
-- Produces (tables `watches(session_id, item_key, kind, cursor_json, created_at, PRIMARY KEY(session_id, item_key))`, `posted(item_key, comment_id)`, `read_grants(session_id, repo_key)`; `item_key` = `owner/repo#n` lower-cased owner/repo):
+- Defines: `PendingUpdate = { entryId: string; message: string; cursor: WatchCursor; final: boolean }`.
+- Produces (tables `watches(session_id, item_key, kind, cursor_json, created_at, PRIMARY KEY(session_id, item_key))`, `pending(session_id, item_key, entry_id, message, cursor_json, final, PRIMARY KEY(session_id, item_key))`, `posted(item_key, comment_id)`, `read_grants(session_id, repo_key)`; `item_key` = `owner/repo#n` lower-cased owner/repo):
   - `addWatch(sessionId, itemKey, kind, cursor): "added" | "exists" | "limit"` (limit 20 per session).
   - `removeWatch(sessionId, itemKey): boolean`; `removeSessionWatches(sessionId): void`.
   - `listWatches(): { sessionId; itemKey; kind; cursor }[]`.
-  - `commitUpdate(sessionId, itemKey, cursor, final): void` — saves the cursor, or deletes the watch when `final`. A crash before it runs is safe: the next poll derives the same `updateEntryId`, which the outbox answers with the stored entry.
+  - `setPending(sessionId, itemKey, pending): boolean` persists `{ entryId, message, cursor, final }` before outbox delivery; `getPending(sessionId, itemKey): PendingUpdate | null`.
+  - `commitUpdate(sessionId, itemKey, cursor, final): void` saves the cursor, or deletes the watch when `final`, and clears pending atomically. A retry keeps the exact pending batch and id for reuse after restart; never recompute it before retrying delivery.
   - `recordPosted(itemKey, commentId)`, `postedIds(itemKey): Set<string>`.
   - `hasReadGrant(sessionId, repoKey)`, `grantRead(sessionId, repoKey)`.
   - `renameSession(oldId, newId)` (for session moves), `closeWatchStore()`.
 
-- [ ] **Step 1: Write failing tests**: `the 21st watch of a session is refused`, `commitUpdate with final removes the watch`, `watches survive reopening the store`, `renameSession moves watches and read grants`.
+- [ ] **Step 1: Write failing tests**: `the 21st watch of a session is refused`, `commitUpdate with final removes the watch and clears pending`, `pending batches survive reopening the store`, `watches survive reopening the store`, `renameSession moves watches and read grants`.
 - [ ] **Step 2: Run** — FAIL.
 - [ ] **Step 3: Implement** like `lib/notification-store.ts` (`bun:sqlite`, WAL, busy timeout, `close(true)`).
 - [ ] **Step 4: Run** — PASS.
@@ -134,9 +136,9 @@
 - Produces:
   - `startGithubWatcher(deps?: { run?: GhRunner; deliver?: (sessionId: string, entryId: string, message: string) => Promise<"ok" | "gone" | "retry">; now?; schedule? }): void` and `stopGithubWatcher(): void` (`globalThis` singleton).
   - default `deliver` = `runOutboxCommand(sessionId, { type: "outbox_add", id, scope: outboxScope(), mode: "prompt", message }, false, "omp-web:github-watch")`: 2xx → `"ok"`, 404 → `"gone"`, anything else → `"retry"`.
-  - `pollOnce(): Promise<void>` (exported for tests): skips everything while `agentToolsEnabled` is false; groups watches by item, one `fetchSnapshot` per item, spreads items across the 60 s interval; per watch `diffSnapshot` → if events, `deliver(updateEntryId)` → `"ok"`: `commitUpdate`; `"gone"`: `removeSessionWatches`; `"retry"`: leave the cursor. On `GhUnavailableError`, deliver one notice per session (`GitHub update (omp-web): watching paused: <message>`), and one "resumed" notice once it recovers (state in `globalThis`, not persisted).
+- `pollOnce(): Promise<void>` (exported for tests): skips everything while `agentToolsEnabled` is false; groups watches by item, one `fetchSnapshot` per item, spreads items across the 60 s interval; per watch with new events, persist the exact batch and id via `setPending` before outbox delivery. On startup or retry, deliver any stored pending batch before fetching or diffing new activity. `"ok"`: atomically commit cursor and clear pending; `"gone"`: `removeSessionWatches`; `"retry"`: leave pending unchanged. Reusing the stored id and message lets the outbox return an already-added entry after a crash instead of delivering a recomputed batch under a new id. On `GhUnavailableError`, deliver one notice per session (`GitHub update (omp-web): watching paused: <message>`), and one "resumed" notice once it recovers (state in `globalThis`, not persisted).
 
-- [ ] **Step 1: Write failing tests** (fake run/deliver/schedule): `a new review is delivered once and the cursor advances`, `a retry leaves the cursor so the next poll redelivers the same entry id`, `a gone session ends its watches only`, `two sessions watching one item fetch it once and each get an entry`, `agent tools off pauses polling and turning it on catches up`, `gh unavailability is announced once and its recovery once`.
+- [ ] **Step 1: Write failing tests** (fake run/deliver/schedule): `a new review is delivered once and the cursor advances`, `a retry leaves the pending batch and id for the next poll`, `a restarted poller reuses the exact pending message and id before diffing new events`, `a gone session ends its watches only`, `two sessions watching one item fetch it once and each get an entry`, `agent tools off pauses polling and turning it on catches up`, `gh unavailability is announced once and its recovery once`.
 - [ ] **Step 2: Run** — FAIL.
 - [ ] **Step 3: Implement**, then wire start/stop and the session move/delete hooks.
 - [ ] **Step 4: Run** the test plus `bun test --parallel lib/message-outbox.test.mjs` — PASS.

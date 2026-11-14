@@ -30,8 +30,8 @@ function fakeSettings(t, get) {
   globalThis.fetch = async (url, init) => {
     if (String(url) !== "/api/web-settings") return Response.json({});
     if (init?.method === "PUT") {
-      const { promise, resolve } = Promise.withResolvers();
-      puts.push({ body: init.body, release: () => resolve(Response.json({})) });
+      const { promise, resolve, reject } = Promise.withResolvers();
+      puts.push({ body: init.body, release: () => resolve(Response.json({})), fail: () => reject(new TypeError("Failed to fetch")) });
       return promise;
     }
     return get();
@@ -43,12 +43,57 @@ function fakeSettings(t, get) {
   return puts;
 }
 
-test("a failed settings load leaves the GitHub writes switch unknown and disabled, never shown off", async (t) => {
+test("a failed settings load leaves the GitHub writes switch unknown and disabled", async (t) => {
   fakeSettings(t, () => Response.json({}, { status: 500 }));
   const { container } = render(createElement(SettingsConfig, settingsProps));
   await settle();
   assert.equal(within(container).getByRole("switch", { name: LABEL }).disabled, true);
 });
+
+test("a lost GitHub writes save reloads the persisted permission before re-enabling", async (t) => {
+  let persisted = false;
+  let loads = 0;
+  const puts = fakeSettings(t, () => {
+    loads++;
+    return Response.json({ githubWritesUnasked: persisted });
+  });
+  const { container } = render(createElement(SettingsConfig, settingsProps));
+  await settle();
+  const toggle = within(container).getByRole("switch", { name: LABEL });
+
+  fireEvent.click(toggle);
+  await settle();
+  assert.deepEqual(puts.map((put) => put.body), ['{"githubWritesUnasked":true}']);
+  const previousLoads = loads;
+  persisted = true;
+  puts[0].fail();
+  await settle();
+  assert.ok(loads > previousLoads, "the saved permission is reloaded after the uncertain PUT");
+  assert.equal(toggle.disabled, false);
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+});
+
+test("a failed GitHub writes reconciliation GET leaves the permission unknown and disabled", async (t) => {
+  let failReload = false;
+  let loads = 0;
+  const puts = fakeSettings(t, () => {
+    loads++;
+    return failReload ? Response.json({}, { status: 500 }) : Response.json({ githubWritesUnasked: false });
+  });
+  const { container } = render(createElement(SettingsConfig, settingsProps));
+  await settle();
+  const toggle = within(container).getByRole("switch", { name: LABEL });
+
+  fireEvent.click(toggle);
+  await settle();
+  const previousLoads = loads;
+  failReload = true;
+  puts[0].fail();
+  await settle();
+  assert.ok(loads > previousLoads, "the switch attempts to reload saved settings after the uncertain PUT");
+  assert.equal(toggle.disabled, true);
+});
+
 
 test("the GitHub writes switch takes no second change until its save lands", async (t) => {
   const puts = fakeSettings(t, () => Response.json({ githubWritesUnasked: false }));
