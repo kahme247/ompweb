@@ -1864,6 +1864,8 @@ export function AppShell({ appName }: { appName: string }) {
     ready: mobileSidebarReady,
     sidebarOpen,
     setSidebarOpen,
+    panelOpen: rightPanelIsModal,
+    closePanel: closeRightPanel,
     url: searchParams.toString(),
   });
   useEffect(() => {

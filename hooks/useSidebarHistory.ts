@@ -12,11 +12,14 @@ type SidebarEntry = {
 };
 type HistorySnapshot = { marker: SidebarEntry; state: Record<string, unknown>; href: string };
 
-export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, url }: {
+export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, panelOpen, closePanel, url }: {
   active: boolean;
   ready: boolean;
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
+  /** A full-screen panel (the compact right panel) that Back closes first. */
+  panelOpen: boolean;
+  closePanel: () => void;
   url: string;
 }) {
   const [exitConfirmationOpen, setExitConfirmationOpen] = useState(false);
@@ -25,8 +28,8 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
   const snapshot = useRef<HistorySnapshot | null>(null);
   const pending = useRef<"collapse" | "leave" | { sidebarOpen: boolean } | null>(null);
   const leaveAllowed = useRef(false);
-  const latest = useRef({ active, sidebarOpen, setSidebarOpen });
-  latest.current = { active, sidebarOpen, setSidebarOpen };
+  const latest = useRef({ active, sidebarOpen, setSidebarOpen, panelOpen, closePanel });
+  latest.current = { active, sidebarOpen, setSidebarOpen, panelOpen, closePanel };
 
   const subscribe = useCallback((onChange: () => void) => subscribeDrafts(() => {
     // A new edit invalidates an earlier authorization to discard, including
@@ -79,13 +82,23 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
           writeEntry("top", action.sidebarOpen);
         } else if (action === "leave") {
           leaveFromBase();
-        } else if ((latest.current.active && !latest.current.sidebarOpen) || hasUnsentDrafts()) {
+        } else if ((latest.current.active && !latest.current.sidebarOpen) || latest.current.panelOpen || hasUnsentDrafts()) {
           pending.current = { sidebarOpen: latest.current.sidebarOpen };
           window.history.forward();
         }
         return;
       }
       if (leaveAllowed.current) return;
+      if (marker.entry === "base" && latest.current.panelOpen) {
+        // The panel covers the whole screen: Back closes it and nothing else.
+        latest.current.closePanel();
+        // `latest` still reports the panel open until the next render.
+        if ((latest.current.active && !latest.current.sidebarOpen) || hasUnsentDrafts()) {
+          pending.current = { sidebarOpen: latest.current.sidebarOpen };
+          window.history.forward();
+        }
+        return;
+      }
       if (marker.entry === "top") {
         if (latest.current.active) latest.current.setSidebarOpen(marker.sidebarOpen);
       } else if (latest.current.active && !latest.current.sidebarOpen) {
@@ -147,7 +160,7 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
       writeEntry(marker.entry, sidebarOpen);
       return;
     }
-    const needsTop = (active && !sidebarOpen) || dirty;
+    const needsTop = (active && !sidebarOpen) || dirty || panelOpen;
     if (needsTop && marker.entry === "base") {
       writeEntry("base", true);
       writeEntry("top", sidebarOpen, true);
@@ -157,7 +170,7 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
     } else {
       writeEntry(marker.entry, sidebarOpen);
     }
-  }, [active, ready, sidebarOpen, dirty, url, exitNeedsNativeBack, restoreVersion, writeEntry]);
+  }, [active, ready, sidebarOpen, panelOpen, dirty, url, exitNeedsNativeBack, restoreVersion, writeEntry]);
 
   useEffect(() => {
     if (!dirty) return;
