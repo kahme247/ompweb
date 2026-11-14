@@ -55,6 +55,8 @@ declare global {
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS watches (session_id TEXT NOT NULL, item_key TEXT NOT NULL, kind TEXT NOT NULL, cursor_json TEXT NOT NULL, created_at INTEGER NOT NULL, registration_id TEXT NOT NULL DEFAULT '', PRIMARY KEY (session_id, item_key));
 CREATE TABLE IF NOT EXISTS pending (session_id TEXT NOT NULL, item_key TEXT NOT NULL, entry_id TEXT NOT NULL, message TEXT NOT NULL, cursor_json TEXT NOT NULL, final INTEGER NOT NULL, batches_json TEXT NOT NULL DEFAULT '[]', batch_index INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (session_id, item_key));
+CREATE TABLE IF NOT EXISTS watch_intents (token TEXT NOT NULL PRIMARY KEY, session_id TEXT NOT NULL, item_key TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS watch_intents_session_item ON watch_intents (session_id, item_key);
 CREATE TABLE IF NOT EXISTS posted (item_key TEXT NOT NULL, comment_id TEXT NOT NULL, PRIMARY KEY (item_key, comment_id));
 CREATE TABLE IF NOT EXISTS read_grants (session_id TEXT NOT NULL, repo_key TEXT NOT NULL, PRIMARY KEY (session_id, repo_key));
 CREATE TABLE IF NOT EXISTS active_posts (item_key TEXT NOT NULL, token TEXT NOT NULL PRIMARY KEY, lease_until INTEGER NOT NULL);
@@ -170,10 +172,54 @@ export function addWatch(sessionId: string, itemKey: string, kind: ItemKind, bas
   });
 }
 
+/** Records one in-flight registration so a later unwatch can invalidate it across server processes. */
+export function beginWatchIntent(sessionId: string, itemKey: string): string {
+  const token = randomUUID();
+  db().prepare("INSERT INTO watch_intents (token, session_id, item_key) VALUES (?, ?, ?)").run(token, sessionId, itemKey);
+  return token;
+}
+
+/** Removes only this request's provisional registration, including on a closed item, abort, or fetch error. */
+export function cancelWatchIntent(token: string): void {
+  const d = existingDb();
+  if (!d) return;
+  d.prepare("DELETE FROM watch_intents WHERE token = ?").run(token);
+}
+
+/** Registers only while this request's intent still belongs to the caller's current session. */
+export function registerWatchIntent(
+  token: string,
+  sessionId: string,
+  itemKey: string,
+  kind: ItemKind,
+  baseline: WatchCursor,
+): "added" | "exists" | "limit" | "cancelled" {
+  const d = db();
+  return transaction(d, () => {
+    const intent = d.prepare("SELECT 1 FROM watch_intents WHERE token = ? AND session_id = ? AND item_key = ?").get(token, sessionId, itemKey);
+    if (!intent) return "cancelled";
+    let result: "added" | "exists" | "limit";
+    if (d.prepare("SELECT 1 FROM watches WHERE session_id = ? AND item_key = ?").get(sessionId, itemKey)) {
+      result = "exists";
+    } else {
+      const { n } = d.prepare<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM watches WHERE session_id = ?").get(sessionId)!;
+      if (n >= MAX_WATCHES_PER_SESSION) result = "limit";
+      else {
+        d.prepare("INSERT INTO watches (session_id, item_key, kind, cursor_json, created_at, registration_id) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(sessionId, itemKey, kind, JSON.stringify(baseline), Date.now(), randomUUID());
+        result = "added";
+      }
+    }
+    d.prepare("DELETE FROM watch_intents WHERE token = ?").run(token);
+    return result;
+  });
+}
+
 export function removeWatch(sessionId: string, itemKey: string): boolean {
   const d = db();
   return transaction(d, () => {
     d.prepare("DELETE FROM pending WHERE session_id = ? AND item_key = ?").run(sessionId, itemKey);
+    d.prepare("DELETE FROM watch_intents WHERE session_id = ? AND item_key = ?").run(sessionId, itemKey);
     return d.prepare("DELETE FROM watches WHERE session_id = ? AND item_key = ?").run(sessionId, itemKey).changes > 0;
   });
 }
@@ -192,6 +238,7 @@ export function removeSessionWatches(
         : d.prepare("SELECT 1 FROM watches w JOIN pending p USING (session_id, item_key) WHERE w.session_id = ? AND w.item_key = ? AND w.registration_id = ? AND p.entry_id = ?").get(sessionId, expected.itemKey, expected.registrationId, expected.entryId);
       if (!match) return;
     }
+    d.prepare("DELETE FROM watch_intents WHERE session_id = ?").run(sessionId);
     d.prepare("DELETE FROM pending WHERE session_id = ?").run(sessionId);
     d.prepare("DELETE FROM watches WHERE session_id = ?").run(sessionId);
     d.prepare("DELETE FROM read_grants WHERE session_id = ?").run(sessionId);
@@ -395,6 +442,7 @@ export function renameSession(oldId: string, newId: string): void {
   const d = existingDb();
   if (!d) return;
   transaction(d, () => {
+    d.prepare("UPDATE watch_intents SET session_id = ? WHERE session_id = ?").run(newId, oldId);
     const movedItems = "SELECT item_key FROM watches WHERE session_id = ?";
     d.prepare(`DELETE FROM pending WHERE session_id = ? AND item_key IN (${movedItems})`).run(newId, oldId);
     d.prepare(`DELETE FROM watches WHERE session_id = ? AND item_key IN (${movedItems})`).run(newId, oldId);

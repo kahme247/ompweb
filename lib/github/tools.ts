@@ -2,11 +2,11 @@ import type { HostToolDefinition } from "../pi-types";
 // Types only: agent-tools.ts imports this module for its tool names, so a runtime import back would be a cycle.
 import type { AgentToolContext } from "../agent-tools";
 import { startsUnasked, type AgentToolHost } from "../agent-tool-hosts";
-import { loadWebServerSettings } from "../web-settings";
+import { readGithubWritesUnaskedFromDisk } from "../web-settings";
 import { baselineCursor, capName } from "./events";
 import { checkGh, defaultGhRunner, formatTarget, parseGithubTarget, type GhRunner, type GithubTarget } from "./gh";
 import { fetchReviewComment, fetchSnapshot, fetchThread, postComment, readItem, resolveThread, type ReadPart } from "./api";
-import { MAX_WATCHES_PER_SESSION, addWatch, grantRead, hasReadGrant, itemKeyOf, recordPosted, removeWatch, repoKeyOf, whilePosting } from "./watch-store";
+import { MAX_WATCHES_PER_SESSION, beginWatchIntent, cancelWatchIntent, grantRead, hasReadGrant, itemKeyOf, recordPosted, registerWatchIntent, removeWatch, repoKeyOf, whilePosting } from "./watch-store";
 
 /**
  * The five GitHub agent tools (docs/specs/2026-11-13-github-watch-tool-design.md),
@@ -90,7 +90,7 @@ export interface GithubToolOps {
 }
 
 export function createGithubToolOps(listHosts: () => AgentToolHost[]): GithubToolOps {
-  return { run: defaultGhRunner, listHosts, writesUnasked: () => loadWebServerSettings().githubWritesUnasked };
+  return { run: defaultGhRunner, listHosts, writesUnasked: readGithubWritesUnaskedFromDisk };
 }
 
 function stringArg(args: Record<string, unknown>, field: string): string {
@@ -185,22 +185,35 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
     });
   }
 
+  if (name === "unwatch_github") {
+    await allowRead(ops, ctx, t);
+    removeWatch(ctx.sourceSessionId, itemKeyOf(t));
+    return { watching: false, target: label };
+  }
+  if (name === "watch_github") {
+    const itemKey = itemKeyOf(t);
+    const intent = beginWatchIntent(ctx.sourceSessionId, itemKey);
+    try {
+      await checkGh(ops.run);
+      await allowRead(ops, ctx, t);
+      const snapshot = await fetchSnapshot(ops.run, t);
+      if (snapshot.state !== "open") return { watching: false, target: label, kind: snapshot.kind, state: snapshot.state };
+      if (ctx.signal?.aborted) throw new Error("The tool call was cancelled; no watch was registered.");
+      const registration = registerWatchIntent(intent, ctx.sourceSessionId, itemKey, snapshot.kind, baselineCursor(snapshot));
+      if (registration === "cancelled") throw new Error("The watch request was cancelled by an unwatch before registration.");
+      if (registration === "limit") {
+        throw new Error(`This session already watches the limit of ${MAX_WATCHES_PER_SESSION} GitHub items. Unwatch one first.`);
+      }
+      return { watching: true, target: label, kind: snapshot.kind, state: snapshot.state };
+    } finally {
+      cancelWatchIntent(intent);
+    }
+  }
+
   const include = name === "github_read" ? parseInclude(args.include) : [];
   const ids = name === "github_read" ? parseIds(args.ids) : undefined;
   await checkGh(ops.run);
   await allowRead(ops, ctx, t);
-
   if (name === "github_read") return readItem(ops.run, t, include, ids);
-  if (name === "unwatch_github") {
-    removeWatch(ctx.sourceSessionId, itemKeyOf(t));
-    return { watching: false, target: label };
-  }
-  if (name !== "watch_github") throw new Error(`Unknown agent tool: ${name}.`);
-  const snapshot = await fetchSnapshot(ops.run, t);
-  if (snapshot.state !== "open") return { watching: false, target: label, kind: snapshot.kind, state: snapshot.state };
-  if (ctx.signal?.aborted) throw new Error("The tool call was cancelled; no watch was registered.");
-  if (addWatch(ctx.sourceSessionId, itemKeyOf(t), snapshot.kind, baselineCursor(snapshot)) === "limit") {
-    throw new Error(`This session already watches the limit of ${MAX_WATCHES_PER_SESSION} GitHub items. Unwatch one first.`);
-  }
-  return { watching: true, target: label, kind: snapshot.kind, state: snapshot.state };
+  throw new Error(`Unknown agent tool: ${name}.`);
 }
