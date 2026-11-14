@@ -113,3 +113,18 @@ test("controls named like HTMLFormElement members still submit", async () => {
   await user.click(screen.getByRole("button", { name: "Submit" }));
   assert.deepEqual(responses, [{ data: { elements: "a", reportValidity: "b", querySelectorAll: "c", submit: "d", checkValidity: "e" } }]);
 });
+
+test("a choice's label keeps its text and inline markup in one block beside the control", () => {
+  // The row is a flex container: without the wrapper every text run and <code> became its own column.
+  renderForm(`<form><fieldset><legend>Get omp</legend>
+    <label><input type="radio" name="npm" value="download" checked> Download the matching <code>ompweb-omp</code> and <strong>check</strong> its sha256.</label>
+    <label><input type="radio" name="npm" value="bundle"> Bundle it</label>
+  </fieldset></form>`);
+  const label = screen.getByRole("radio", { name: /Download the matching/ }).closest("label");
+  const [control, text, ...rest] = label.children;
+  assert.equal(control.type, "radio");
+  assert.equal(rest.length, 0, "the label has exactly two flex items: the control and one text block");
+  assert.equal(text.className, "extension-choice-text");
+  assert.ok(text.querySelector("code"), "inline markup stays inside the text block");
+  assert.equal(text.textContent.trim(), "Download the matching ompweb-omp and check its sha256.");
+});

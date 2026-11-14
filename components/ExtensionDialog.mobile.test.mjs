@@ -109,7 +109,7 @@ test("both ask grids pin their column so a wide question cannot stretch the pane
   const grids = html.match(/grid-template-columns:minmax\(0, 1fr\)/g) ?? [];
   assert.equal(grids.length, 2, "the questions grid and each question's fieldset");
   assert.equal((html.match(/<fieldset [^>]*min-width:0/g) ?? []).length, 1);
-  assert.match(html, /<div style="padding:14px">/);
+  assert.match(html, /<div class="extension-dialog-body">/);
 });
 
 test("the option row, its text and its preview cannot push past the panel edge", () => {
@@ -117,7 +117,8 @@ test("the option row, its text and its preview cannot push past the panel edge",
   // The label is a flex row inside the fieldset's grid: it needs a zero
   // minimum and wrapping text of its own, otherwise a long option label or
   // preview keeps the track at min-content and overflows.
-  assert.match(html, /<label style="[^"]*display:flex[^"]*min-width:0[^"]*"/);
+  assert.match(html, /<label class="extension-choice">/);
+  assert.match(ruleBody(".extension-choice"), /display:\s*flex;[^}]*min-width:\s*0;/);
   assert.match(html, /<span style="min-width:0;overflow-wrap:anywhere">Red/);
   // A preview used to be `white-space: pre` + `overflow-x: auto`, which turns
   // every option row into its own horizontal scroller.
