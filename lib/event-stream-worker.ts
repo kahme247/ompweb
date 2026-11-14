@@ -2015,10 +2015,8 @@ function reconcileOutbox(client: Client, n: number, sessionId: string, value: un
       clearTimeout(outboxItems.get(id)?.retryTimer);
       outboxItems.delete(id);
     }
-    if (removedIds.size > 0) {
-      await refreshOutbox();
-      broadcastOutbox();
-    }
+    await refreshOutbox();
+    broadcastOutbox();
     post(client, { outboxReconciled: n });
     if (removedIds.size > 0) sendOutbox(sessionId);
   });
