@@ -1989,7 +1989,7 @@ function reconcileOutbox(client: Client, n: number, sessionId: string, value: un
         const entries = request.result as LocalOutboxEntry[];
         const byId = new Map(entries.map((entry) => [entry.id, entry] as const));
         for (const entry of entries) {
-          if (entry.sessionId !== sessionId || !confirmed.has(entry.id) || entry.replaces === undefined) continue;
+          if (entry.sessionId !== sessionId || !confirmed.has(entry.id)) continue;
           removedIds.add(entry.id);
           store.delete(entry.id);
           if (entry.replaces === undefined) continue;

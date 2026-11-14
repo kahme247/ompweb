@@ -7904,6 +7904,32 @@ for (const outcome of ["accepted", "refused"]) test(`Retry of a server-known fai
   }
 });
 
+test("a settled server retry ID reconciles stale local ancestry without a pending server entry", async () => {
+  resetWorld();
+  const sid = "settled-server-retry";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  const root = { id: "settled-browser-root", sessionId: sid, scope: "test-scope", mode: "prompt", message: "same intent", state: "failed", createdAt: 1 };
+  const copy = { id: "settled-server-copy", sessionId: sid, scope: "test-scope", mode: "prompt", message: root.message, state: "failed", replaces: root.id, createdAt: 2 };
+  const nativeBridge = { id: "settled-native-bridge", sessionId: sid, scope: "test-scope", mode: "prompt", message: "not proven stored locally", state: "sending", createdAt: 3 };
+  world.outbox = [root, copy, nativeBridge];
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === `/api/sessions/${sid}/state`,
+    produce: async () => ({ value: { running: false, outbox: [], outboxSettledIds: [copy.id, nativeBridge.id], nativeSettledIds: [nativeBridge.id] } }),
+  });
+
+  const w = await mountSession(sid);
+  await act(async () => {
+    workerPort.onmessage({ data: { outbox: world.outbox.map((entry) => ({ ...entry, state: "sending" })) } });
+    await settle();
+  });
+
+  assert.ok(world.outboxReconciles.some(({ sessionId, confirmedIds }) => sessionId === sid && confirmedIds.includes(copy.id)));
+  assert.deepEqual(world.outbox.map((entry) => entry.id), [nativeBridge.id], "a native settlement without local proof does not discard its browser row");
+  assert.equal(w.latest.heldMessages.some((held) => held.id === nativeBridge.id), true);
+  assert.equal(w.latest.heldMessages.some((held) => held.id === root.id || held.id === copy.id), false);
+});
+
 test("Retry does not enqueue D when server-known lineage reconciliation fails", async () => {
   resetWorld();
   const sid = "server-known-reconcile-fails";
