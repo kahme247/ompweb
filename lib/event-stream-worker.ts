@@ -1928,7 +1928,8 @@ function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
       await refreshOutbox();
       broadcastOutbox();
       post(client, { outboxAdded: n });
-      // The original add owns this row's send; duplicate callers only share its committed entry.
+      // A peer may commit and exit before sending; replaying the existing ID remains idempotent.
+      sendOutbox(reused.sessionId);
       return;
     }
     // Committed: the entry is accepted whatever follows, or a resend from the composer would duplicate it under a new id.
