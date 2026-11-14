@@ -9,6 +9,7 @@ import test from "node:test";
 const WORKER = fileURLToPath(new URL("./omp-web-update-worker.js", import.meta.url));
 const ATTEMPT = "11111111-2222-3333-4444-555555555555";
 const REPO = dirname(dirname(WORKER));
+const VERSION = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")).version;
 const PLATFORM = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
 // A session omp that says hello as the runner does.
 const RUNNER = `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 18.99.0; exit 0; fi\necho '{"t":"hello","proto":1}'\nexec cat >/dev/null\n`;
@@ -45,8 +46,8 @@ function runWorker(t, { npmExit = 0, startExit = 0, activeExit = 0, candidate = 
   writeCandidate(template, candidate, log);
   // Where the candidate's fetch-omp keeps this version's runner (lib/omp/omp-cli.ts fetchedOmpBin): already there.
   if (candidate === "ok") {
-    mkdirSync(join(dir, "agent", "omp-web", "omp", "0.6.0"), { recursive: true });
-    writeFileSync(join(dir, "agent", "omp-web", "omp", "0.6.0", "ompweb-omp"), RUNNER, { mode: 0o755 });
+    mkdirSync(join(dir, "agent", "omp-web", "omp", VERSION), { recursive: true });
+    writeFileSync(join(dir, "agent", "omp-web", "omp", VERSION, "ompweb-omp"), RUNNER, { mode: 0o755 });
   }
   // The scratch install (`npm install --prefix <dir> …`) succeeds; the global one exits npmExit.
   writeFileSync(join(dir, "npm"), `#!/bin/sh\necho "npm $*" >> "${log}"\nif [ "$2" = --prefix ]; then mkdir -p "$3/node_modules/@kahme247" && ln -s "${template}" "$3/node_modules/@kahme247/ompweb"; exit 0; fi\nexit ${npmExit}\n`, { mode: 0o755 });
