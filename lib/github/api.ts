@@ -481,6 +481,7 @@ function writeOutcomeError(error: unknown): Error {
   }
   return new Error(UNKNOWN_WRITE_OUTCOME);
 }
+
 const THREAD_QUERY = `query($id: ID!) {
   node(id: $id) { ... on PullRequestReviewThread { id path line pullRequest { number repository { nameWithOwner } } } }
 }`;
