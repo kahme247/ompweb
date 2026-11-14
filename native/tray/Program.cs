@@ -177,8 +177,8 @@ class TrayApplication : IDisposable
         if (_openBrowser) { /* explicit */ }
         else if (!_startup && cfgOpenBrowser == true) _openBrowser = true;
 
-        var nextDir = Path.Combine(_repoRoot, ".next");
-        if (_effectiveMode == "start" && !Directory.Exists(nextDir))
+        var buildIndex = Path.Combine(_repoRoot, "dist", "index.html");
+        if (_effectiveMode == "start" && !File.Exists(buildIndex))
         {
             _effectiveMode = "dev";
             if (_effectivePort == 30177) _effectivePort = 30178;
@@ -270,8 +270,8 @@ class TrayApplication : IDisposable
         }
         else
         {
-            var nextBin = Path.Combine(_repoRoot, "node_modules", "next", "dist", "bin", "next");
-            psi.Arguments = $"\"{nextBin}\" dev -H {_effectiveHostname} -p {_effectivePort}";
+            var bunLauncher = Path.Combine(_repoRoot, "bin", "bun-runtime.js");
+            psi.Arguments = $"\"{bunLauncher}\" --hot server/dev.ts -H {_effectiveHostname} -p {_effectivePort}";
         }
 
         psi.EnvironmentVariables["OMP_WEB_PORT"] = _effectivePort.ToString();
