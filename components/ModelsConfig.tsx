@@ -1037,7 +1037,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean }) {
+export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, initialModelRoles = false }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean; initialModelRoles?: boolean }) {
   const { t, tn } = useI18n();
   const isMobile = useIsMobile();
   const [config, setConfig] = useState<ModelsFileData>({ providers: {} });
@@ -1045,9 +1045,9 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
-  const [subTab, setSubTab] = useState<"connected" | "custom" | "system">("connected");
-  const [systemTab, setSystemTab] = useState<"registry" | "picker" | "roles" | "fallbacks">("registry");
-  const [selection, setSelection] = useState<Selection | null>(null);
+  const [subTab, setSubTab] = useState<"connected" | "custom" | "system">(initialModelRoles ? "system" : "connected");
+  const [systemTab, setSystemTab] = useState<"registry" | "picker" | "roles" | "fallbacks">(initialModelRoles ? "roles" : "registry");
+  const [selection, setSelection] = useState<Selection | null>(initialModelRoles ? { type: "roles" } : null);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [runtimeModels, setRuntimeModels] = useState<RuntimeModelEntry[]>([]);

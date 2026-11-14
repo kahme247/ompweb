@@ -98,3 +98,15 @@ test("the browser transport control shows the WebSocket link when the server sen
     unmount();
   }
 });
+
+test("default model settings open the OMP model roles directly", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({});
+  t.after(() => { cleanup(); globalThis.fetch = originalFetch; });
+  let view;
+  const props = { ...settingsProps, activeTab: "models", onSelectTab: (activeTab) => view.rerender(createElement(SettingsConfig, { ...props, activeTab })) };
+  view = render(createElement(SettingsConfig, props));
+  await settle();
+  fireEvent.click(within(view.container).getByRole("button", { name: "Open OMP settings" }));
+  assert.ok(await within(view.container).findByRole("combobox", { name: "Model override for default" }));
+});
