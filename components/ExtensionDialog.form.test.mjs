@@ -54,6 +54,15 @@ test("agent markup never becomes live HTML: scripts, handlers and buttons are dr
   assert.equal(window.pwned, undefined);
 });
 
+test("form options preserve preformatted text and indentation", () => {
+  renderForm(`<form><label><input type="radio" name="choice" value="one"> Example <pre>first line\n  indented second line</pre></label></form>`);
+  const pre = screen.getByRole("radio", { name: /Example/ }).closest("label").querySelector("pre");
+  assert.ok(pre);
+  assert.equal(pre.textContent, "first line\n  indented second line");
+  assert.equal(pre.tabIndex, 0);
+  assert.ok(screen.getByRole("radio", { name: /indented second line/ }));
+});
+
 test("changed answers are submitted, an unchecked radio group is omitted", async () => {
   const user = userEvent.setup();
   const responses = renderForm(`<form>
