@@ -479,8 +479,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   // "!" shares output with the model (riskier, root-style warning); "!!" stays local (plain terminal).
   const shellMode = bashMode ? (bashExcluded ? "local" : "model") : undefined;
-  // Side questions stay separate from the main run's queue and Stop action.
-  const btwMode = /^\/btw(\s|$)/.test(trimmedValue);
+  // Side questions stay separate from the main run's queue and Stop action. Without builtin dispatch `/btw` is
+  // ordinary text, so the composer keeps its Queue fallback.
+  const btwMode = Boolean(onBuiltinCommand) && /^\/btw(\s|$)/.test(trimmedValue);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashMatch, setSlashMatch] = useState<SlashQueryMatch | null>(null);

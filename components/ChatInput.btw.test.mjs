@@ -62,6 +62,16 @@ for (const behavior of ["queue", "steer"]) {
   });
 }
 
+test("without builtin dispatch, /btw during a run keeps the Queue button and queues as ordinary text", async () => {
+  localStorage.setItem("omp-web:submit-during-run", "queue");
+  const user = userEvent.setup();
+  const { calls } = renderComposer({ isStreaming: true, onBuiltinCommand: undefined });
+  await user.type(screen.getByRole("textbox"), "/btw what is 2+2");
+  assert.equal(screen.queryByRole("button", { name: "Send", exact: true }), null);
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.deepEqual(calls, [["onFollowUp", "/btw what is 2+2"]]));
+});
+
 test("/btw with an attachment is refused and keeps the draft and the attachment", async () => {
   const user = userEvent.setup();
   const { calls, ref } = renderComposer({ isStreaming: false });
