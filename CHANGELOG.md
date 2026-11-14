@@ -59,6 +59,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- **Retry deduplication survives long browser-offline periods.** The server keeps each session's content-free canonical retry mapping until successful session deletion; ordinary receipts and aliases retain the existing eight-day expiry, and deletion leaves pending entries and pinned GitHub receipts untouched.
 - The repository moved to ompweb-dev/ompweb; old links redirect.
 - **omp updates with ompweb: the omp row no longer runs `omp update`.** Each ompweb release ships its own omp runner, so Settings → Hosts shows the host's omp version with "Updated with ompweb" and no update button. Hosts refuse an omp update request, and `/api/omp-update` keeps only `restart`.
 - **Sorting, pinning and reordering work in the cluster's sidebar group.** The group listed the cluster's shared projects first whatever the sort, and Move up/down, drag and pins only worked among projects of the same machine, so a pinned or alphabetically earlier project of a member could not move above a shared one. The group is now one list: the chosen sort, pins and manual order apply across shared projects and every member's own projects.

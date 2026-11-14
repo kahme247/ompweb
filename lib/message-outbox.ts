@@ -1,7 +1,7 @@
 // The web server's leg of the message outbox (docs/specs/2026-11-04-message-outbox-design.md, O2 to O4 and O6): a
 // message sent to an existing session is stored here before `outbox_add` answers, then sent to omp by one dispatcher
 // per session, oldest first and one at a time, and leaves once omp has it. The `session` channel shows the entries.
-import { chmodSync, closeSync, mkdirSync, openSync } from "fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from "fs";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { join } from "path";
 import { Database } from "bun:sqlite";
@@ -321,6 +321,30 @@ function entryBelongsToSession(entry: Row, sessionId: string): boolean {
   const keys = sessionKeys(sessionId);
   return db().prepare(`SELECT 1 FROM entries WHERE id = ? AND ${entrySessionMatch(keys)}`).get(entry.id, ...keys, ...keys, ...keys) !== null;
 }
+function receiptPinCondition(database: Database): string {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'github_receipt_pins'").get()
+    ? " AND NOT EXISTS (SELECT 1 FROM github_receipt_pins WHERE entry_id = entries.id)"
+    : "";
+}
+
+function pruneDelivered(database: Database, cutoff: number): void {
+  const pinned = receiptPinCondition(database);
+  database.prepare(`DELETE FROM entries WHERE state = 'delivered' AND done_at < ? AND (replacement_id IS NULL OR replacement_digest IS NULL)${pinned}`)
+    .run(cutoff);
+}
+
+/** Retry mappings are content-free but needed while stale browser copies may replay this session. */
+export function forgetSessionReplacementMappings(sessionId: string): void {
+  if (!existsSync(join(getAgentDir(), "omp-web", "outbox.db"))) return;
+  const database = db();
+  const keys = sessionKeys(sessionId);
+  const pinned = receiptPinCondition(database);
+  database.transaction(() => {
+    database.prepare(`DELETE FROM entries WHERE ${entrySessionMatch(keys)} AND state = 'delivered'
+      AND replacement_id IS NOT NULL AND replacement_digest IS NOT NULL${pinned}`)
+      .run(...keys, ...keys, ...keys);
+  }).immediate();
+}
 
 /** Call `listener` with the session's entries after every change. */
 export function onOutboxChange(sessionId: string, listener: (entries: OutboxEntry[]) => void): () => void {
@@ -489,7 +513,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
 
   const now = Date.now();
   const database = db();
-  database.prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ?").run(now - KEEP_DELIVERED_MS);
+  pruneDelivered(database, now - KEEP_DELIVERED_MS);
   const keys = sessionKeys(sessionId);
   const entryBytes = Buffer.byteLength(JSON.stringify({ id, sessionId, mode, message, images, uploads, state: "waiting_host", createdAt: now })) + 8192;
   let result: AddResult;
@@ -673,7 +697,7 @@ export function startOutbox(): void {
   try {
     db();
     recoverDelivering(undefined, true);
-    db().prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ?").run(Date.now() - KEEP_DELIVERED_MS);
+    pruneDelivered(db(), Date.now() - KEEP_DELIVERED_MS);
     db().prepare("DELETE FROM completed_uploads WHERE at < ?").run(Date.now() - STAGED_MAX_AGE_MS);
   } catch (error) {
     console.warn(`[omp-web] outbox startup failed: ${error instanceof Error ? error.message : String(error)}`);
