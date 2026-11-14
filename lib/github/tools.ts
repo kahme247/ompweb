@@ -2,7 +2,7 @@ import type { HostToolDefinition } from "../pi-types";
 // Types only: agent-tools.ts imports this module for its tool names, so a runtime import back would be a cycle.
 import type { AgentToolContext } from "../agent-tools";
 import { startsUnasked, type AgentToolHost } from "../agent-tool-hosts";
-import { readGithubWritesUnaskedFromDisk } from "../web-settings";
+import { readAgentToolsEnabledFromDisk, readGithubWritesUnaskedFromDisk } from "../web-settings";
 import { baselineCursor, capName } from "./events";
 import { checkGh, defaultGhRunner, formatTarget, parseGithubTarget, type GhRunner, type GithubTarget } from "./gh";
 import { fetchReviewComment, fetchSnapshot, fetchThread, postComment, readItem, resolveThread, type ReadPart } from "./api";
@@ -137,6 +137,7 @@ async function allowWrite(ops: GithubToolOps, ctx: AgentToolContext, title: stri
 
 /** validate → gh check → permission → act. */
 export async function executeGithubTool(name: string, args: Record<string, unknown>, ops: GithubToolOps, ctx: AgentToolContext): Promise<unknown> {
+  if (!readAgentToolsEnabledFromDisk()) throw new Error('Agent tools are disabled. Enable "Agent tools" in omp-web Settings (System) first.');
   if (name === "github_resolve_thread") {
     const threadId = stringArg(args, "threadId");
     if (!/^PRRT_[A-Za-z0-9_-]{1,200}$/.test(threadId)) throw new Error('Agent tool argument "threadId" is not a review thread id (PRRT_...).');
