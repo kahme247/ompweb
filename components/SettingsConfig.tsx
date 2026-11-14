@@ -180,6 +180,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
   { id: "extension-tool-requests", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.extensionToolRequests", descKey: "settingsConfig.extensionToolRequestsDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Extension Tool Requests", fallbackDesc: "Automatically approve extension tool authorization requests.", scope: "Native OMP" },
   // AI Model Defaults
+  { id: "default-model", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.defaultModel", descKey: "settingsConfig.defaultModelDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Default AI Model", fallbackDesc: "Choose the default model in OMP model roles.", scope: "Native OMP" },
   { id: "reasoning", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.reasoning", descKey: "settingsConfig.reasoningDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Reasoning", fallbackDesc: "Default effort level for thinking-capable models.", scope: "Native OMP" },
   { id: "auto-thinking-source", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.autoThinkingSource", descKey: "settingsConfig.autoThinkingSourceDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Auto Thinking Source", fallbackDesc: "Choose prompt classification or the publisher default with omp fallback.", scope: "Native OMP" },
   { id: "verbosity", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.verbosity", descKey: "settingsConfig.verbosityDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Verbosity", fallbackDesc: "Response detail level for supporting providers.", scope: "Native OMP" },
@@ -927,6 +928,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   } = useSpeechSynthesis();
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  const openModelRolesRef = useRef(false);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
   const [wordCompletion, setWordCompletion] = useState<WordCompletionMode>(() => getWordCompletionMode());
   const connectionDiagnostics = useConnectionDiagnosticsEnabled();
@@ -1134,12 +1136,14 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   }, [trimmedQuery, t, nativeSettings?.defaultThinkingLevel]);
 
   const openSearchResult = useCallback((result: SearchResult) => {
+    openModelRolesRef.current = false;
     startTransition(() => onSelectTab(result.tab));
     setHighlightId(result.kind === "setting" ? result.id : null);
     setSearchQuery("");
   }, [onSelectTab]);
 
   const handleSelectTab = useCallback((tab: SettingsTab) => {
+    openModelRolesRef.current = false;
     startTransition(() => onSelectTab(tab));
   }, [onSelectTab]);
 
@@ -1514,6 +1518,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.modelDefaultsDesc")}</p>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+                  <NativeSetting searchId="default-model" label={t("settingsConfig.defaultModel")} description={t("settingsConfig.defaultModelDesc")} scope="Native OMP">
+                    <button type="button" id="open-omp-model-roles" aria-labelledby="open-omp-model-roles" aria-label={t("settingsConfig.openOmpSettings")} className="settings-back ui-focus-ring" onClick={() => { openModelRolesRef.current = true; onSelectTab("providers"); }}>{t("settingsConfig.openOmpSettings")}</button>
+                  </NativeSetting>
                   <NativeSetting searchId="reasoning" label={t("settingsConfig.reasoning")} description={t("settingsConfig.reasoningDesc")} scope="Native OMP">
                     <select
                       style={nativeSelectStyle}
@@ -1585,7 +1592,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsTabs.providers.label")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsTabs.providers.description")}</p>
                 </div>
-                <ModelsConfig embedded onClose={onClose} onSaved={onModelsSaved} />
+                <ModelsConfig embedded onClose={onClose} onSaved={onModelsSaved} initialModelRoles={openModelRolesRef.current} />
               </div>
             )}
 
