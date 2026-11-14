@@ -70,8 +70,8 @@ declare global {
 async function defaultDeliver(sessionId: string, id: string, message: string): Promise<Delivery> {
   try {
     // Lazy: message-outbox pulls in rpc-manager, which will load the agent tools that load this module.
-    const { runOutboxCommand, outboxScope } = await import("../message-outbox");
-    return await deliveryOf(await runOutboxCommand(sessionId, { type: "outbox_add", id, scope: outboxScope(), mode: "prompt", message }, false, "omp-web:github-watch"));
+    const { runOutboxCommand, outboxScope, GITHUB_WATCH_OUTBOX_OWNER } = await import("../message-outbox");
+    return await deliveryOf(await runOutboxCommand(sessionId, { type: "outbox_add", id, scope: outboxScope(), mode: "prompt", message }, false, GITHUB_WATCH_OUTBOX_OWNER));
   } catch {
     return "retry";
   }

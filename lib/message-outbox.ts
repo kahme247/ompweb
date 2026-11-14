@@ -21,6 +21,7 @@ import type { OutboxEntry, OutboxMode } from "./types";
 import { MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE } from "./upload-limits";
 import { snapshotOutboxUploads, UploadError, type OutboxUploadReceipt } from "./uploads";
 import { resolveWebAuthSecret } from "./web-auth-secret";
+import { readAgentToolsEnabledFromDisk } from "./web-settings";
 
 /** Delivered (and removed) ids answer a repeated `outbox_add` this long (spec O2: idempotent by id); the browser gives
  * up resending after 7 days, so a resend always finds its id. */
@@ -29,6 +30,7 @@ export const KEEP_DELIVERED_MS = 8 * 24 * 60 * 60 * 1000;
 export const RETRY_MS = 5_000;
 /** Fixed snapshot budget below the browser link's 32 MiB backlog; per-entry error margin and frame envelope included. */
 export const MAX_OUTBOX_BYTES = 16 * 1024 * 1024;
+export const GITHUB_WATCH_OUTBOX_OWNER = "omp-web:github-watch";
 const MAX_GLOBAL_OUTBOX_BYTES = 256 * 1024 * 1024;
 const MAX_GLOBAL_OUTBOX_ENTRIES = 1000;
 
@@ -63,6 +65,7 @@ interface Row {
 }
 type AddResult =
   | { kind: "full" }
+  | { kind: "paused" }
   | { kind: "conflict" }
   | { kind: "existing"; entry: Row; replaces?: string }
   | { kind: "duplicate"; entry: Row; originalSession: string; replaces: string }
@@ -541,6 +544,8 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
         const confirmsReplacement = confirmedReplacementId(concurrent, sessionId, replaces);
         return { kind: "existing", entry: concurrent, ...(confirmsReplacement ? { replaces: confirmsReplacement } : {}) };
       }
+      // Host discovery may have awaited while another server disabled the watcher.
+      if (owner === GITHUB_WATCH_OUTBOX_OWNER && !readAgentToolsEnabledFromDisk()) return { kind: "paused" };
       const original = typeof replaces === "string" ? row(replaces) : null;
       const originalMatchesSession = original !== null && entryBelongsToSession(original, sessionId);
       if (original && originalMatchesSession && original.replacement_id) {
@@ -624,6 +629,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
     return commandErrorResponse(error);
   }
   if (result.kind === "conflict") return Response.json({ error: "This message id belongs to another session", code: "outbox_id_conflict" }, { status: 409 });
+  if (result.kind === "paused") return Response.json({ error: "Agent tools are disabled; GitHub updates are paused.", code: "agent_tools_disabled" }, { status: 503 });
   if (result.kind === "full") return Response.json({ error: "The message outbox is full. It will accept more messages after held entries drain or are deleted.", code: "outbox_full" }, { status: 429 });
   if (result.kind === "existing") {
     const entry = toEntry(result.entry);
