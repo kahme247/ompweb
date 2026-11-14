@@ -6,12 +6,14 @@ import { isSessionSettled } from "@oh-my-pi/pi-coding-agent/session/session-sett
 import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { queuedClientMessageIds } from "../correlation";
 import type { CommandTable, FrameTable } from "./types";
 
 // shortcut: RPC's get_state first awaits its goal controller and counts a scheduled goal turn as unsettled;
 // that controller is RPC transport state, so add it here when the runner ports goals.
 export function sessionState(session: AgentSession) {
 	const queued = session.getQueuedMessages();
+	const clientMessageIds = queuedClientMessageIds(session);
 	return {
 		model: session.model,
 		thinkingLevel: session.thinkingLevel,
@@ -27,10 +29,12 @@ export function sessionState(session: AgentSession) {
 		queuedMessageCount: session.queuedMessageCount,
 		hasPendingAsyncWork: session.hasPendingAsyncWork(),
 		isSettled: isSessionSettled(session),
+		supportsClientMessageIds: true,
 		queuedMessages: {
 			steering: [...queued.steering],
 			followUp: [...queued.followUp],
 			liveSteered: queued.liveSteered,
+			...(clientMessageIds ? { clientMessageIds } : {}),
 		},
 		todoPhases: session.getTodoPhases(),
 		fastModeEnabled: session.isFastModeEnabled(),

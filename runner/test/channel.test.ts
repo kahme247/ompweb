@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { HostChannel } from "../src/channel";
 import { createTestSession, type Frame, startHost, type TestHost, type TestSession } from "./harness";
 
@@ -72,6 +73,47 @@ describe("ompweb channel", () => {
 		expect(types[0]).toBe("agent_start");
 		expect(types).toContain("message_end");
 		expect(JSON.stringify(end)).toContain("scripted reply");
+	});
+
+	it("identifies an image-only prompt using the capability negotiated by get_state", async () => {
+		host = await startHost();
+		test = await createTestSession({ responses: [{ content: ["received"] }] });
+		await host.connected;
+		const state = await host.command("get_state");
+		const supportsIds = isRecord(state.data) && state.data.supportsClientMessageIds === true;
+		expect(await host.command("prompt", {
+			message: "",
+			images: [{
+				type: "image",
+				data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5S8AAAAASUVORK5CYII=",
+				mimeType: "image/png",
+			}],
+			...(supportsIds ? { clientMessageId: "screenshot-intent" } : {}),
+		})).toMatchObject({ ok: true });
+		const echo = await host.waitFor(frame => eventType(frame) === "message_end"
+			&& isRecord(frame.event) && isRecord(frame.event.message) && frame.event.message.role === "user");
+		expect(echo.event).toMatchObject({ clientMessageId: "screenshot-intent" });
+		await host.waitFor(frame => eventType(frame) === "agent_end");
+		expect(await host.command("get_client_message_status", { clientMessageIds: ["screenshot-intent"] }))
+			.toMatchObject({ ok: true, data: { persistedClientMessageIds: ["screenshot-intent"], unresolvedClientMessageIds: [] } });
+	});
+
+	it("keeps correlated queue IDs in get_state for a reconnecting host", async () => {
+		host = await startHost();
+		test = await askSession();
+		await host.connected;
+		await host.command("prompt", { message: "start" });
+		const request = await host.waitFor(frame => frame.t === "ui_request");
+		await host.command("follow_up", { message: "later", clientMessageId: "queued-intent" });
+		// The mock model records circular call contexts; real model descriptors have no call log.
+		test.mock.calls.length = 0;
+		expect(await host.command("get_state")).toMatchObject({
+			ok: true,
+			data: { queuedMessages: { followUp: ["later"], clientMessageIds: { steering: [], followUp: ["queued-intent"] } } },
+		});
+		await host.command("remove_queued_message", { message: "later", queue: "followUp" });
+		host.send({ t: "ui_response", id: request.id, value: { data: { q: "continue" } } });
+		await test.session.waitForIdle();
 	});
 
 	it("lets the host answer the ask tool's formDialog", async () => {
