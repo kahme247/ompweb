@@ -160,6 +160,14 @@ function checkOf(node: GqlContext): { name: string; conclusion: string | null; s
 
 const present = <T>(nodes: (T | null)[]): T[] => nodes.filter((n): n is T => n !== null);
 
+function nextPageCursor(cursor: string | null, seen: Set<string>): string {
+  if (typeof cursor !== "string" || !cursor || seen.has(cursor)) {
+    throw new Error("GitHub returned a missing or repeated pagination cursor.");
+  }
+  seen.add(cursor);
+  return cursor;
+}
+
 async function allThreadComments<T extends GqlComment>(
   run: GhRunner,
   threadId: string,
@@ -167,9 +175,11 @@ async function allThreadComments<T extends GqlComment>(
   query: string,
 ): Promise<T[]> {
   const nodes = present(first.nodes);
+  const seenCursors = new Set<string>();
   let pageInfo = first.pageInfo;
   while (pageInfo.hasNextPage) {
-    const data = await graphql<{ node: { comments: GqlForwardPage<T> } | null }>(run, query, { id: threadId, after: pageInfo.endCursor });
+    const after = nextPageCursor(pageInfo.endCursor, seenCursors);
+    const data = await graphql<{ node: { comments: GqlForwardPage<T> } | null }>(run, query, { id: threadId, after });
     const page = data.node?.comments;
     if (!page) throw new Error(`Review thread ${threadId} was not found.`);
     nodes.push(...present(page.nodes));
@@ -202,8 +212,10 @@ export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?:
     let page = first[conn] as unknown as GqlPage<T> | undefined;
     if (!page) return [];
     let nodes = present(page.nodes);
+    const seenCursors = new Set<string>();
     while (page.pageInfo.hasPreviousPage && !(stopWhenKnown && since && nodes.some((n) => since.has(n.id)))) {
-      page = (await query({ [flag]: true, [cursor]: page.pageInfo.startCursor }))[conn] as unknown as GqlPage<T>;
+      const before = nextPageCursor(page.pageInfo.startCursor, seenCursors);
+      page = (await query({ [flag]: true, [cursor]: before }))[conn] as unknown as GqlPage<T>;
       nodes = [...present(page.nodes), ...nodes];
     }
     return nodes;
@@ -241,8 +253,10 @@ export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?:
     const rollup = commit.statusCheckRollup;
     let nodes = rollup ? present(rollup.contexts.nodes) : [];
     let info = rollup?.contexts.pageInfo;
+    const seenCursors = new Set<string>();
     while (rollup && info?.hasNextPage) {
-      const next = await graphql<{ node: { contexts: GqlContexts } }>(run, CONTEXTS_QUERY, { id: rollup.id, after: info.endCursor });
+      const after = nextPageCursor(info.endCursor, seenCursors);
+      const next = await graphql<{ node: { contexts: GqlContexts } }>(run, CONTEXTS_QUERY, { id: rollup.id, after });
       nodes = [...nodes, ...present(next.node.contexts.nodes)];
       info = next.node.contexts.pageInfo;
     }
@@ -318,6 +332,7 @@ interface ReadThread {
 
 async function readThreads(run: GhRunner, target: GithubTarget): Promise<ReadThread[]> {
   const out: ReadThread[] = [];
+  const seenCursors = new Set<string>();
   let after: string | null = null;
   for (;;) {
     const data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: ReadThread[] } } } } = await graphql(
@@ -328,7 +343,7 @@ async function readThreads(run: GhRunner, target: GithubTarget): Promise<ReadThr
     const { pageInfo, nodes } = data.repository.pullRequest.reviewThreads;
     out.push(...nodes);
     if (!pageInfo.hasNextPage) break;
-    after = pageInfo.endCursor;
+    after = nextPageCursor(pageInfo.endCursor, seenCursors);
   }
   for (const thread of out) {
     thread.comments.nodes = await allThreadComments(run, thread.id, thread.comments, THREAD_COMMENTS_READ_QUERY);
