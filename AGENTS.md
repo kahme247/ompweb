@@ -984,6 +984,7 @@ executor-style promises instead. Server code may use them freely.
   - Event connections own their readiness waits: replacement and unmount settle the old wait as closed, clear its timers/coalesced work and close its observer. Late continuations must not attach streams to an unmounted hook or let a stale connection authorize a new operation. Keep lifetime cleanup separate from the mount-load latch so StrictMode setup/cleanup replay still cleans up observers attached afterward.
   A new chat's first prompt is the exception to "abandoned readiness": when its chat unmounts while omp spawns, `handleSend` still sends the prompt, opens no observer, skips host-tool/roster setup and returns `accepted`. An existing session's messages need no exception: they go through the message outbox (below), which delivers them with no tab involved.
   Ordinary `ChatInput.onSend` returns `Promise<PromptSubmissionResult>` (`accepted` / `rejected` / `superseded`). With `outbox` (an existing session) the composer clears only once `onSend` (or `onSteer`/`onFollowUp`) reports the message stored in the browser's outbox, and only if it still holds what was sent; a refusal leaves it in place. For a new chat only rejection restores composed text/file contents and images through `recoverDraft`; its receipt supplies the promoted real-session draft key when the new chat became a session, otherwise the composer uses the originating key captured before submission. Superseded failures must not reinsert a processed turn or reset a newer run. The composer owns recovery; `useAgentSession.handleSend` must not separately insert failed-send text and duplicate it.
+  Retry roots may be server-known or browser-only. Server-known roots are hidden only on a server-confirmed `replaces`; a browser-only failed root is retired only after a valid accepted receipt for its committed, same-session exact-intent copy, even if a lost-response replay is an empty tombstone without `replaces`. Concurrent same-root holds share one IndexedDB copy and each caller gets its durable-add acknowledgement. Refusals preserve the root; cross-session and unrelated same-text entries remain.
 - **In-session branch** (Continue button / BranchNavigator): reads a historical view of the entry tree within the same file; it does not change the live agent's context. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=` through `handleLeafChange`; never use that read-only path to implement Edit.
 
 ### ToolCall field normalization
@@ -1298,7 +1299,13 @@ during the wait.
   settled ids prevent late ACKs from resurrecting delivered entries. States:
   Sending (browser, locked while its first-leg command may be in flight),
   Waiting to send / Waiting for <host> (Delete), Delivering (locked),
-  Not sent (Delete). The delivery mode is a read-only label. Delete
+  Not sent (Retry, Delete). Retry (`retryHeldMessage`) holds a new entry with the same text, images, uploads and
+  mode and `replaces: <failed id>`, persisted in IndexedDB and sent with `outbox_add`. The server retires a failed
+  original of the same session in the transaction that stores the copy, and the worker (or `sw.js`) deletes the
+  browser's row of it in the commit that deletes the stored copy; a refused copy leaves it. The `outboxStored` it
+  posts carries `replaces`, and the hook marks that original represented at once. Retry holds no copy while one
+  naming the id waits in IndexedDB (true after a remount, a reload or a closed page) or once one was stored, and
+  never sends `outbox_remove`. A `mayHaveBeenSent` entry asks first. The delivery mode is a read-only label. Delete
   (`deleteHeldMessage`) awaits the IndexedDB delete commit for a browser-held
   entry; a server entry sends `outbox_remove`, refused with 409
   `outbox_dispatched` once delivering. A late commit consumes only the original

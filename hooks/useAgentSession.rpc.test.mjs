@@ -106,6 +106,34 @@ class FakeSharedWorker {
             this.port.onmessage?.({ data: { outboxDropped: message.n, ...(error ? { error } : {}) } });
           };
           if (world.outboxDrop) world.outboxDrop(commit);
+        } else if (message.op === "outbox_reconcile") {
+          world.outboxReconciles.push({ sessionId: message.sessionId, confirmedIds: message.confirmedIds });
+          const commit = (error) => {
+            if (!error) {
+              const entries = world.outbox;
+              const confirmed = new Set(message.confirmedIds);
+              const removed = new Set();
+              const sameIntent = (a, b) => a.sessionId === b.sessionId && a.mode === b.mode && a.message === b.message
+                && JSON.stringify(a.images ?? []) === JSON.stringify(b.images ?? [])
+                && JSON.stringify(a.uploads ?? []) === JSON.stringify(b.uploads ?? []);
+              for (const entry of entries) {
+                if (entry.sessionId !== message.sessionId || !confirmed.has(entry.id)) continue;
+                removed.add(entry.id);
+                if (!entry.replaces) continue;
+                const root = entries.find((candidate) => candidate.id === entry.replaces && candidate.sessionId === message.sessionId);
+                if (!root || root.state !== "failed" || !sameIntent(root, entry)) continue;
+                removed.add(root.id);
+                for (const sibling of entries) {
+                  if (sibling.sessionId === message.sessionId && sibling.state === "failed" && sameIntent(sibling, entry)
+                    && (sibling.id === root.id || sibling.replaces === root.id)) removed.add(sibling.id);
+                }
+              }
+              world.outbox = entries.filter((entry) => !removed.has(entry.id));
+              this.port.onmessage?.({ data: { outbox: world.outbox.map((entry) => ({ ...entry, state: entry.state ?? "sending" })) } });
+            }
+            this.port.onmessage?.({ data: { outboxReconciled: message.n, ...(error ? { error } : {}) } });
+          };
+          if (world.outboxReconcile) world.outboxReconcile(message, commit);
           else commit();
         }
       },
@@ -180,7 +208,8 @@ const world = {
   outbox: [], // held entries the fake dispatcher has not sent yet
   outboxHold: false,
   outboxCommit: null, // a test may hold the worker's durable-commit acknowledgement
-  outboxDrop: null,
+  outboxReconcile: null,
+  outboxReconciles: [],
 };
 
 async function fetchStub(url, init = {}) {
@@ -479,6 +508,8 @@ function resetWorld() {
   world.outboxHold = false;
   world.outboxCommit = null;
   world.outboxDrop = null;
+  world.outboxReconcile = null;
+  world.outboxReconciles.length = 0;
   workerPort?.onmessage?.({ data: { outbox: [] } });
 }
 
@@ -7806,6 +7837,228 @@ test("a 409 deleting a dispatched outbox message shows a notice and keeps the bu
   assert.equal(w.latest.heldMessages.some((held) => held.id === entry.id), true);
 });
 
+/** The worker's report that the server stored (`outbox_add` 200) the copy a Retry held, naming the original it
+ * retired with that add, or that it refused it for good. */
+const storeCopy = () => {
+  const { entry } = world.lastOutboxAdd;
+  world.outbox = world.outbox.filter((held) => held.id !== entry.id && held.id !== entry.replaces);
+  workerPort.onmessage({ data: { outboxStored: { ...entry, state: "held" } } });
+  workerPort.onmessage({ data: { outbox: world.outbox.map((held) => ({ ...held, state: held.state ?? "sending" })) } });
+};
+const refuseCopy = (error) => workerPort.onmessage({ data: { outbox: [{ ...world.lastOutboxAdd.entry, state: "failed", error }] } });
+const removeCalls = (sid) => callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "outbox_remove").map((call) => call.body);
+const copiesOf = (message) => world.outbox.filter((held) => held.message === message);
+/** Mounts `sid` as a page load does: /state lists the server's failed entry, which opens the session channel. */
+async function mountWithFailed(sid, entry) {
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === `/api/sessions/${sid}/state`,
+    produce: async () => ({ value: { running: false, outbox: [entry], outboxScope: "test-scope" } }),
+  });
+  const w = await mountSession(sid);
+  assert.equal(w.latest.heldMessages.some((held) => held.id === entry.id && held.state === "failed"), true);
+  return w;
+}
+async function mountWithServerKnownCopy(sid, serverCopy, localEntries) {
+  world.outbox = localEntries;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === `/api/sessions/${sid}/state`,
+    produce: async () => ({ value: { running: false, outbox: [serverCopy], outboxScope: "test-scope" } }),
+  });
+  const w = await mountSession(sid);
+  await act(async () => {
+    workerPort.onmessage({ data: { outbox: world.outbox.map((entry) => ({ ...entry, state: entry.state ?? "sending" })) } });
+  });
+  await settle();
+  return w;
+}
+
+for (const outcome of ["accepted", "refused"]) test(`Retry of a server-known failed copy keeps C as the root when D is ${outcome}`, async () => {
+  resetWorld();
+  const sid = `server-known-retry-${outcome}`;
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  const root = { id: "browser-root", sessionId: sid, scope: "test-scope", mode: "prompt", message: "same intent", state: "failed", createdAt: 1 };
+  const copy = { id: "server-copy", sessionId: sid, scope: "test-scope", mode: "prompt", message: root.message, state: "failed", replaces: root.id, createdAt: 2 };
+  const serverCopy = { id: copy.id, sessionId: sid, mode: copy.mode, message: copy.message, state: "failed", error: "server refusal", createdAt: 2 };
+  const w = await mountWithServerKnownCopy(sid, serverCopy, [root, copy]);
+
+  assert.ok(world.outboxReconciles.some(({ sessionId, confirmedIds }) => sessionId === sid && confirmedIds.includes(copy.id)));
+  assert.equal(world.outbox.some((entry) => entry.id === root.id || entry.id === copy.id), false, "authoritative C consumes its stale local chain");
+  assert.equal(w.latest.heldMessages.some((held) => held.id === root.id), false, "browser-only O is no longer actionable");
+  assert.equal(w.latest.heldMessages.some((held) => held.id === copy.id && held.state === "failed"), true, "server C remains visible");
+
+  await act(async () => { await w.latest.retryHeldMessage(copy.id); });
+  const retry = world.lastOutboxAdd.entry;
+  assert.equal(retry.replaces, copy.id, "the worker receives server C as the explicit retry root");
+
+  if (outcome === "refused") {
+    await act(async () => { refuseCopy("upload_missing"); });
+    assert.equal(w.latest.heldMessages.some((held) => held.id === copy.id && held.local === false && held.state === "failed"), true);
+    assert.equal(w.latest.heldMessages.some((held) => held.id === retry.id && held.local === true && held.state === "failed"), true);
+    assert.equal(w.latest.heldMessages.some((held) => held.id === root.id), false);
+  } else {
+    await act(async () => { storeCopy(); });
+    assert.equal(w.latest.heldMessages.some((held) => held.id === copy.id), false, "the accepted D represents C");
+    assert.equal(w.latest.heldMessages.some((held) => held.id === root.id), false);
+    assert.equal(w.latest.heldMessages.some((held) => held.id === retry.id && held.state === "held"), true);
+  }
+});
+
+test("a settled server retry ID reconciles stale local ancestry without a pending server entry", async () => {
+  resetWorld();
+  const sid = "settled-server-retry";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  const root = { id: "settled-browser-root", sessionId: sid, scope: "test-scope", mode: "prompt", message: "same intent", state: "failed", createdAt: 1 };
+  const copy = { id: "settled-server-copy", sessionId: sid, scope: "test-scope", mode: "prompt", message: root.message, state: "failed", replaces: root.id, createdAt: 2 };
+  const nativeBridge = { id: "settled-native-bridge", sessionId: sid, scope: "test-scope", mode: "prompt", message: "not proven stored locally", state: "sending", createdAt: 3 };
+  world.outbox = [root, copy, nativeBridge];
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === `/api/sessions/${sid}/state`,
+    produce: async () => ({ value: { running: false, outbox: [], outboxSettledIds: [copy.id, nativeBridge.id], nativeSettledIds: [nativeBridge.id] } }),
+  });
+
+  const w = await mountSession(sid);
+  await act(async () => {
+    workerPort.onmessage({ data: { outbox: world.outbox.map((entry) => ({ ...entry, state: "sending" })) } });
+    await settle();
+  });
+
+  assert.ok(world.outboxReconciles.some(({ sessionId, confirmedIds }) => sessionId === sid && confirmedIds.includes(copy.id)));
+  assert.deepEqual(world.outbox.map((entry) => entry.id), [nativeBridge.id], "a native settlement without local proof does not discard its browser row");
+  assert.equal(w.latest.heldMessages.some((held) => held.id === nativeBridge.id), true);
+  assert.equal(w.latest.heldMessages.some((held) => held.id === root.id || held.id === copy.id), false);
+});
+
+test("Retry does not enqueue D when server-known lineage reconciliation fails", async () => {
+  resetWorld();
+  const sid = "server-known-reconcile-fails";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  world.lastOutboxAdd = undefined;
+  world.outboxReconcile = (_message, commit) => commit("Could not reconcile local outbox");
+  const root = { id: "failed-browser-root", sessionId: sid, scope: "test-scope", mode: "prompt", message: "same intent", state: "failed", createdAt: 1 };
+  const copy = { id: "failed-server-copy", sessionId: sid, scope: "test-scope", mode: "prompt", message: root.message, state: "failed", replaces: root.id, createdAt: 2 };
+  const serverCopy = { id: copy.id, sessionId: sid, mode: copy.mode, message: copy.message, state: "failed", createdAt: 2 };
+  const w = await mountWithServerKnownCopy(sid, serverCopy, [root, copy]);
+
+  await act(async () => { await w.latest.retryHeldMessage(copy.id); });
+  assert.equal(world.lastOutboxAdd, undefined, "failed local reconciliation never stores a retry through stale ancestry");
+  assert.deepEqual(world.outbox.map((entry) => entry.id).sort(), [root.id, copy.id].sort());
+  assert.equal(w.latest.heldMessages.some((held) => held.id === copy.id && held.state === "failed"), true);
+  assert.equal(w.latest.notices.some((notice) => notice.type === "error" && /reconcile/i.test(notice.message)), true);
+});
+
+test("Retry holds one identical copy that names the failed original and sends no outbox_remove", async () => {
+  resetWorld();
+  const sid = "outbox-retry";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  const entry = { id: "failed-once", sessionId: sid, mode: "followUp", message: "send me again", uploads: ["up-1"], state: "failed", error: "boom", createdAt: 1 };
+  const w = await mountWithFailed(sid, entry);
+  await act(async () => { await Promise.all([w.latest.retryHeldMessage(entry.id), w.latest.retryHeldMessage(entry.id)]); });
+  const copies = copiesOf("send me again");
+  assert.equal(copies.length, 1, "a double click holds one copy");
+  const [copy] = copies;
+  assert.notEqual(copy.id, entry.id);
+  assert.deepEqual({ mode: copy.mode, message: copy.message, uploads: copy.uploads, sessionId: copy.sessionId, replaces: copy.replaces }, { mode: "followUp", message: "send me again", uploads: ["up-1"], sessionId: sid, replaces: entry.id });
+  assert.deepEqual(removeCalls(sid), [], "the server retires the original when it stores the copy");
+});
+
+test("a stored copy hides its original before the outbox_update: Retry again holds no second copy", async () => {
+  resetWorld();
+  const sid = "outbox-retry-stored-first";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  const entry = { id: "failed-stored", sessionId: sid, mode: "prompt", message: "only once", state: "failed", createdAt: 1 };
+  const w = await mountWithFailed(sid, entry);
+  let adds = 0;
+  world.outboxCommit = (commit) => { adds += 1; commit(); };
+  await act(async () => { await w.latest.retryHeldMessage(entry.id); });
+  const retry = w.latest.retryHeldMessage;
+  // The receipt, then a Retry before React rendered it and before the server's outbox_update drops the original.
+  await act(async () => { storeCopy(); await retry(entry.id); });
+  assert.equal(adds, 1);
+  assert.equal(w.latest.heldMessages.some((held) => held.id === entry.id), false, "the original leaves the view with the receipt");
+  await act(async () => { await w.latest.retryHeldMessage(entry.id); });
+  assert.equal(adds, 1, "no copy after the stored one");
+  assert.deepEqual(removeCalls(sid), []);
+});
+
+for (const restart of ["remount", "reload"]) {
+  test(`after a ${restart}, Retry on an original whose copy still waits in the outbox holds no second copy`, async () => {
+    resetWorld();
+    const sid = `outbox-retry-${restart}`;
+    primeSession(sid, [userMsg("u0", "before")]);
+    world.outboxHold = true;
+    const entry = { id: `failed-${restart}`, sessionId: sid, mode: "prompt", message: "pending copy", state: "failed", createdAt: 1 };
+    const first = await mountWithFailed(sid, entry);
+    await act(async () => { await first.latest.retryHeldMessage(entry.id); });
+    assert.equal(copiesOf("pending copy").length, 1);
+    first.unmount();
+    const w = await mountWithFailed(sid, entry);
+    // A reload: a new page hears the worker's list of what IndexedDB holds.
+    if (restart === "reload") await act(async () => { workerPort.onmessage({ data: { outbox: world.outbox.map((held) => ({ ...held, state: "sending" })) } }); });
+    await act(async () => { await w.latest.retryHeldMessage(entry.id); });
+    assert.equal(copiesOf("pending copy").length, 1, "the copy in IndexedDB names this original");
+    assert.deepEqual(removeCalls(sid), []);
+  });
+}
+
+test("a Retry whose copy the server refuses keeps the failed original", async () => {
+  resetWorld();
+  const sid = "outbox-retry-server-refused";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  const entry = { id: "failed-files", sessionId: sid, mode: "prompt", message: "with a file", uploads: ["up-9"], state: "failed", createdAt: 1 };
+  const w = await mountWithFailed(sid, entry);
+  await act(async () => { await w.latest.retryHeldMessage(entry.id); });
+  await act(async () => { refuseCopy("upload_missing"); });
+  assert.deepEqual(removeCalls(sid), []);
+  assert.equal(w.latest.heldMessages.some((held) => held.id === entry.id && held.state === "failed"), true);
+});
+
+test("a Delete of the original while its copy waits shows no error when the copy is stored", async () => {
+  resetWorld();
+  const sid = "outbox-retry-delete-race";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  const entry = { id: "failed-raced", sessionId: sid, mode: "prompt", message: "raced", state: "failed", createdAt: 1 };
+  const w = await mountWithFailed(sid, entry);
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "outbox_remove",
+    produce: async () => ({ status: 200, value: { success: true, data: { removed: true } } }),
+  });
+  const notices = w.latest.notices.length;
+  await act(async () => { await w.latest.retryHeldMessage(entry.id); });
+  await act(async () => { await w.latest.deleteHeldMessage(entry.id); });
+  await act(async () => { storeCopy(); });
+  assert.deepEqual(removeCalls(sid), [{ type: "outbox_remove", id: entry.id }]);
+  assert.equal(w.latest.notices.length, notices);
+});
+
+test("Retry of this browser's failed message carries its images and upload proofs and leaves its row to the worker", async () => {
+  resetWorld();
+  const sid = "outbox-retry-local";
+  primeSession(sid, [userMsg("u0", "before")]);
+  const w = await mountSession(sid);
+  await act(async () => { await w.latest.handleSend("open channel"); });
+  world.outboxHold = true;
+  const images = [{ type: "image", data: "aGk=", mimeType: "image/png" }];
+  const local = { id: "local-failed", sessionId: sid, scope: "test-scope", mode: "steer", message: "with files", images, uploads: ["up-2"], uploadProofs: { "up-2": "proof-2" }, state: "failed", createdAt: 1 };
+  world.outbox = [local];
+  await act(async () => { workerPort.onmessage({ data: { outbox: [local] } }); });
+  let drops = 0;
+  world.outboxDrop = (commit) => { drops += 1; commit(); };
+  await act(async () => { await w.latest.retryHeldMessage(local.id); });
+  const copy = world.lastOutboxAdd.entry;
+  assert.notEqual(copy.id, local.id);
+  assert.deepEqual({ mode: copy.mode, message: copy.message, images: copy.images, uploads: copy.uploads, uploadProofs: copy.uploadProofs, replaces: copy.replaces }, { mode: "steer", message: "with files", images, uploads: ["up-2"], uploadProofs: { "up-2": "proof-2" }, replaces: local.id });
+  await act(async () => { storeCopy(); });
+  assert.equal(drops, 0, "the worker drops the original in the commit that deletes the stored copy");
+  assert.equal(w.latest.heldMessages.some((held) => held.id === local.id), false);
+});
+
 test("mounting a session with an outbox snapshot subscribes without starting omp and shows its held messages", async () => {
   resetWorld();
   const sid = "outbox-mount";
@@ -8252,6 +8505,56 @@ test("dismissing an uncertain bridge deletes the browser copy the worker still h
   assert.deepEqual(w.latest.heldMessages, []);
   assert.equal(world.outbox.some((held) => held.id === entry.id), false, "the browser copy is gone, so a reload cannot bring the row back");
   assert.equal(world.calls.some((call) => ["prompt", "steer", "follow_up", "outbox_remove"].includes(call.body?.type)), false, "dismissal neither resends nor touches the server row");
+});
+test("Retry of a native-settled server copy waits for lineage reconciliation before creating D", async (t) => {
+  resetWorld();
+  const sid = "native-settled-retry-lineage";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  world.outboxHold = true;
+  world.lastOutboxAdd = undefined;
+  const root = { id: "native-retry-root", sessionId: sid, mode: "followUp", message: "retry this", state: "failed", createdAt: 1 };
+  const copy = { ...root, id: "native-retry-copy", state: "failed", replaces: root.id, createdAt: 2 };
+  world.outbox = [root, copy];
+  world.clientMessageStatuses.set(sid, clientMessageStatus({ unresolvedClientMessageIds: [copy.id] }));
+  const pendingReconciliations = [];
+  world.outboxReconcile = (message, commit) => pendingReconciliations.push({ message, commit, released: false });
+  const release = async (reconciliation) => {
+    if (reconciliation.released) return;
+    reconciliation.released = true;
+    await act(async () => { reconciliation.commit(); await settle(); });
+  };
+  t.after(async () => {
+    for (const reconciliation of pendingReconciliations) await release(reconciliation);
+  });
+
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  await act(() => workerPort.onmessage({ data: { outbox: world.outbox.map((entry) => ({ ...entry, scope: "test-scope" })) } }));
+  await act(() => es.emit({ type: "outbox_update", entries: [], settledIds: [copy.id], nativeSettledIds: [copy.id] }));
+  await until(() => w.latest.heldMessages.some((held) => held.id === copy.id && held.state === "failed" && held.mayHaveBeenSent),
+    "the native-settled copy becomes an uncertain bridge");
+  const proactiveReconciliations = pendingReconciliations.length;
+  assert.ok(proactiveReconciliations > 0, "the empty settled snapshot starts local lineage cleanup");
+
+  let retry;
+  await act(async () => { retry = w.latest.retryHeldMessage(copy.id); await Promise.resolve(); });
+  await until(() => pendingReconciliations.length > proactiveReconciliations, "Retry waits on its own reconciliation acknowledgement");
+  assert.equal(world.lastOutboxAdd, undefined, "D is not held before the worker commits reconciliation");
+  const retryReconciliation = pendingReconciliations.at(-1);
+  assert.deepEqual(retryReconciliation.message.confirmedIds, [copy.id]);
+
+  await release(retryReconciliation);
+  await retry;
+  assert.equal(world.lastOutboxAdd.entry.replaces, copy.id, "D names the native-settled C");
+  for (const reconciliation of pendingReconciliations) await release(reconciliation);
+
+  await act(async () => { refuseCopy("upload_missing"); });
+  assert.equal(w.latest.heldMessages.some((held) => held.id === copy.id && held.local === false && held.state === "failed"), true,
+    "refusing D leaves server bridge C visible");
+  assert.equal(w.latest.heldMessages.some((held) => held.id === root.id), false, "the browser-only O is no longer actionable");
 });
 
 test("an offline send follows its held bubble when the worker list arrives before the commit ACK", async () => {

@@ -4,6 +4,7 @@ import { invalidateHostSessionList } from "@/lib/hosts/session-index";
 import { invalidateSessionCaches } from "@/lib/session-reader";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { clearExitedRpcSession, getLiveRpcSessionIds, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { forgetSessionReplacementMappings } from "@/lib/message-outbox";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
@@ -134,6 +135,12 @@ export async function DELETE(
     // owns the file and would clobber it on its next flush.
     const result = await resolved.host.sessionOps.deleteSession(id, getLiveRpcSessionIds());
     if (!result.ok) return opErrorResponse(result);
+    // Remove only this deleted session's content-free retry-lineage metadata.
+    try {
+      forgetSessionReplacementMappings(id);
+    } catch (error) {
+      console.warn(`[omp-web] could not clear deleted-session retry metadata: ${error instanceof Error ? error.message : String(error)}`);
+    }
     invalidateHostSessionList(resolved.host.id);
     clearExitedRpcSession(id);
     return Response.json({ ok: true, ...result.value });

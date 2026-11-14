@@ -78,6 +78,8 @@ export interface LocalOutboxEntry {
   images?: { type: "image"; data: string; mimeType: string }[];
   uploads?: string[];
   uploadProofs?: Record<string, string>;
+  /** A Retry's copy: its exact-intent, same-session root; it may be browser-only. */
+  replaces?: string;
   createdAt: number;
   /** Allocated atomically by IndexedDB acceptance; absent only on preexisting rows. */
   enqueueOrder?: number;
@@ -88,10 +90,13 @@ export interface LocalOutboxEntry {
 }
 
 /** Every local entry (on subscribe once known, then on every change), or one the server answered 200 for. */
-export type OutboxEvent = { entries: LocalOutboxEntry[] } | { stored: OutboxEntry };
+export type OutboxEvent = { entries: LocalOutboxEntry[] } | { stored: StoredOutboxEntry };
+
+/** The server's receipt for an accepted add; `replaces` is server-confirmed or locally proven retry lineage. */
+export type StoredOutboxEntry = OutboxEntry & { replaces?: string };
 
 /** The worker about the outbox: an add committed, the whole list, or one the server stored. */
-type OutboxMessage = { outboxAdded: number; error?: string } | { outboxDropped: number; error?: string } | { outbox: LocalOutboxEntry[]; partial?: true } | { outboxStored: OutboxEntry };
+type OutboxMessage = { outboxAdded: number; error?: string } | { outboxDropped: number; error?: string } | { outboxReconciled: number; error?: string } | { outbox: LocalOutboxEntry[]; partial?: true } | { outboxStored: StoredOutboxEntry };
 
 type WakeReason = "init" | "visible" | "hidden" | "online" | "network";
 
@@ -137,8 +142,8 @@ class Transport {
       else if ("cmd" in message) this.answer(message);
       else if ("up" in message) this.uploads.get(message.up)?.(message);
       else if ("diag" in message) this.diagnostics.get(message.diag)?.(message.data);
-      else if ("outboxAdded" in message || "outboxDropped" in message) {
-        const n = "outboxAdded" in message ? message.outboxAdded : message.outboxDropped;
+      else if ("outboxAdded" in message || "outboxDropped" in message || "outboxReconciled" in message) {
+        const n = "outboxAdded" in message ? message.outboxAdded : "outboxDropped" in message ? message.outboxDropped : message.outboxReconciled;
         const pending = this.outboxWrites.get(n);
         if (message.error !== undefined) pending?.reject(new Error(message.error));
         else pending?.resolve();
@@ -213,6 +218,13 @@ class Transport {
       const n = this.nextId++;
       this.outboxWrites.set(n, { resolve, reject });
       this.port.postMessage({ op: "outbox_drop", n, id });
+    });
+  }
+  reconcileOutbox(sessionId: string, confirmedIds: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const n = this.nextId++;
+      this.outboxWrites.set(n, { resolve, reject });
+      this.port.postMessage({ op: "outbox_reconcile", n, sessionId, confirmedIds });
     });
   }
 
@@ -370,11 +382,11 @@ function postOutboxOnExit(): void {
   if (outboxPartial) return;
   let left = KEEPALIVE_BYTES;
   const sessions = new Set<string>();
-  for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, state, createdAt } of outboxEntries ?? []) {
+  for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, replaces, state, createdAt } of outboxEntries ?? []) {
     if (state !== "sending" || typeof scope !== "string" || !scope || Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 || sessions.has(sessionId)) continue;
     sessions.add(sessionId);
     if (!addedHere.has(id)) continue;
-    const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs });
+    const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs, replaces });
     const bytes = new Blob([body]).size;
     if (bytes > left) continue;
     left -= bytes;
@@ -434,6 +446,11 @@ export async function addToOutbox(entry: Omit<LocalOutboxEntry, "state" | "error
   await transport.addToOutbox(entry);
   void registerOutboxSync();
 }
+/** Removes local copies whose server acceptance is authoritative for this session. */
+export async function reconcileOutbox(sessionId: string, confirmedIds: string[]): Promise<void> {
+  transport ??= connectTransport();
+  await transport.reconcileOutbox(sessionId, confirmedIds);
+}
 
 function supportsOutboxSync(worker: ServiceWorker | null): Promise<boolean> {
   if (!worker) return Promise.resolve(false);
@@ -446,7 +463,7 @@ function supportsOutboxSync(worker: ServiceWorker | null): Promise<boolean> {
       resolve(supported);
     };
     const timer = setTimeout(() => finish(false), 1_000);
-    channel.port1.onmessage = ({ data }) => finish(data?.type === "omp-outbox-capability" && data.version === 1);
+    channel.port1.onmessage = ({ data }) => finish(data?.type === "omp-outbox-capability" && data.version === 2);
     try {
       worker.postMessage({ type: "omp-outbox-capability" }, [channel.port2]);
     } catch {

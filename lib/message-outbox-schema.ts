@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS entries (
   payload_bytes INTEGER NOT NULL DEFAULT 0,
   previous_entry_ids TEXT,
   done_at INTEGER,
-  settlement TEXT
+  settlement TEXT,
+  replacement_id TEXT,
+  replacement_digest TEXT
 );
 CREATE INDEX IF NOT EXISTS entries_session ON entries (session_id, state);
 CREATE TABLE IF NOT EXISTS completed_uploads (id TEXT PRIMARY KEY, owner TEXT NOT NULL, receipt TEXT NOT NULL, at INTEGER NOT NULL);

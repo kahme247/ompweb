@@ -46,7 +46,7 @@ import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } f
 import type { HostToolDefinition, HostUriSchemeDefinition, RpcAvailableSlashCommand, SessionStatsInfo, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
-import { EVENT_STREAM_CLOSED, EVENT_STREAM_OPEN, addToOutbox, dropFromOutbox, newOutboxId, openEventStream, subscribeOutbox, type EventStream, type LocalOutboxEntry } from "@/lib/event-stream";
+import { EVENT_STREAM_CLOSED, EVENT_STREAM_OPEN, addToOutbox, dropFromOutbox, newOutboxId, openEventStream, reconcileOutbox, subscribeOutbox, type EventStream, type LocalOutboxEntry } from "@/lib/event-stream";
 import { createSessionCatchUp, type SessionCatchUp, type SessionLiveFields } from "./useAgentSession-sync";
 import type { SessionLiveSnapshot } from "@/lib/session-sync";
 import {
@@ -315,6 +315,10 @@ function unrecordedHeldBash<T extends { command: string; after: number }>(messag
     return !run;
   });
 }
+function reconcileConfirmedLocalOutbox(sessionId: string, localEntries: LocalOutboxEntry[], confirmedIds: ReadonlySet<string>): Promise<void> {
+  const ids = localEntries.filter((entry) => entry.sessionId === sessionId && entry.replaces !== undefined && confirmedIds.has(entry.id)).map((entry) => entry.id);
+  return ids.length ? reconcileOutbox(sessionId, ids) : Promise.resolve();
+}
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
@@ -391,6 +395,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // event-stream worker's), the server's for this one (`outbox_update`, or the state route's until the first frame),
   // and server confirmations no snapshot has covered yet (the command's answer and the frame race).
   const [localOutbox, setLocalOutbox] = useState<LocalOutboxEntry[]>([]);
+  const localOutboxRef = useRef(localOutbox);
   const [serverOutbox, setServerOutbox] = useState<ServerOutbox>(EMPTY_SERVER_OUTBOX);
   const serverOutboxRef = useRef(EMPTY_SERVER_OUTBOX);
   const [storedOutbox, setStoredOutbox] = useState<OutboxEntry[]>([]);
@@ -1735,18 +1740,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       serverOutboxRef.current = applyOutboxSnapshot(serverOutboxRef.current, entries, settledIds, nativeSettledIds);
       setServerOutbox(serverOutboxRef.current);
     }
+    void reconcileConfirmedLocalOutbox(sid, localOutbox, serverOutboxRef.current.seen)
+      .catch((error) => console.warn(`[omp-web] browser outbox reconciliation failed: ${error instanceof Error ? error.message : String(error)}`));
     // Held messages open the session channel even without a wrapper: subscribe to follow them.
     if (entries.length > 0 && !eventSourceRef.current) void connectEvents(sid, "connected");
   };
 
   useEffect(() => subscribeOutbox((event) => {
     if ("entries" in event) {
+      // Read by a Retry before React renders: a copy waiting in IndexedDB must block another at once.
+      localOutboxRef.current = event.entries;
       setLocalOutbox(event.entries);
       serverOutboxRef.current = rememberLocalOutbox(serverOutboxRef.current, event.entries, sessionIdRef.current);
       setServerOutbox(serverOutboxRef.current);
+      const sid = sessionIdRef.current;
+      if (sid) void reconcileConfirmedLocalOutbox(sid, event.entries, serverOutboxRef.current.seen)
+        .catch((error) => console.warn(`[omp-web] browser outbox reconciliation failed: ${error instanceof Error ? error.message : String(error)}`));
       return;
     }
     const { stored } = event;
+    // Server confirmation or a locally proven browser-only root retires the original before outbox_update arrives.
+    if (stored.replaces) markOutboxRepresented([stored.replaces]);
     const sid = sessionIdRef.current;
     if (stored.sessionId !== sid) return;
     serverOutboxRef.current = rememberOutboxEntries(serverOutboxRef.current, [stored]);
@@ -1755,7 +1769,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!serverOutboxRef.current.seen.has(stored.id)) setStoredOutbox((current) => [...current.filter((entry) => entry.id !== stored.id), stored]);
     // The server holds it now, so the channel opens even without a wrapper (a first try may have been refused).
     if (hookAliveRef.current && !eventSourceRef.current) void connectEvents(sid, "connected");
-  }), [connectEvents]);
+  }), [connectEvents, markOutboxRepresented]);
 
   // ---------------------------------------------------------------------
   // Host-tool bridge: omp-web registers tools the AGENT can call. The server
@@ -2516,6 +2530,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             Array.isArray(event.nativeSettledIds) ? event.nativeSettledIds as string[] : [],
           );
           setServerOutbox(serverOutboxRef.current);
+          const sid = sessionIdRef.current;
+          if (sid) void reconcileConfirmedLocalOutbox(sid, localOutboxRef.current, serverOutboxRef.current.seen)
+            .catch((error) => console.warn(`[omp-web] browser outbox reconciliation failed: ${error instanceof Error ? error.message : String(error)}`));
           // Retire only confirmations the server has listed or settled; an older empty snapshot can overtake an ACK.
           setStoredOutbox((current) => current.filter((entry) => !serverOutboxRef.current.seen.has(entry.id)));
         }
@@ -3273,7 +3290,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   /** Holds a message in the outbox (docs/specs/2026-11-04-message-outbox-design.md): true once this browser has
    * stored it, after which omp-web delivers it whatever this tab does next. It shows as a held bubble until omp has it. */
-  const holdMessage = useCallback(async (sid: string, mode: OutboxMode, message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => {
+  const holdMessage = useCallback(async (sid: string, mode: OutboxMode, message: string, images?: Pick<AttachedImage, "data" | "mimeType">[], uploads?: string[], uploadProofs?: Record<string, string>, replaces?: string) => {
     try {
       await addToOutbox({
         id: newOutboxId(),
@@ -3285,6 +3302,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(images?.length ? { images: images.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })) } : {}),
         ...(uploads?.length ? { uploads } : {}),
         ...(uploadProofs ? { uploadProofs } : {}),
+        ...(replaces ? { replaces } : {}),
         createdAt: Date.now(),
       });
     } catch (e) {
@@ -4379,7 +4397,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const heldMessagesRef = useRef(heldMessages);
   heldMessagesRef.current = heldMessages;
-  const localOutboxRef = useRef(localOutbox);
   localOutboxRef.current = localOutbox;
   const heldDeletionsRef = useRef(new Set<string>());
   /** Delete of a held bubble: one this browser still holds leaves IndexedDB; the server's only until dispatched (omp
@@ -4405,6 +4422,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       heldDeletionsRef.current.delete(id);
     }
   }, [addNotice, markOutboxRepresented]);
+
+  const heldRetriesRef = useRef(new Set<string>());
+  /** Retry keeps the failed bubble's exact mode and payload, and records its lineage in IndexedDB. The server
+   * atomically retires a known root; for a browser-only root, acceptance retires only same-session exact-intent
+   * local lineage. A refused copy leaves the root intact, and the IDB transaction makes concurrent retries reuse one copy. */
+  const retryHeldMessage = useCallback(async (id: string) => {
+    const sid = sessionIdRef.current;
+    const held = heldMessagesRef.current.find((entry) => entry.id === id);
+    if (!sid || !held || held.state !== "failed" || editInFlightRef.current || heldRetriesRef.current.has(id) || heldDeletionsRef.current.has(id)) return;
+    if (serverOutboxRef.current.represented.has(id)) return;
+    if (localOutboxRef.current.some((entry) => entry.replaces === id && entry.state === "sending")) return;
+    heldRetriesRef.current.add(id);
+    try {
+      const serverIds = serverOutboxRef.current.seen;
+      const confirmedIds = new Set(localOutboxRef.current
+        .filter((entry) => entry.sessionId === sid && entry.replaces !== undefined && serverIds.has(entry.id))
+        .map((entry) => entry.id));
+      if (serverIds.has(id)) confirmedIds.add(id);
+      if (confirmedIds.size > 0) await reconcileOutbox(sid, [...confirmedIds]);
+
+      if (!hookAliveRef.current || sessionIdRef.current !== sid || editInFlightRef.current || serverOutboxRef.current.represented.has(id)) return;
+      const current = heldMessagesRef.current.find((entry) => entry.id === id);
+      if (!current || current.state !== "failed") return;
+      if (held.local && !localOutboxRef.current.some((entry) => entry.id === id)) return;
+      if (localOutboxRef.current.some((entry) => entry.replaces === id && entry.state === "sending")) return;
+      await holdMessage(sid, current.mode, current.message, current.images, current.uploads, current.uploadProofs, id);
+    } catch (error) {
+      if (hookAliveRef.current && sessionIdRef.current === sid) {
+        addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      }
+    } finally {
+      heldRetriesRef.current.delete(id);
+    }
+  }, [addNotice, holdMessage]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -4882,7 +4933,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, handleFastModeChange, handleSlowModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handleAbortCompaction,
-    heldMessages, deleteHeldMessage,
+    heldMessages, deleteHeldMessage, retryHeldMessage,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, removeQueuedMessage, promoteQueuedToSteer, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,

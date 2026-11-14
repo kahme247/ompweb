@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useId, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useContext, type ComponentProps } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, Clock, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square, Trash2, Paperclip } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, Clock, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square, Trash2, Paperclip, RotateCcw } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { WorkspaceFileContext } from "@/lib/workspace-file-context";
 import { AgentLinkContext, agentLinkIds } from "../lib/agent-links";
@@ -531,14 +531,16 @@ const heldActionStyle = {
 } as const;
 
 /** A message omp-web holds until omp has it (docs/specs/2026-11-04-message-outbox-design.md O1): dimmed, after the
- * live turn, naming the leg it waits on. Delete only while nothing of it can have reached omp. */
-export function HeldMessageView({ held, hostLabel, onDelete }: {
+ * live turn, naming the leg it waits on. Delete only while nothing of it can have reached omp; Retry a failed one. */
+export function HeldMessageView({ held, hostLabel, onDelete, onRetry }: {
   held: HeldMessage;
   hostLabel?: string;
   onDelete?: (id: string) => void;
+  onRetry?: (id: string) => void;
 }) {
   const { t, locale } = useI18n();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingRetry, setConfirmingRetry] = useState(false);
   const failed = held.state === "failed";
   const status = failed
     ? held.mayHaveBeenSent ? t("heldMessage.mayHaveBeenSent") : held.error ? t("heldMessage.notSentReason", { reason: held.error }) : t("heldMessage.notSent")
@@ -584,6 +586,27 @@ export function HeldMessageView({ held, hostLabel, onDelete }: {
             <StatusIcon size={12} strokeWidth={1.8} className={failed || waits ? undefined : "activity-row-spinner"} aria-hidden />
             {status}
           </span>
+          {failed && onRetry && <>
+            <button
+              type="button"
+              className="ui-focus-ring"
+              style={heldActionStyle}
+              onClick={() => held.mayHaveBeenSent ? setConfirmingRetry(true) : onRetry(held.id)}
+              aria-label={t("heldMessage.retryTitle")}
+            >
+              <RotateCcw size={11} strokeWidth={1.8} aria-hidden />
+              {t("heldMessage.retry")}
+            </button>
+            <ConfirmDialog
+              open={confirmingRetry}
+              onOpenChange={setConfirmingRetry}
+              title={t("heldMessage.retryTitle")}
+              description={t("heldMessage.retryConfirmMayHaveBeenSent")}
+              confirmLabel={t("heldMessage.retry")}
+              cancelLabel={t("chatInput.cancel")}
+              onConfirm={() => { setConfirmingRetry(false); onRetry(held.id); }}
+            />
+          </>}
           {canDelete && <>
             <button type="button" className="ui-focus-ring" style={heldActionStyle} onClick={() => setConfirmingDelete(true)} aria-label={t("heldMessage.deleteTitle")}>
               <Trash2 size={11} strokeWidth={1.8} aria-hidden />
