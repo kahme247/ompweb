@@ -114,26 +114,35 @@ async function startBroker(state: AuthBrokerState, isCurrent: () => boolean): Pr
   });
 
   const { promise, resolve, reject } = Promise.withResolvers<Broker>();
-  const readyTimer = setTimeout(() => {
-    reject(new AuthBrokerUnavailableError("omp auth-broker did not become ready", "not_ready"));
-    terminate(child);
-  }, readyMs);
-  readyTimer.unref?.();
-  // Once it is ready (or gone) later rejects are no-ops.
+  let ready = false;
+  let finished = false;
+  let readyTimer: NodeJS.Timeout | undefined;
   const gone = (what: string) => {
+    if (finished) return;
+    finished = true;
     clearTimeout(readyTimer);
+    readyTimer = undefined;
     if (state.child === child) {
       state.child = null;
-      state.broker = null;
+      if (isCurrent()) state.broker = null;
     }
     reject(new AuthBrokerUnavailableError(`omp auth-broker ${what}${stderrTail ? `: ${stderrTail.slice(-500)}` : ""}`, "exited"));
   };
   child.on("exit", (code, signal) => gone(`exited (code ${code ?? "null"}, signal ${signal ?? "none"})`));
   child.on("error", (error) => gone(`failed to start: ${error.message}`));
+  child.once("spawn", () => {
+    if (ready || finished) return;
+    readyTimer = setTimeout(() => {
+      if (ready || finished) return;
+      readyTimer = undefined;
+      reject(new AuthBrokerUnavailableError("omp auth-broker did not become ready", "not_ready"));
+      terminate(child);
+    }, readyMs);
+    readyTimer.unref?.();
+  });
 
-  let ready = false;
   createInterface({ input: child.stdout }).on("line", (line) => {
-    if (ready) return; // keep draining stdout so the child never blocks on a full pipe
+    if (ready || finished) return; // keep draining stdout so the child never blocks on a full pipe
     let frame: { message?: unknown; url?: unknown } | null;
     try {
       frame = JSON.parse(line);
@@ -143,6 +152,7 @@ async function startBroker(state: AuthBrokerState, isCurrent: () => boolean): Pr
     if (frame?.message !== "auth-broker listening" || typeof frame.url !== "string" || !frame.url.startsWith("http://127.0.0.1:")) return;
     ready = true;
     clearTimeout(readyTimer);
+    readyTimer = undefined;
     resolve({ url: frame.url, token });
   });
   return promise;
