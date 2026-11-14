@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "../image-attachments";
-import { loadWebServerSettings } from "../web-settings";
+import { readAgentToolsEnabledFromDisk } from "../web-settings";
 import { fetchSnapshot } from "./api";
 import { diffSnapshot, formatUpdate, splitUpdateEvents, updateEntryId } from "./events";
 import { checkGh, defaultGhRunner, formatTarget, GhUnavailableError, parseGithubTarget, type GhRunner } from "./gh";
@@ -77,6 +77,30 @@ async function defaultDeliver(sessionId: string, id: string, message: string): P
   }
 }
 
+/** Lazy to avoid message-outbox -> rpc-manager -> agent-tools -> watcher import cycles. */
+const outboxReceipts = () => import("../message-outbox");
+
+/** Reconciles orphaned receipts only after snapshotting the pins, so newly claimed batches are not unpinned. */
+async function reconcileOutboxReceiptPins(): Promise<void> {
+  const { listOutboxReceiptPins, releaseOutboxReceipt } = await outboxReceipts();
+  const pins = listOutboxReceiptPins();
+  for (const { entryId } of pins) {
+    let pending = false;
+    for (const watch of listWatches()) {
+      const update = getPending(watch.sessionId, watch.itemKey, watch.registrationId);
+      if (!update) continue;
+      for (let index = update.batchIndex; index < update.batches.length; index++) {
+        if (update.batches[index].entryId === entryId) {
+          pending = true;
+          break;
+        }
+      }
+      if (pending) break;
+    }
+    if (!pending) releaseOutboxReceipt(entryId);
+  }
+}
+
 /** 404: the session is gone. 429 (outbox full) and 5xx pass; any other 4xx would refuse the same entry forever. */
 export async function deliveryOf(response: Response): Promise<Delivery> {
   if (response.ok) return "ok";
@@ -100,20 +124,22 @@ const warn = (what: string, error: unknown) => console.warn(`[omp-web] github wa
 async function deliverPending(state: WatcherState, watch: Watch, pending: PendingUpdate): Promise<void> {
   const { sessionId, itemKey, registrationId } = watch;
   while (true) {
-    if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+    if (state.stopped || !readAgentToolsEnabledFromDisk()) return;
     if (pending.batchIndex === pending.batches.length) {
       commitUpdate(sessionId, itemKey, registrationId, pending.entryId, pending.cursor, pending.final);
       return;
     }
     const batch = pending.batches[pending.batchIndex];
+    const { pinOutboxReceipt } = await outboxReceipts();
+    pinOutboxReceipt(sessionId, batch.entryId);
+    if (state.stopped || !readAgentToolsEnabledFromDisk()) return;
     const outcome = await state.deps.deliver(sessionId, batch.entryId, batch.message);
+    if (state.stopped) return;
     if (outcome === "gone") {
-      if (!state.stopped && loadWebServerSettings().agentToolsEnabled) {
-        removeSessionWatches(sessionId, { itemKey, registrationId, entryId: pending.entryId });
-      }
+      if (readAgentToolsEnabledFromDisk()) removeSessionWatches(sessionId, { itemKey, registrationId, entryId: pending.entryId });
       return;
     }
-    if (outcome === "retry" || state.stopped) return;
+    if (outcome === "retry") return;
     if (outcome !== "ok") {
       const watchKey = `${sessionId}\0${itemKey}`;
       if (outcome.rejected.startsWith("413")) {
@@ -129,14 +155,17 @@ async function deliverPending(state: WatcherState, watch: Watch, pending: Pendin
         console.warn(`[omp-web] github watcher: the outbox of ${sessionId} refused an update for ${itemKey} (${outcome.rejected}); dropped it`);
       }
     }
+    if (state.stopped) return;
     if (!advancePendingBatch(sessionId, itemKey, registrationId, pending.entryId, pending.batchIndex)) return;
+    const { releaseOutboxReceipt } = await outboxReceipts();
+    releaseOutboxReceipt(batch.entryId);
     const next = getPending(sessionId, itemKey, registrationId);
     if (!next) return;
     pending = next;
   }
 }
 async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
-  if (state.stopped || !loadWebServerSettings().agentToolsEnabled || state.inFlight.has(itemKey)) return;
+  if (state.stopped || !readAgentToolsEnabledFromDisk() || state.inFlight.has(itemKey)) return;
   state.inFlight.add(itemKey);
   try {
     const watches = listWatches().filter((w) => w.itemKey === itemKey);
@@ -147,7 +176,7 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
       if (pending) await deliverPending(state, watch, pending);
       else fresh.push(watch);
     }
-    if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+    if (state.stopped || !readAgentToolsEnabledFromDisk()) return;
     if (!fresh.length) return;
     if (isPosting(itemKey)) return;
     // A low GraphQL budget waits for its reset; stored updates above cost no GitHub call.
@@ -161,7 +190,7 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
     let snapshot;
     try {
       await checkGh(state.deps.run, state.deps.now); // gh missing or logged out arrives as GhUnavailableError only through here
-      if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+      if (state.stopped || !readAgentToolsEnabledFromDisk()) return;
       snapshot = await fetchSnapshot(state.deps.run, target, since);
     } catch (error) {
       if (error instanceof GhUnavailableError) await announcePaused(state, error.message);
@@ -171,10 +200,10 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
       }
       return;
     }
-    if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+    if (state.stopped || !readAgentToolsEnabledFromDisk()) return;
     state.failing.delete(itemKey);
     await announceResumed(state);
-    if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return;
+    if (state.stopped || !readAgentToolsEnabledFromDisk()) return;
     const budget = snapshot.rateLimit;
     if (budget && budget.remaining < BUDGET_FLOOR && state.deps.now() >= (state.budgetResetAt ?? 0)) {
       state.budgetResetAt = Date.parse(budget.resetAt) || state.deps.now() + INTERVAL_MS;
@@ -182,12 +211,12 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
     }
 
     for (const watch of fresh) {
-      if (state.stopped || !loadWebServerSettings().agentToolsEnabled || isPosting(itemKey)) return;
+      if (state.stopped || !readAgentToolsEnabledFromDisk() || isPosting(itemKey)) return;
       let diff = diffSnapshot(watch.cursor, snapshot, postedIds(itemKey));
       if (!diff.events.length && JSON.stringify(diff.cursor) === JSON.stringify(watch.cursor)) continue;
 
       // Re-read shared post state immediately before mutating this watch; the SQL guards repeat it atomically.
-      if (state.stopped || !loadWebServerSettings().agentToolsEnabled || isPosting(itemKey)) return;
+      if (state.stopped || !readAgentToolsEnabledFromDisk() || isPosting(itemKey)) return;
       diff = diffSnapshot(watch.cursor, snapshot, postedIds(itemKey));
       if (!diff.events.length) {
         advanceCursor(watch.sessionId, itemKey, watch.registrationId, watch.cursor, diff.cursor);
@@ -225,7 +254,7 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
         batches,
         batchIndex: 0,
       };
-      if (state.stopped || !loadWebServerSettings().agentToolsEnabled || isPosting(itemKey)) return;
+      if (state.stopped || !readAgentToolsEnabledFromDisk() || isPosting(itemKey)) return;
       const eventIds = events.flatMap((event) => {
         if (event.kind === "review" && event.databaseId !== undefined) return [event.id, `review:${event.databaseId}`];
         return [event.id];
@@ -240,10 +269,10 @@ async function pollItem(state: WatcherState, itemKey: string): Promise<void> {
   }
 }
 async function notify(state: WatcherState, sessionId: string, kind: "paused" | "resumed", minute: number, text: string): Promise<boolean> {
-  if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return false;
+  if (state.stopped || !readAgentToolsEnabledFromDisk()) return false;
   const id = `gh-${createHash("sha256").update(`${sessionId}\0${kind}\0${minute}`).digest("base64url").slice(0, 40)}`;
   const outcome = await state.deps.deliver(sessionId, id, `GitHub update (omp-web): ${text}`);
-  if (state.stopped || !loadWebServerSettings().agentToolsEnabled) return false;
+  if (state.stopped || !readAgentToolsEnabledFromDisk()) return false;
   if (outcome === "gone") removeSessionWatches(sessionId);
   return outcome !== "retry";
 }
@@ -276,7 +305,13 @@ const itemsOf = (): string[] => [...new Set(listWatches().map((w) => w.itemKey))
 /** One pass over every watched item, now. Does nothing while Agent tools is off. */
 export async function pollOnce(): Promise<void> {
   const state = globalThis.__ompGithubWatcher;
-  if (!state || !loadWebServerSettings().agentToolsEnabled) return;
+  if (!state || !readAgentToolsEnabledFromDisk()) return;
+  try {
+    await reconcileOutboxReceiptPins();
+  } catch (error) {
+    warn("outbox receipts could not be reconciled", error);
+    return;
+  }
   for (const itemKey of itemsOf()) await pollItem(state, itemKey);
 }
 
@@ -291,7 +326,7 @@ function cycle(state: WatcherState): void {
   };
   let items: string[] = [];
   try {
-    items = loadWebServerSettings().agentToolsEnabled ? itemsOf() : [];
+    items = readAgentToolsEnabledFromDisk() ? itemsOf() : [];
   } catch (error) {
     warn("watches could not be read", error); // the next cycle is still scheduled below
   }
