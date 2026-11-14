@@ -198,6 +198,7 @@ export async function executeGithubTool(name: string, args: Record<string, unkno
   if (name !== "watch_github") throw new Error(`Unknown agent tool: ${name}.`);
   const snapshot = await fetchSnapshot(ops.run, t);
   if (snapshot.state !== "open") return { watching: false, target: label, kind: snapshot.kind, state: snapshot.state };
+  if (ctx.signal?.aborted) throw new Error("The tool call was cancelled; no watch was registered.");
   if (addWatch(ctx.sourceSessionId, itemKeyOf(t), snapshot.kind, baselineCursor(snapshot)) === "limit") {
     throw new Error(`This session already watches the limit of ${MAX_WATCHES_PER_SESSION} GitHub items. Unwatch one first.`);
   }
