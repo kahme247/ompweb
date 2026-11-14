@@ -305,6 +305,21 @@ export function getPending(sessionId: string, itemKey: string, registrationId?: 
   });
 }
 
+/** One SQLite snapshot of every current pending batch that has not yet been acknowledged. */
+export function pendingBatchEntryIds(): Set<string> {
+  const rows = db().prepare<{ entry_id: string }, []>(
+    `SELECT p.entry_id AS entry_id
+       FROM watches w JOIN pending p USING (session_id, item_key)
+      WHERE p.batches_json = '[]'
+     UNION ALL
+     SELECT json_extract(batch.value, '$.entryId') AS entry_id
+       FROM watches w JOIN pending p USING (session_id, item_key)
+       JOIN json_each(p.batches_json) AS batch
+      WHERE CAST(batch.key AS INTEGER) >= p.batch_index`,
+  ).all();
+  return new Set(rows.map((row) => row.entry_id));
+}
+
 // ---------------------------------------------------------------- posted comments
 
 /** Keeps a shared lease until the post id is recorded; expired leases only cover a crashed/stalled process. */
