@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type ImgHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
-import { Maximize } from "lucide-react";
+import { Download, Maximize } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 
 const ZOOM_MAX = 8;
@@ -89,7 +89,7 @@ export function ClickableImage({ src, fullSrc, alt, ...imgProps }: ClickableImag
   );
 }
 
-function ImageLightbox({ src, alt, onClose }: { src: ClickableImageProps["src"]; alt: string; onClose: () => void }) {
+function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   // "fit" follows the window as it resizes; a number is a zoom the user chose.
@@ -231,6 +231,17 @@ function ImageLightbox({ src, alt, onClose }: { src: ClickableImageProps["src"];
             >
               1:1
             </button>
+            <a
+              href={src}
+              download
+              target="_blank"
+              rel="noopener noreferrer"
+              className="image-lightbox-icon-button"
+              title={t("fileViewer.downloadFile")}
+              aria-label={t("fileViewer.downloadFile")}
+            >
+              <Download size={13} aria-hidden="true" />
+            </a>
             <button
               type="button"
               className="image-lightbox-icon-button"
