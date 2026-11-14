@@ -359,18 +359,24 @@ function GithubWritesSetting() {
   const { t } = useI18n();
   // null until loaded, and after a failed load: showing "off" there could hide writes the server allows.
   const [enabled, setEnabled] = useState<boolean | null>(null);
-  // Blocks a second change until the save lands: two PUTs in flight could finish out of order and leave the older one saved.
+  // Blocks a second change until the save and any uncertain-result reload finish.
   const [saving, setSaving] = useState(false);
+  const load = useCallback(async (): Promise<boolean | null> => {
+    try {
+      const res = await fetch("/api/web-settings");
+      if (!res.ok) return null;
+      const data: { githubWritesUnasked?: boolean } = await res.json();
+      return typeof data.githubWritesUnasked === "boolean" ? data.githubWritesUnasked : null;
+    } catch {
+      return null;
+    }
+  }, []);
   useEffect(() => {
     let alive = true;
-    fetch("/api/web-settings")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { githubWritesUnasked?: boolean } | null) => { if (alive && typeof data?.githubWritesUnasked === "boolean") setEnabled(data.githubWritesUnasked); })
-      .catch(() => {});
+    void load().then((value) => { if (alive) setEnabled(value); });
     return () => { alive = false; };
-  }, []);
+  }, [load]);
   const change = async (next: boolean) => {
-    const previous = enabled;
     setEnabled(next);
     setSaving(true);
     try {
@@ -381,8 +387,9 @@ function GithubWritesSetting() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch (error) {
-      setEnabled(previous);
+      setEnabled(null);
       toast.error(t("settingsConfig.githubWritesUnaskedSaveFailed"), error instanceof Error ? error.message : String(error));
+      setEnabled(await load());
     } finally {
       setSaving(false);
     }

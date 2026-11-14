@@ -96,7 +96,7 @@ Issues:
 
 Events that arrive in the same poll go into one message. Only activity after the watch starts is delivered: registration records the current comments, reviews and CI state as the baseline. If CI on the current head has already finished at registration, that result is not delivered.
 
-**The agent's own posts.** Every comment `github_comment` posts is recorded (id, per watch target). The watcher skips recorded ids, and nothing else: comments by the same account that the agent did not post, such as the user's own review comments, are delivered.
+**The agent's own posts.** Every comment `github_comment` posts is recorded (id, per watch target). The watcher skips recorded ids, and nothing else: comments by the same account that the agent did not post, such as the user's own review comments, are delivered. There is a restart gap: if GitHub accepts a comment or review-thread reply and the server stops before recording its returned id, the next poll can deliver the agent's own post as a metadata-only update. Update messages never include the comment text.
 
 ### Delivery: the message outbox
 
@@ -108,15 +108,15 @@ Updates go into the session's message outbox (`lib/message-outbox.ts`, `runOutbo
 - uncertain delivery: an entry the dispatcher cannot prove delivered becomes **Not sent** ("may have been sent"), never resent automatically; the user can Retry or Delete it;
 - a visible bubble in the session while it waits.
 
-Each entry's id is derived from the watch and the events it carries (a hash), so a server crash between adding the entry and saving the cursor re-adds the same id, which the outbox answers with the stored entry instead of a second message.
+When a batch is first formed, its entry id is derived from the watch and the events it carries (a hash). Before each outbox add, the watcher durably stores that watch's exact pending batch: entry id, message, next cursor and final flag. After restart it retries the stored id and message before fetching or diffing new activity. On success, saving the cursor (or deleting a final watch) and clearing the pending batch are atomic. Thus a crash after the outbox accepted an update but before the cursor commit reuses the same id and exact message, so the outbox returns its existing entry instead of creating a duplicate.
 
 A session that no longer exists (deleted, and not archived: `outbox_add` answers 404) ends its watches.
 
 ### Polling and storage
 
 - Each watched item is polled once per interval with one `gh api graphql` request (state, comments, reviews, review threads, head commit status rollup), shared by every session watching it; items are spread across the interval rather than polled together. The interval is 60 s, stretched to 1.5 s per watched item past 40 items, and polling pauses until the reset time when fewer than 200 GraphQL points remain.
-- Watches, cursors (last seen comment/review/thread-comment ids, last reported head SHA), posted-comment ids and read confirmations live in SQLite in `<agent dir>/omp-web/github-watches.sqlite`, opened like the notification store (`bun:sqlite`, WAL, busy timeout, `close(true)`).
-- A cursor advances in the same transaction that records the outbox entry id it produced.
+- Watches, cursors (last seen comment/review/thread-comment ids, last reported head SHA), pending update batches, posted-comment ids and read confirmations live in SQLite in `<agent dir>/omp-web/github-watches.sqlite`, opened like the notification store (`bun:sqlite`, WAL, busy timeout, `close(true)`).
+- A cursor advances in the same transaction that clears the pending batch after outbox delivery.
 - While **Agent tools** is off, polling stops and watches are kept; turning it back on resumes from the stored cursors, so what happened meanwhile is delivered then.
 - Polling starts with the server (`instrumentation.node.ts`, `globalThis` registry pattern) and stops with it.
 
