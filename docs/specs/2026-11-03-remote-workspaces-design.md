@@ -2,7 +2,7 @@
 
 Date: 2026-11-03
 Status: Architecture and written specification approved on 2026-11-03; implementation planning follows verification of current Explorer behavior.
-Tracking: https://github.com/kahme247/ompweb/issues/388
+Tracking: https://github.com/ompweb-dev/ompweb/issues/388
 Parent design: [Remote hosts](2026-10-28-remote-hosts-design.md), delivery sub-project 2.
 
 ## Goal and approved decisions
@@ -68,7 +68,7 @@ to upload or download a large file.
 ### Current Explorer baseline
 
 Checked against freshly fetched `upstream/main` on 2026-11-03, including
-kahme247/ompweb#378 (`f4cf9749`).
+ompweb-dev/ompweb#378 (`f4cf9749`).
 
 - The tree lists every name, including `.git`, generated output and dotfiles,
   and reads a directory only after it is expanded. The former hidden-items

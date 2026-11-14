@@ -2,10 +2,10 @@
 
 [![npm version](https://img.shields.io/npm/v/@kahme247/ompweb.svg?logo=npm&color=e05d44)](https://www.npmjs.com/package/@kahme247/ompweb)
 [![node version](https://img.shields.io/node/v/@kahme247/ompweb.svg?logo=node.js&color=44cc11)](https://nodejs.org)
-[![license](https://img.shields.io/github/license/kahme247/ompweb.svg?color=44cc11)](./LICENSE)
+[![license](https://img.shields.io/github/license/ompweb-dev/ompweb.svg?color=44cc11)](./LICENSE)
 [![npm downloads](https://img.shields.io/npm/dm/@kahme247/ompweb.svg?color=44cc11)](https://www.npmjs.com/package/@kahme247/ompweb)
-[![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
+[![GitHub stars](https://img.shields.io/github/stars/ompweb-dev/ompweb.svg?logo=github)](https://github.com/ompweb-dev/ompweb/stargazers)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/ompweb-dev/ompweb/pulls)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
@@ -26,7 +26,7 @@
 
 ## 系統需求
 
-- 無需另行安裝 omp：ompweb 使用自己的 [omp](https://github.com/can1357/oh-my-pi) 建置版本 `ompweb-omp`，直接使用 `~/.omp` 中的設定、認證與對話。每種安裝方式（npm、npx 或單一二進位檔）都會在首次啟動時從該版本的 [GitHub 發行版本](https://github.com/kahme247/ompweb/releases)下載同一版本的 `ompweb-omp`，驗證 SHA-256 後保存（單一二進位檔放在同一資料夾，其他方式放在 `~/.omp/agent/omp-web/omp/<version>/`）；也可用 `ompweb fetch-omp` 手動取得。支援的平台為 linux-x64、linux-arm64、darwin-x64、darwin-arm64 與 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上無法啟動對話。無法連線至 GitHub 的機器請將 `OMP_WEB_OMP_BIN` 指向該發行版本 `ompweb-omp-<os>-<arch>` 的副本
+- 無需另行安裝 omp：ompweb 使用自己的 [omp](https://github.com/can1357/oh-my-pi) 建置版本 `ompweb-omp`，直接使用 `~/.omp` 中的設定、認證與對話。每種安裝方式（npm、npx 或單一二進位檔）都會在首次啟動時從該版本的 [GitHub 發行版本](https://github.com/ompweb-dev/ompweb/releases)下載同一版本的 `ompweb-omp`，驗證 SHA-256 後保存（單一二進位檔放在同一資料夾，其他方式放在 `~/.omp/agent/omp-web/omp/<version>/`）；也可用 `ompweb fetch-omp` 手動取得。支援的平台為 linux-x64、linux-arm64、darwin-x64、darwin-arm64 與 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上無法啟動對話。無法連線至 GitHub 的機器請將 `OMP_WEB_OMP_BIN` 指向該發行版本 `ompweb-omp-<os>-<arch>` 的副本
 - Node.js `>= 24`。伺服器運作於 [Bun](https://bun.sh) 上，Bun 會作為 npm 套件的相依套件自動安裝（找不到隨套件安裝的 Bun 時會使用 `PATH` 中的 Bun）
 
 佇列中訊息的**引導（Steer）**、**刪除（Delete）**與**編輯（Edit）**操作皆為 `ompweb-omp` 通道的指令（`promote_queued_message`、`remove_queued_message`）。刪除操作會先經 omp 確認後，標籤才會自畫面消失；編輯操作則在成功取消佇列後，才會將文字取回輸入框。若該訊息已不再處於等待狀態，佇列將維持原狀並顯示提示；ompweb 不會重複傳送引導訊息。
@@ -62,7 +62,7 @@ npx @kahme247/ompweb@latest
 
 或
 ```bash
-nix run github:kahme247/ompweb
+nix run github:ompweb-dev/ompweb
 ```
 
 **或是全域安裝：**
@@ -135,10 +135,10 @@ ompweb 透過一個輕量的守護行程 `ompweb host` 來執行這台機器的 
 
 ### 單一二進位檔
 
-每個[發行版本](https://github.com/kahme247/ompweb/releases/latest)亦提供編譯完成的單一執行檔，隨附其所提供服務的相關檔案：
+每個[發行版本](https://github.com/ompweb-dev/ompweb/releases/latest)亦提供編譯完成的單一執行檔，隨附其所提供服務的相關檔案：
 `ompweb-linux-x64.tar.gz`、`ompweb-linux-arm64.tar.gz`、`ompweb-darwin-x64.tar.gz`、
 `ompweb-darwin-arm64.tar.gz` 以及 `ompweb-windows-x64.zip`。無需安裝 Node、npm
-或 Bun，也無需安裝 omp：首次啟動時，它會從同一個發行版本下載其 omp 建置版本 `ompweb-omp`（驗證 SHA-256），並保存在同一資料夾中（預先發行版的封存檔已內含）。x64 建置版本採用 Bun 的基準執行階段，因此亦可在不具備 AVX2 指令集的 CPU 上運作。每個封存檔皆於 `licenses/` 包含其打包內容的授權條款。`main` 分支上通過 CI 的每次提交亦會發布為以建置時間命名的[預先發行版（prerelease）](https://github.com/kahme247/ompweb/releases)（例如 `2026-11-01T10:30:00Z`），同樣包含上述五種封存檔。
+或 Bun，也無需安裝 omp：首次啟動時，它會從同一個發行版本下載其 omp 建置版本 `ompweb-omp`（驗證 SHA-256），並保存在同一資料夾中（預先發行版的封存檔已內含）。x64 建置版本採用 Bun 的基準執行階段，因此亦可在不具備 AVX2 指令集的 CPU 上運作。每個封存檔皆於 `licenses/` 包含其打包內容的授權條款。`main` 分支上通過 CI 的每次提交亦會發布為以建置時間命名的[預先發行版（prerelease）](https://github.com/ompweb-dev/ompweb/releases)（例如 `2026-11-01T10:30:00Z`），同樣包含上述五種封存檔。
 
 ```bash
 tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # 解壓縮出 ompweb-linux-x64/
@@ -551,7 +551,7 @@ proxy_set_header X-Omp-Web-Auth $ompweb_auth;
 ## 本機開發
 
 ```bash
-git clone https://github.com/kahme247/ompweb.git
+git clone https://github.com/ompweb-dev/ompweb.git
 cd ompweb
 npm install
 npx bun runner/scripts/use-omp-build.ts && (cd runner && npx bun install --frozen-lockfile)

@@ -2,10 +2,10 @@
 
 [![npm version](https://img.shields.io/npm/v/@kahme247/ompweb.svg?logo=npm&color=e05d44)](https://www.npmjs.com/package/@kahme247/ompweb)
 [![node version](https://img.shields.io/node/v/@kahme247/ompweb.svg?logo=node.js&color=44cc11)](https://nodejs.org)
-[![license](https://img.shields.io/github/license/kahme247/ompweb.svg?color=44cc11)](./LICENSE)
+[![license](https://img.shields.io/github/license/ompweb-dev/ompweb.svg?color=44cc11)](./LICENSE)
 [![npm downloads](https://img.shields.io/npm/dm/@kahme247/ompweb.svg?color=44cc11)](https://www.npmjs.com/package/@kahme247/ompweb)
-[![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
+[![GitHub stars](https://img.shields.io/github/stars/ompweb-dev/ompweb.svg?logo=github)](https://github.com/ompweb-dev/ompweb/stargazers)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/ompweb-dev/ompweb/pulls)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
@@ -26,7 +26,7 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 
 ## Requirements
 
-- Nothing else for omp: ompweb runs its own [omp](https://github.com/can1357/oh-my-pi) build, `ompweb-omp`, which reads your `~/.omp` settings, auth and sessions. Every install (npm, npx or the single binary) downloads the `ompweb-omp` of its exact version from that version's [GitHub release](https://github.com/kahme247/ompweb/releases) the first time it starts, checks its SHA-256 and keeps it (beside the single binary, otherwise in `~/.omp/agent/omp-web/omp/<version>/`); `ompweb fetch-omp` does the same on demand. Sessions start once it is there. It exists for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and windows-x64; on any other platform (Linux on musl, Windows on Arm, FreeBSD) ompweb cannot start sessions. A machine that cannot reach GitHub needs `OMP_WEB_OMP_BIN` pointing at a copy of that release's `ompweb-omp-<os>-<arch>`
+- Nothing else for omp: ompweb runs its own [omp](https://github.com/can1357/oh-my-pi) build, `ompweb-omp`, which reads your `~/.omp` settings, auth and sessions. Every install (npm, npx or the single binary) downloads the `ompweb-omp` of its exact version from that version's [GitHub release](https://github.com/ompweb-dev/ompweb/releases) the first time it starts, checks its SHA-256 and keeps it (beside the single binary, otherwise in `~/.omp/agent/omp-web/omp/<version>/`); `ompweb fetch-omp` does the same on demand. Sessions start once it is there. It exists for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and windows-x64; on any other platform (Linux on musl, Windows on Arm, FreeBSD) ompweb cannot start sessions. A machine that cannot reach GitHub needs `OMP_WEB_OMP_BIN` pointing at a copy of that release's `ompweb-omp-<os>-<arch>`
 - Node.js `>= 24`. The server runs on [Bun](https://bun.sh), which installs automatically as a dependency of the npm package (a Bun on your `PATH` is used if the bundled one is missing)
 
 The **Steer**, **Delete** and **Edit** actions on a queued message are commands of the `ompweb-omp` channel (`promote_queued_message`, `remove_queued_message`). Deletion is confirmed by omp before the chip disappears; editing recalls text only after cancellation succeeds. A message that is no longer pending leaves the queue unchanged and displays a notice; ompweb does not send a duplicate steering message.
@@ -89,7 +89,7 @@ npx @kahme247/ompweb@latest
 
 or
 ```bash
-nix run github:kahme247/ompweb
+nix run github:ompweb-dev/ompweb
 ```
 
 **Or install globally:**
@@ -436,7 +436,7 @@ stop or roll back a candidate after its deployment commit point.
 
 ### Single binary
 
-Each [release](https://github.com/kahme247/ompweb/releases/latest) also ships
+Each [release](https://github.com/ompweb-dev/ompweb/releases/latest) also ships
 ompweb as one compiled program with the files it serves beside it:
 `ompweb-linux-x64.tar.gz`, `ompweb-linux-arm64.tar.gz`, `ompweb-darwin-x64.tar.gz`,
 `ompweb-darwin-arm64.tar.gz` and `ompweb-windows-x64.zip`. It needs no Node, npm
@@ -444,7 +444,7 @@ or Bun, and no omp: on its first start it downloads its own omp build, `ompweb-o
 (SHA-256-checked) and keeps it beside itself (prerelease archives already carry it). The x64 builds use Bun's baseline runtime, so
 they also run on CPUs without AVX2. Each archive carries the licenses of what it
 bundles in `licenses/`. Every commit on `main` that passes CI is also published as a
-[prerelease](https://github.com/kahme247/ompweb/releases) named after the time it was
+[prerelease](https://github.com/ompweb-dev/ompweb/releases) named after the time it was
 built (for example `2026-11-01T10:30:00Z`), with the same five archives.
 
 ```bash
@@ -1057,7 +1057,7 @@ addresses you list in `set_real_ip_from`:
 ## Development
 
 ```bash
-git clone https://github.com/kahme247/ompweb.git
+git clone https://github.com/ompweb-dev/ompweb.git
 cd ompweb
 npm install
 npx bun runner/scripts/use-omp-build.ts && (cd runner && npx bun install --frozen-lockfile)

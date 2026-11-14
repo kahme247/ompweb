@@ -15,7 +15,7 @@ Current state: `runner/omp-build.json` pins the fork release `v18.20.0-int.20261
 | Where | Owns after cut-over | Secrets |
 |---|---|---|
 | `ompweb-dev/oh-my-pi` (the fork) | the omp round on branch `fork-ci` (workflows, config, fixups, repair prompt, helper scripts); releases `v<upstream>-int.<stamp>.g<sha7>` with binaries and an npm package zip; `integration-release`; `apple-sdk` mirror; escalation issues | Environment `omp-round` (only `fork-ci`): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OMP_FORK_TOKEN` (fallback only, F3). Everything else uses the workflow's own `GITHUB_TOKEN` |
-| `kahme247/ompweb` | `runner/` pinned to one fork release's packages; every (pre)release re-pins to the newest `integration-release` build; the omp row follows ompweb | none |
+| `ompweb-dev/ompweb` | `runner/` pinned to one fork release's packages; every (pre)release re-pins to the newest `integration-release` build; the omp row follows ompweb | none |
 | `andrebrait/integration-ci` | the `integration` script (single copy); graphify, superpowers and ompweb builds; its omp workflows, scripts, config, fixups, releases and omp secrets are deleted after cut-over | omp secrets removed |
 
 ## Fork
@@ -100,7 +100,7 @@ Push with `GITHUB_TOKEN` first, then retry once with `OMP_FORK_TOKEN` (fine-grai
 3. `bun scripts/ci-release-publish.ts --native-leaf <tag>` for each of the six leaf targets — `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`, `win32-arm64` — from the `.node` files already in `packages/natives/native`. ~10 s each; no extra native builds.
 4. Zip all 18 tarballs as `omp-packages-<version>.zip` with an `index.json` (`{ "<npm name>": "<file>.tgz" }`). Artifact `omp-packages`.
 
-`omp-auto.yml` `release` (no fork code) uploads the zip beside the binaries and `SHA256SUMS.txt`. Pruning keeps the newest 10 new-format `-int.` releases plus the one ompweb `main` pins (`runner/omp-build.json` on `kahme247/ompweb` `main`, public). Releases older than F6 have no zip; ompweb cannot pin them.
+`omp-auto.yml` `release` (no fork code) uploads the zip beside the binaries and `SHA256SUMS.txt`. Pruning keeps the newest 10 new-format `-int.` releases plus the one ompweb `main` pins (`runner/omp-build.json` on `ompweb-dev/ompweb` `main`, public). Releases older than F6 have no zip; ompweb cannot pin them.
 
 ### F7. Escalation and Apple SDK in the fork
 
@@ -206,7 +206,7 @@ Before W3 the omp row ran `omp update` through `resolveOmpBin()`, i.e. `ompweb-o
 
 ## integration-ci cleanup
 
-After one green scheduled round in the fork and one green ompweb pre-release on it: delete `.github/workflows/omp-auto.yml`, `omp.yml`; `.github/actions/omp-agent`, `omp-round`; `scripts/{collect-round,commit-fixups,publish-round,push-rebased}.sh`; `prompts/omp-repair.md`; `config/root--git--oh-my-pi.sh`; `config/fixups/root--git--oh-my-pi/`; the `oh-my-pi` and `apple-sdk` releases; README's oh-my-pi section; the secrets `OMP_FORK_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` if no remaining workflow references them. `docs/specs/2026-11-11-omp-auto-integration-design.md` gets "superseded by the fork's `fork-ci` branch; see kahme247/ompweb `docs/specs/2026-11-12-omp-build-in-ompweb-design.md`". Kept: `integration` (F8), `changelog-merge`, `integration.test.sh`, `publish.yml`, `ompweb.yml` (with W1's fetch line), `graphify.yml`, `superpowers.yml`, the `omp-auto` label and old issues.
+After one green scheduled round in the fork and one green ompweb pre-release on it: delete `.github/workflows/omp-auto.yml`, `omp.yml`; `.github/actions/omp-agent`, `omp-round`; `scripts/{collect-round,commit-fixups,publish-round,push-rebased}.sh`; `prompts/omp-repair.md`; `config/root--git--oh-my-pi.sh`; `config/fixups/root--git--oh-my-pi/`; the `oh-my-pi` and `apple-sdk` releases; README's oh-my-pi section; the secrets `OMP_FORK_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` if no remaining workflow references them. `docs/specs/2026-11-11-omp-auto-integration-design.md` gets "superseded by the fork's `fork-ci` branch; see ompweb-dev/ompweb `docs/specs/2026-11-12-omp-build-in-ompweb-design.md`". Kept: `integration` (F8), `changelog-merge`, `integration.test.sh`, `publish.yml`, `ompweb.yml` (with W1's fetch line), `graphify.yml`, `superpowers.yml`, the `omp-auto` label and old issues.
 
 ## Rollout and rollback
 

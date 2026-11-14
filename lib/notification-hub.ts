@@ -1,4 +1,5 @@
 import webpush from "web-push";
+import { releaseRepo } from "./release-repo";
 import en from "./i18n/locales/en.json";
 import ja from "./i18n/locales/ja.json";
 import zhCN from "./i18n/locales/zh-CN.json";
@@ -23,7 +24,7 @@ const PUSH_TIMEOUT_MS = 10_000;
 /** Waits before each retry of a push the push service never answered or answered 429/5xx. Well inside the TTL. */
 export const PUSH_RETRY_DELAYS_MS = [2_000, 10_000, 30_000];
 // Apple's push service rejects VAPID subjects it cannot resolve (e.g. localhost mail).
-const VAPID_SUBJECT = "https://github.com/kahme247/ompweb";
+const VAPID_SUBJECT = `https://github.com/${releaseRepo()}`;
 
 /** What a tab last reported. Written only by presence reports, pruned by TTL. */
 export interface NotificationPresence {

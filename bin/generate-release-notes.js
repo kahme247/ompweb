@@ -7,6 +7,10 @@ const { readFileSync, existsSync, writeFileSync } = require("node:fs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { resolve } = require("node:path");
 
+// `owner/name` from package.json's repository (lib/release-repo.ts does the same for the TypeScript side).
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const DEFAULT_REPO = /github\.com[/:]([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(require("../package.json").repository.url)[1];
+
 const IGNORED_CONTRIBUTORS = new Set([
   "kahme247",
   "harvi8",
@@ -77,7 +81,7 @@ function parseGitLog(rawLog) {
   return commits;
 }
 
-function cleanSubject(subject, repo = "kahme247/ompweb") {
+function cleanSubject(subject, repo = DEFAULT_REPO) {
   let cleaned = subject.trim();
 
   cleaned = cleaned.replace(/^(?:feat|fix|perf|refactor|style|security|docs|chore|test|ci|build)(?:\([^)]+\))?!?:?\s*/i, "");
@@ -144,7 +148,7 @@ function formatReleaseNotes({
   changelogBody,
   commits = [],
   previousTag,
-  repo = "kahme247/ompweb",
+  repo = DEFAULT_REPO,
 }) {
   const lines = [];
 
@@ -225,7 +229,7 @@ function formatReleaseNotes({
 
 function generateReleaseNotes({
   tag,
-  repo = process.env.GITHUB_REPOSITORY || "kahme247/ompweb",
+  repo = process.env.GITHUB_REPOSITORY || DEFAULT_REPO,
   changelogPath = "CHANGELOG.md",
   cwd = process.cwd(),
 } = {}) {
@@ -291,7 +295,7 @@ if (require.main === module) {
   const args = process.argv.slice(2);
   let tag = process.env.TAG || process.env.GITHUB_REF_NAME;
   let outputPath = null;
-  let repo = process.env.GITHUB_REPOSITORY || "kahme247/ompweb";
+  let repo = process.env.GITHUB_REPOSITORY || DEFAULT_REPO;
   let changelogPath = "CHANGELOG.md";
 
   for (let i = 0; i < args.length; i++) {

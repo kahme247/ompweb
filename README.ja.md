@@ -2,10 +2,10 @@
 
 [![npm version](https://img.shields.io/npm/v/@kahme247/ompweb.svg?logo=npm&color=e05d44)](https://www.npmjs.com/package/@kahme247/ompweb)
 [![node version](https://img.shields.io/node/v/@kahme247/ompweb.svg?logo=node.js&color=44cc11)](https://nodejs.org)
-[![license](https://img.shields.io/github/license/kahme247/ompweb.svg?color=44cc11)](./LICENSE)
+[![license](https://img.shields.io/github/license/ompweb-dev/ompweb.svg?color=44cc11)](./LICENSE)
 [![npm downloads](https://img.shields.io/npm/dm/@kahme247/ompweb.svg?color=44cc11)](https://www.npmjs.com/package/@kahme247/ompweb)
-[![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
+[![GitHub stars](https://img.shields.io/github/stars/ompweb-dev/ompweb.svg?logo=github)](https://github.com/ompweb-dev/ompweb/stargazers)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/ompweb-dev/ompweb/pulls)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
@@ -26,7 +26,7 @@
 
 ## 必要条件
 
-- omp を別途インストールする必要はありません。ompweb は独自の [omp](https://github.com/can1357/oh-my-pi) ビルド `ompweb-omp` を使い、`~/.omp` の設定、認証、セッションをそのまま使います。どのインストール（npm、npx、単一バイナリ）も、初回起動時に同じバージョンの `ompweb-omp` をそのバージョンの [GitHub リリース](https://github.com/kahme247/ompweb/releases)からダウンロードし、SHA-256 を確認して保存します（単一バイナリでは同じディレクトリ、それ以外は `~/.omp/agent/omp-web/omp/<version>/`）。`ompweb fetch-omp` でも取得できます。対応プラットフォームは linux-x64、linux-arm64、darwin-x64、darwin-arm64、windows-x64 です。それ以外（musl の Linux、Arm 版 Windows、FreeBSD）ではセッションを開始できません。GitHub に接続できないマシンでは、`OMP_WEB_OMP_BIN` にそのリリースの `ompweb-omp-<os>-<arch>` のコピーを指定してください
+- omp を別途インストールする必要はありません。ompweb は独自の [omp](https://github.com/can1357/oh-my-pi) ビルド `ompweb-omp` を使い、`~/.omp` の設定、認証、セッションをそのまま使います。どのインストール（npm、npx、単一バイナリ）も、初回起動時に同じバージョンの `ompweb-omp` をそのバージョンの [GitHub リリース](https://github.com/ompweb-dev/ompweb/releases)からダウンロードし、SHA-256 を確認して保存します（単一バイナリでは同じディレクトリ、それ以外は `~/.omp/agent/omp-web/omp/<version>/`）。`ompweb fetch-omp` でも取得できます。対応プラットフォームは linux-x64、linux-arm64、darwin-x64、darwin-arm64、windows-x64 です。それ以外（musl の Linux、Arm 版 Windows、FreeBSD）ではセッションを開始できません。GitHub に接続できないマシンでは、`OMP_WEB_OMP_BIN` にそのリリースの `ompweb-omp-<os>-<arch>` のコピーを指定してください
 - Node.js `>= 24`。サーバーは [Bun](https://bun.sh) で動作し、npm パッケージの依存関係として自動的にインストールされます（同梱の Bun が見つからない場合は `PATH` 上の Bun を使用します）
 
 キュー内のメッセージに対する **Steer**、**Delete**、**Edit** 操作は `ompweb-omp` チャネルのコマンド（`promote_queued_message`、`remove_queued_message`）です。omp がキャンセルを確認してから表示を削除し、編集時はキャンセル成功後にテキストを入力欄へ戻します。すでにキューに存在しないメッセージでは、キューを変更せず通知を表示します。ompweb が重複したステアリングメッセージを送信することはありません。
@@ -140,7 +140,7 @@ Linux トレイ、Windows サービス）はインストール時に `OMP_WEB_PA
 ## 開発
 
 ```bash
-git clone https://github.com/kahme247/ompweb.git
+git clone https://github.com/ompweb-dev/ompweb.git
 cd ompweb
 npm install
 npx bun runner/scripts/use-omp-build.ts && (cd runner && npx bun install --frozen-lockfile)

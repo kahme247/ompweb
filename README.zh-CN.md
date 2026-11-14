@@ -2,10 +2,10 @@
 
 [![npm version](https://img.shields.io/npm/v/@kahme247/ompweb.svg?logo=npm&color=e05d44)](https://www.npmjs.com/package/@kahme247/ompweb)
 [![node version](https://img.shields.io/node/v/@kahme247/ompweb.svg?logo=node.js&color=44cc11)](https://nodejs.org)
-[![license](https://img.shields.io/github/license/kahme247/ompweb.svg?color=44cc11)](./LICENSE)
+[![license](https://img.shields.io/github/license/ompweb-dev/ompweb.svg?color=44cc11)](./LICENSE)
 [![npm downloads](https://img.shields.io/npm/dm/@kahme247/ompweb.svg?color=44cc11)](https://www.npmjs.com/package/@kahme247/ompweb)
-[![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
+[![GitHub stars](https://img.shields.io/github/stars/ompweb-dev/ompweb.svg?logo=github)](https://github.com/ompweb-dev/ompweb/stargazers)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/ompweb-dev/ompweb/pulls)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
@@ -26,7 +26,7 @@
 
 ## 环境要求
 
-- 无需另行安装 omp：ompweb 使用自己的 [omp](https://github.com/can1357/oh-my-pi) 构建 `ompweb-omp`，直接使用 `~/.omp` 中的设置、认证和会话。每种安装方式（npm、npx 或单一可执行文件）都会在首次启动时从该版本的 [GitHub 发布](https://github.com/kahme247/ompweb/releases)下载同一版本的 `ompweb-omp`，校验 SHA-256 后保存（单一可执行文件放在同一目录，其他方式放在 `~/.omp/agent/omp-web/omp/<version>/`）；也可用 `ompweb fetch-omp` 手动获取。支持的平台为 linux-x64、linux-arm64、darwin-x64、darwin-arm64 和 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上无法启动会话。无法访问 GitHub 的机器请将 `OMP_WEB_OMP_BIN` 指向该发布的 `ompweb-omp-<os>-<arch>` 副本
+- 无需另行安装 omp：ompweb 使用自己的 [omp](https://github.com/can1357/oh-my-pi) 构建 `ompweb-omp`，直接使用 `~/.omp` 中的设置、认证和会话。每种安装方式（npm、npx 或单一可执行文件）都会在首次启动时从该版本的 [GitHub 发布](https://github.com/ompweb-dev/ompweb/releases)下载同一版本的 `ompweb-omp`，校验 SHA-256 后保存（单一可执行文件放在同一目录，其他方式放在 `~/.omp/agent/omp-web/omp/<version>/`）；也可用 `ompweb fetch-omp` 手动获取。支持的平台为 linux-x64、linux-arm64、darwin-x64、darwin-arm64 和 windows-x64；在其他平台（musl 的 Linux、Arm 版 Windows、FreeBSD）上无法启动会话。无法访问 GitHub 的机器请将 `OMP_WEB_OMP_BIN` 指向该发布的 `ompweb-omp-<os>-<arch>` 副本
 - Node.js `>= 24`。服务器运行在 [Bun](https://bun.sh) 上，Bun 会作为 npm 包的依赖自动安装（找不到随包安装的 Bun 时使用 `PATH` 中的 Bun）
 
 排队消息的 **Steer**、**Delete** 和 **Edit** 操作是 `ompweb-omp` 通道的命令（`promote_queued_message`、`remove_queued_message`）。只有 omp 确认取消后才会移除消息；编辑时也必须先取消成功，再将文本恢复到输入框。消息已不在队列中时，界面保留队列并显示提示；ompweb 不会重复发送一条引导消息。
@@ -133,7 +133,7 @@ Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置�
 ## 本地开发
 
 ```bash
-git clone https://github.com/kahme247/ompweb.git
+git clone https://github.com/ompweb-dev/ompweb.git
 cd ompweb
 npm install
 npx bun runner/scripts/use-omp-build.ts && (cd runner && npx bun install --frozen-lockfile)

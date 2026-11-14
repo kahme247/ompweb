@@ -11,7 +11,7 @@
 **Owners and places:**
 - **integration-ci** — `andrebrait/integration-ci` (a local checkout), CI reads its `main`; the script's only home. Tasks I1, I2, I3.
 - **fork-ci** — orphan branch `fork-ci` of `ompweb-dev/oh-my-pi`, in a worktree of the local oh-my-pi checkout. Sources: integration-ci at `5db42d1`. Tasks K1–K7.
-- **ompweb** — `kahme247/ompweb`, PR #473 (`feat/omp-runner`). Tasks W1–W3.
+- **ompweb** — `ompweb-dev/ompweb`, PR #473 (`feat/omp-runner`). Tasks W1–W3.
 
 Order: I1 → K1–K4 → K5 → K6 → W1+W2+I2 (PR B) → W3 (PR C) → K7 → I3.
 
@@ -84,7 +84,7 @@ Order: I1 → K1–K4 → K5 → K6 → W1+W2+I2 (PR B) → W3 (PR C) → K7 →
 
 - [x] `scripts/fake-npm/npm`: a stub `npm` that, for `publish <tarball>`, copies the tarball into `$OMP_PACK_OUT` and exits 0; anything else exits 0 without network.
 - [x] `omp.yml` job `pack` (needs `version`, `natives`; `contents: read`; fork code at `inputs.sha`): `./.github/actions/bun-install`; utils+natives version lines; `natives-*` artifacts into `packages/natives/native`; `PATH="$GITHUB_WORKSPACE/ci/scripts/fake-npm:$PATH" bun scripts/ci-release-publish.ts` (12 JS tarballs); `bun scripts/ci-release-publish.ts --native-leaf <tag>` for `linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64`; `index.json`; zip `omp-packages-<version>.zip`; fail unless 18 tarballs; artifact `omp-packages`. `publish` needs `pack`.
-- [x] `omp-auto.yml` `release`: upload the zip. Prune: skip the tag in `kahme247/ompweb` `main` `runner/omp-build.json` (`gh api repos/kahme247/ompweb/contents/runner/omp-build.json`; missing → nothing extra kept).
+- [x] `omp-auto.yml` `release`: upload the zip. Prune: skip the tag in `ompweb-dev/ompweb` `main` `runner/omp-build.json` (`gh api repos/ompweb-dev/ompweb/contents/runner/omp-build.json`; missing → nothing extra kept).
 - [x] Verify `actionlint`. Commit `ci: attach the npm packages to each integration release`.
 
 ### Task K5 (fork, operational; user is fork admin): cut-over round

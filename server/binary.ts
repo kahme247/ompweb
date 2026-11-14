@@ -5,6 +5,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import packageJson from "../package.json";
+import { releaseRepo } from "../lib/release-repo";
 import { formatAddressBanner, getAccessibleAddresses, getBrowserUrl, openInBrowser } from "../bin/network-addresses";
 import { runHashPasswordCommand } from "../bin/omp-web-hash-password";
 import { checkLaunchSecurity, parseLaunchOptions } from "../bin/omp-web-options";
@@ -15,7 +16,7 @@ import { runHostUpdateWorker } from "../lib/hosts/update-worker";
 // lib/omp/session-edit-extension.mjs in it to omp.
 process.env.OMP_WEB_PACKAGE_DIR ??= path.dirname(realpathSync(process.execPath));
 const root = process.env.OMP_WEB_PACKAGE_DIR;
-const SEE_README = "https://github.com/kahme247/ompweb#single-binary shows how to run `ompweb` and `ompweb host` as services instead.";
+const SEE_README = `https://github.com/${releaseRepo()}#single-binary shows how to run \`ompweb\` and \`ompweb host\` as services instead.`;
 
 const command = process.argv[2];
 if (command === "host-update-worker") {
