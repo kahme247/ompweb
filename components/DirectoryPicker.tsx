@@ -7,7 +7,7 @@ import { isValidOmpProfile } from "@/lib/omp-profile";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { appendProgress, cloneDirectoryName } from "@/lib/git-clone";
-import { newUploadId as newCloneId } from "@/lib/event-stream";
+import { randomUUID as newCloneId } from "@/lib/random-uuid";
 
 interface DirectoryEntry {
   name: string;

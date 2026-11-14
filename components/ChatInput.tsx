@@ -36,7 +36,8 @@ import {
   uploadRecovery,
   type AttachedUpload,
 } from "./ChatInput-uploads";
-import { discardUpload, newUploadId, uploadFile, UploadFailedError, type UploadHandle } from "@/lib/event-stream";
+import { discardUpload, uploadFile, UploadFailedError, type UploadHandle } from "@/lib/event-stream";
+import { randomUUID } from "@/lib/random-uuid";
 import { MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE } from "@/lib/upload-limits";
 import { hostProjectKey, LOCAL_HOST_ID } from "@/lib/project-ordering";
 import {
@@ -724,7 +725,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ({ proof }) => settle({ status: "done", received: size, error: null, proof }),
       // 410: the worker already cancelled it on its host (the page went into the back/forward cache). A Retry under a
       // new id starts over, so the cancel still pending for this one can never reach it.
-      (error: unknown) => settle({ status: "error", error: uploadErrorMessage(error), ...(error instanceof UploadFailedError && error.status === 410 ? { id: newUploadId(), proof: undefined } : {}) }),
+      (error: unknown) => settle({ status: "error", error: uploadErrorMessage(error), ...(error instanceof UploadFailedError && error.status === 410 ? { id: randomUUID(), proof: undefined } : {}) }),
     );
   }, [patchUpload, t]);
 
@@ -735,7 +736,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const room = Math.max(0, MAX_UPLOADS_PER_MESSAGE - attachedUploadsRef.current.length);
     const fitting = files.flatMap((file, i) => (file.size <= MAX_UPLOAD_BYTES ? [{ file, previewUrl: previewUrls[i] }] : []));
     const added = fitting.slice(0, room).map(({ file, previewUrl }): AttachedUpload => ({
-      id: newUploadId(),
+      id: randomUUID(),
       name: file.name,
       size: file.size,
       hostId: resolveUploadHostRef.current ? "" : uploadHostIdRef.current,

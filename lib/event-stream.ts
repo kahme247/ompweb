@@ -1,5 +1,6 @@
 "use client";
 
+import { randomUUID } from "./random-uuid";
 import type { BrowserTransport, ConnectionDiagnostics, EventStreamChannel } from "./event-stream-protocol";
 import { registerNotificationWorker } from "./notification-client";
 import type { OutboxEntry, OutboxMode } from "./types";
@@ -309,7 +310,7 @@ class Transport {
   private holdLifetimeLock(): void {
     const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
     if (!locks) return;
-    const name = `omp-web-event-stream:${crypto.randomUUID()}`;
+    const name = `omp-web-event-stream:${randomUUID()}`;
     void locks.request(name, () => {
       this.port.postMessage({ op: "lock", name });
       return new Promise<never>(() => {});
@@ -562,15 +563,6 @@ export interface UploadHandle {
 /** HTTP PUT bodies in SSE mode (spec U4). */
 const HTTP_UPLOAD_BYTES = 1024 * 1024;
 
-/** A UUID v4, lowercase (UPLOAD_ID_RE); no crypto.randomUUID (insecure LAN origins lack it). */
-export function newUploadId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
 /** Back-off before each automatic resume; the last value repeats. */
 const RESUME_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000];
 /** An outage (transient failures with no new bytes on the host in between) this long stops resuming: the chip then
@@ -587,7 +579,7 @@ export function uploadFile(
   file: File,
   hostId: string,
   onProgress: (received: number) => void,
-  id = newUploadId(),
+  id = randomUUID(),
   onReconnecting: (error: unknown) => void = () => {},
 ): UploadHandle {
   const controller = new AbortController();
