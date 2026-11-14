@@ -57,8 +57,12 @@ import {
   AppUpdateTransportError,
   COMPLETED_APP_UPDATE_KEY,
   DISMISSED_APP_UPDATE_KEY,
+  commitAppUpdate,
   fetchAppUpdateJson,
+  isAwaitingAppUpdateApproval,
   isExactLegacyTargetCompletion,
+  isStaleAppUpdatePlanError,
+  prepareAppUpdate,
   readDismissedVersion,
   rememberDismissedVersion,
   sanitizeAppUpdateError,
@@ -93,8 +97,10 @@ import {
   getMonotonicAppUpdateStage,
   type AppUpdateInfo,
   type AppUpdatePhase,
+  type AppUpdatePlanStatus,
   type AppUpdateStage,
 } from "./AppUpdateDialog";
+import type { UpgradeApproval, UpgradePlan } from "@/lib/upgrade-types";
 import { UpdateToastBody } from "./UpdateToast";
 import { ArchiveBrowser } from "./ArchiveBrowser";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
@@ -309,6 +315,21 @@ export function AppShell({ appName }: { appName: string }) {
   const appUpdateRecoveryCommitAttemptRef = useRef<string | null>(null);
   const appUpdateStageFlowRef = useRef(0);
   const appUpdateAcknowledgementsRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  const appUpdateStalledRef = useRef<{ attemptId: string; targetVersion: string } | null>(null);
+  // A prepared plan is only a proposal; `appUpdateApprovalRef` is set solely by an explicit user approval.
+  const [appUpdatePlan, setAppUpdatePlan] = useState<UpgradePlan | null>(null);
+  const [appUpdatePlanStatus, setAppUpdatePlanStatus] = useState<AppUpdatePlanStatus>("idle");
+  const appUpdatePlanRequestRef = useRef<number | null>(null);
+  const appUpdatePlanSeqRef = useRef(0);
+  const appUpdatePlanAttemptRef = useRef<{ attemptId: string; targetVersion: string } | null>(null);
+  const appUpdateApprovalRef = useRef<{ attemptId: string; approval: UpgradeApproval } | null>(null);
+  const discardAppUpdatePlan = useCallback(() => {
+    appUpdatePlanRequestRef.current = null;
+    appUpdatePlanAttemptRef.current = null;
+    appUpdateApprovalRef.current = null;
+    setAppUpdatePlan(null);
+    setAppUpdatePlanStatus("idle");
+  }, []);
   const advanceAppUpdateVisibleStage = useCallback((next: AppUpdateStage) => {
     const visible = getMonotonicAppUpdateStage(appUpdateVisibleStageRef.current, next);
     if (visible === appUpdateVisibleStageRef.current) return;
@@ -382,7 +403,7 @@ export function AppShell({ appName }: { appName: string }) {
 
     setAppUpdate(data);
 
-    if (autoOpen && !data.selfUpdateStatus && data.updateAvailable && data.availableVersion) {
+    if (autoOpen && (!data.selfUpdateStatus || isAwaitingAppUpdateApproval(data)) && data.updateAvailable && data.availableVersion) {
       if (data.selfUpdateSupported === true) {
         if (readDismissedVersion(DISMISSED_APP_UPDATE_KEY) !== data.availableVersion) {
           setAppUpdatePhase("idle");
@@ -450,13 +471,17 @@ export function AppShell({ appName }: { appName: string }) {
     setAppUpdateDialogOpen(true);
   }, []);
 
-  const submitAppUpdateCommit = useCallback((attemptId: string) => {
-    void fetchAppUpdateJson<{ error?: string }>("/api/app-update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "commit", attemptId }),
-      keepalive: true,
-    }, 202).then(() => {
+  const reviewChangedAppUpdatePlan = useCallback(() => {
+    appUpdateAttemptRef.current = null;
+    appUpdateStartInFlightRef.current = false;
+    resetAppUpdateVisibleStage();
+    discardAppUpdatePlan();
+    setAppUpdateError(t("appUpdateDialog.planChanged"));
+    setAppUpdatePhase("idle");
+  }, [discardAppUpdatePlan, resetAppUpdateVisibleStage, t]);
+
+  const submitAppUpdateCommit = useCallback((attemptId: string, approval: UpgradeApproval) => {
+    void commitAppUpdate(attemptId, approval).then(() => {
       if (appUpdateAttemptRef.current === attemptId) {
         appUpdateCommittedAttemptRef.current = attemptId;
       }
@@ -468,9 +493,14 @@ export function AppShell({ appName }: { appName: string }) {
         return;
       }
       if (appUpdateAttemptRef.current !== attemptId) return;
+      // The plan or hosts changed after approval: show a fresh plan; the old approval is never reused.
+      if (isStaleAppUpdatePlanError(error)) {
+        reviewChangedAppUpdatePlan();
+        return;
+      }
       showAppUpdateFailure(error);
     });
-  }, [showAppUpdateFailure]);
+  }, [reviewChangedAppUpdatePlan, showAppUpdateFailure]);
 
   const recoverPreparedAppUpdate = useCallback((data: AppUpdateInfo, attemptId: string) => {
     const status = data.selfUpdateStatus;
@@ -479,9 +509,14 @@ export function AppShell({ appName }: { appName: string }) {
       || status.state !== "prepared"
       || (status.stage !== "preparing" && status.stage !== "stopping")
     ) return;
+    // Only a recorded approval may be redelivered; an unapproved prepared attempt stays a proposal.
+    const recorded = appUpdateApprovalRef.current?.attemptId === attemptId ? appUpdateApprovalRef.current.approval : null;
+    const approved = data.upgradePlan?.approved;
+    const approval = recorded ?? (approved && data.upgradePlan ? { planId: data.upgradePlan.id, force: approved.force } : null);
+    if (!approval) return;
     if (appUpdateRecoveryCommitAttemptRef.current === attemptId) return;
     appUpdateRecoveryCommitAttemptRef.current = attemptId;
-    submitAppUpdateCommit(attemptId);
+    submitAppUpdateCommit(attemptId, approval);
   }, [submitAppUpdateCommit]);
 
   const completeAppUpdate = useCallback(async (targetVersion: string) => {
@@ -561,10 +596,23 @@ export function AppShell({ appName }: { appName: string }) {
         return;
       }
     }
+    // The backend keeps the update alive past this deadline: report "still running" and let the user re-read status. Never fail, resubmit or force.
     if (appUpdateAttemptRef.current === attemptId) {
-      showAppUpdateFailure(t("appUpdateDialog.timeout"));
+      appUpdateStalledRef.current = { attemptId, targetVersion };
+      setAppUpdateError(null);
+      setAppUpdatePhase("stalled");
     }
-  }, [advanceAppUpdateVisibleStage, completeAppUpdate, handleTerminalAppUpdate, recoverPreparedAppUpdate, refreshAppUpdate, showAppUpdateFailure, showAppUpdateStagesThrough, t]);
+  }, [advanceAppUpdateVisibleStage, completeAppUpdate, handleTerminalAppUpdate, recoverPreparedAppUpdate, refreshAppUpdate, showAppUpdateFailure, showAppUpdateStagesThrough]);
+
+  // Reads status again for the same attempt; it submits nothing.
+  const checkStalledAppUpdate = useCallback(() => {
+    const stalled = appUpdateStalledRef.current;
+    if (!stalled) return;
+    appUpdateStalledRef.current = null;
+    appUpdateAttemptRef.current = null;
+    setAppUpdatePhase("restarting");
+    void monitorAppUpdate(stalled.attemptId, stalled.targetVersion);
+  }, [monitorAppUpdate]);
 
   useEffect(() => {
     try {
@@ -580,7 +628,7 @@ export function AppShell({ appName }: { appName: string }) {
     void refreshAppUpdate(false, true)
       .then(async (data) => {
         const status = data?.selfUpdateStatus;
-        if (!data || !status) return;
+        if (!data || !status || isAwaitingAppUpdateApproval(data)) return;
         const recoveredStage = status.stage ?? "stopping";
         const initialStage = recoveredStage === "preparing" ? "preparing" : "stopping";
         if (initialStage === "stopping") appUpdateCommittedAttemptRef.current = status.attemptId;
@@ -595,24 +643,24 @@ export function AppShell({ appName }: { appName: string }) {
       .catch(() => {});
   }, [advanceAppUpdateVisibleStage, handleTerminalAppUpdate, monitorAppUpdate, recoverPreparedAppUpdate, refreshAppUpdate, showAppUpdateStagesThrough, t]);
 
-  const proceedWithAppUpdate = useCallback(async () => {
-    if (appUpdateStartInFlightRef.current) return;
+  const proceedWithAppUpdate = useCallback(async (approval: UpgradeApproval) => {
+    const prepared = appUpdatePlanAttemptRef.current;
+    if (
+      appUpdateStartInFlightRef.current
+      || !prepared
+      || appUpdatePlan === null
+      || approval.planId !== appUpdatePlan.id
+      || (appUpdatePlan.requiresForce && !approval.force)
+    ) return;
     appUpdateStartInFlightRef.current = true;
     appUpdateCompletingRef.current = false;
     resetAppUpdateVisibleStage();
+    appUpdateApprovalRef.current = { attemptId: prepared.attemptId, approval };
     advanceAppUpdateVisibleStage("preparing");
     setAppUpdatePhase("preparing");
     setAppUpdateError(null);
     try {
-      const prepared = await fetchAppUpdateJson<{ attemptId?: string; targetVersion?: string }>("/api/app-update", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "prepare" }),
-      });
-      if (!prepared.attemptId || !prepared.targetVersion) {
-        throw new Error("Invalid update response");
-      }
-      submitAppUpdateCommit(prepared.attemptId);
+      submitAppUpdateCommit(prepared.attemptId, approval);
       void monitorAppUpdate(prepared.attemptId, prepared.targetVersion);
       await showAppUpdateStagesThrough("stopping");
       if (appUpdateAttemptRef.current !== prepared.attemptId) return;
@@ -620,7 +668,27 @@ export function AppShell({ appName }: { appName: string }) {
     } catch (error) {
       showAppUpdateFailure(error);
     }
-  }, [advanceAppUpdateVisibleStage, monitorAppUpdate, resetAppUpdateVisibleStage, showAppUpdateFailure, showAppUpdateStagesThrough, submitAppUpdateCommit]);
+  }, [advanceAppUpdateVisibleStage, appUpdatePlan, monitorAppUpdate, resetAppUpdateVisibleStage, showAppUpdateFailure, showAppUpdateStagesThrough, submitAppUpdateCommit]);
+
+  // Prepare a plan whenever the dialog is open and idle without one. Preparing never commits.
+  useEffect(() => {
+    if (!appUpdateDialogOpen || appUpdatePhase !== "idle" || appUpdatePlanStatus !== "idle" || appUpdatePlanRequestRef.current !== null) return;
+    const request = ++appUpdatePlanSeqRef.current;
+    appUpdatePlanRequestRef.current = request;
+    setAppUpdatePlanStatus("loading");
+    void prepareAppUpdate().then((prepared) => {
+      if (appUpdatePlanRequestRef.current !== request) return;
+      appUpdatePlanRequestRef.current = null;
+      appUpdatePlanAttemptRef.current = { attemptId: prepared.attemptId, targetVersion: prepared.targetVersion };
+      setAppUpdatePlan(prepared.plan);
+      setAppUpdatePlanStatus("ready");
+    }, (error: unknown) => {
+      if (appUpdatePlanRequestRef.current !== request) return;
+      appUpdatePlanRequestRef.current = null;
+      setAppUpdateError(sanitizeAppUpdateError(error) || null);
+      setAppUpdatePlanStatus("failed");
+    });
+  }, [appUpdateDialogOpen, appUpdatePhase, appUpdatePlanStatus]);
 
   const dismissAppUpdate = useCallback(() => {
     if (appUpdatePhase === "idle" && appUpdate?.availableVersion) {
@@ -631,16 +699,30 @@ export function AppShell({ appName }: { appName: string }) {
     setAppUpdatePhase("idle");
     setAppUpdateError(null);
     appUpdateAttemptRef.current = null;
+    appUpdateStalledRef.current = null;
+    discardAppUpdatePlan();
     resetAppUpdateVisibleStage();
-  }, [appUpdate?.availableVersion, appUpdatePhase, resetAppUpdateVisibleStage, t]);
+  }, [appUpdate?.availableVersion, appUpdatePhase, discardAppUpdatePlan, resetAppUpdateVisibleStage, t]);
+
+  // Retry after a failure, an expired plan or a failed prepare: always a fresh plan, never a resumed approval.
+  const refreshAppUpdatePlan = useCallback(() => {
+    appUpdateAttemptRef.current = null;
+    appUpdateStartInFlightRef.current = false;
+    appUpdateCompletingRef.current = false;
+    discardAppUpdatePlan();
+    resetAppUpdateVisibleStage();
+    setAppUpdateError(null);
+    setAppUpdatePhase("idle");
+  }, [discardAppUpdatePlan, resetAppUpdateVisibleStage]);
 
   const requestAppUpdateFromSettings = useCallback(() => {
     setSettingsTab(null);
+    discardAppUpdatePlan();
     resetAppUpdateVisibleStage();
     setAppUpdateError(null);
     setAppUpdatePhase("idle");
     window.requestAnimationFrame(() => setAppUpdateDialogOpen(true));
-  }, [resetAppUpdateVisibleStage]);
+  }, [discardAppUpdatePlan, resetAppUpdateVisibleStage]);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
   const [sessionInfoContainer, setSessionInfoContainer] = useState<HTMLDivElement | null>(null);
@@ -2802,7 +2884,7 @@ export function AppShell({ appName }: { appName: string }) {
 
     </div>
     <LocalDaemonBanner />
-    <AppUpdateDialog open={appUpdateDialogOpen} update={appUpdate} phase={appUpdatePhase} visibleStage={appUpdateVisibleStage} error={appUpdateError} onProceed={() => void proceedWithAppUpdate()} onNotNow={dismissAppUpdate} />
+    <AppUpdateDialog open={appUpdateDialogOpen} update={appUpdate} phase={appUpdatePhase} visibleStage={appUpdateVisibleStage} error={appUpdateError} plan={appUpdatePlan} planStatus={appUpdatePlanStatus} onRefreshPlan={refreshAppUpdatePlan} onCheckStatus={checkStalledAppUpdate} onProceed={(approval) => void proceedWithAppUpdate(approval)} onNotNow={dismissAppUpdate} />
     {archiveBrowserOpen && (
       <ArchiveBrowser
         open={archiveBrowserOpen}

@@ -8,9 +8,11 @@ import { toast } from "@/components/ui/toast";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { releaseRepo } from "@/lib/release-repo";
+import { Check } from "@/components/ui/field";
+import type { UpgradeApproval, UpgradeParticipant, UpgradePlan } from "@/lib/upgrade-types";
 import { MarkdownBody } from "./MarkdownBody";
 
-export type AppUpdatePhase = "idle" | "preparing" | "restarting" | "completed" | "failed";
+export type AppUpdatePhase = "idle" | "preparing" | "restarting" | "stalled" | "completed" | "failed";
 export type AppUpdateStage = "preparing" | "stopping" | "installing" | "restarting" | "finalizing";
 
 const APP_UPDATE_STEPS: ReadonlyArray<{ stage: AppUpdateStage; labelKey: string }> = [
@@ -51,7 +53,7 @@ export function getAppUpdateStepIndex(phase: AppUpdatePhase, stage?: AppUpdateSt
   if (phase === "completed") return APP_UPDATE_STEPS.length;
   if (stage !== undefined) return getAppUpdateStageIndex(stage);
   if (phase === "preparing") return 0;
-  return phase === "restarting" ? 1 : 0;
+  return phase === "restarting" || phase === "stalled" ? 1 : 0;
 }
 const MAX_RELEASE_NOTES_BYTES = 64 * 1024;
 
@@ -138,6 +140,7 @@ export interface AppUpdateInfo {
     cleanupReady?: boolean;
     error?: string;
   } | null;
+  upgradePlan?: UpgradePlan;
   appUpdateDrain?: {
     state: "waiting" | "stopping" | "stopped" | "failed";
     total: number;
@@ -162,17 +165,82 @@ export function getAppUpdateVersionTransition(
   return { fromVersion, targetVersion };
 }
 
+export type AppUpdatePlanStatus = "idle" | "loading" | "ready" | "failed";
+
+const countText = (value: number | null): string => (value === null ? "?" : String(value));
+
+function UpgradeHostRow({ host, showStage }: { host: UpgradeParticipant; showStage: boolean }) {
+  const { t } = useI18n();
+  const unknown = t("hostUpdates.unknown");
+  const transition = host.needsUpgrade
+    ? t("appUpdateDialog.planHostVersion", { from: host.currentVersion ?? unknown, to: host.targetVersion ?? unknown })
+    : t("appUpdateDialog.planHostUnchanged", { version: host.currentVersion ?? unknown });
+  const stageColor = host.stage === "failed"
+    ? "var(--status-error)"
+    : host.stage === "ready"
+      ? "var(--status-success)"
+      : host.stage === "updating"
+        ? "var(--accent)"
+        : "var(--text-muted)";
+  return (
+    <li style={{ padding: "8px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "grid", gap: 3, fontSize: 12, minWidth: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+        <strong style={{ color: "var(--text)", fontWeight: 600, overflowWrap: "anywhere" }}>{host.label}</strong>
+        {showStage && <span style={{ color: stageColor, fontWeight: 600, flexShrink: 0 }}>{t(`appUpdateDialog.planStage.${host.stage}`)}</span>}
+      </div>
+      <div style={{ fontFamily: "var(--font-mono)", color: host.needsUpgrade ? "var(--accent)" : "var(--text-muted)" }}>{transition}</div>
+      <div style={{ color: "var(--text-muted)" }}>
+        {t(`appUpdateDialog.planRecovery.${host.recovery}`)} · {t("appUpdateDialog.planSessions", { sessions: countText(host.sessionProcesses), turns: countText(host.activeTurns) })}
+      </div>
+      {host.blockedReason && <div style={{ color: "var(--status-warning)", overflowWrap: "anywhere" }}>{t("hostUpdates.blocked", { reason: host.blockedReason })}</div>}
+      {host.error && <div role="alert" style={{ color: "var(--status-error)", overflowWrap: "anywhere" }}>{host.error}</div>}
+    </li>
+  );
+}
+
+function UpgradeHostList({ plan, showStage }: { plan: UpgradePlan; showStage: boolean }) {
+  const { t } = useI18n();
+  const affected = plan.hosts.filter((host) => host.needsUpgrade);
+  const known = (pick: (host: UpgradeParticipant) => number | null) =>
+    affected.some((host) => pick(host) === null) ? "?" : String(affected.reduce((sum, host) => sum + (pick(host) ?? 0), 0));
+  return (
+    <section aria-label={t("appUpdateDialog.planHostsTitle")} style={{ marginTop: 14, display: "grid", gap: 7 }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>{t("appUpdateDialog.planHostsTitle")}</div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("appUpdateDialog.planCompatibility", { min: plan.compatibility.min, max: plan.compatibility.max })}</div>
+      {plan.hosts.length === 0
+        ? <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("appUpdateDialog.planNoHosts")}</div>
+        : <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: 6 }}>{plan.hosts.map((host) => <UpgradeHostRow key={host.id} host={host} showStage={showStage} />)}</ul>}
+      {!showStage && affected.length > 0 && (
+        <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+          {t("appUpdateDialog.planAffected", { sessions: known((host) => host.sessionProcesses), turns: known((host) => host.activeTurns), hosts: affected.length })}
+        </div>
+      )}
+      {showStage && plan.error && <div role="alert" style={{ fontSize: 12, color: "var(--status-error)", overflowWrap: "anywhere" }}>{plan.error}</div>}
+    </section>
+  );
+}
+
 interface AppUpdateDialogProps {
   open: boolean;
   update: AppUpdateInfo | null;
   phase: AppUpdatePhase;
   visibleStage?: AppUpdateStage;
   error: string | null;
-  onProceed: () => void;
+  /** The server-prepared plan under review. Nothing is committed until `onProceed` receives an approval naming `plan.id`. */
+  plan: UpgradePlan | null;
+  planStatus: AppUpdatePlanStatus;
+  /** Discard the plan and prepare a fresh one; also the retry action after a failure. */
+  onRefreshPlan: () => void;
+  /** Re-read the status of a stalled update; never resubmits anything. */
+  onCheckStatus: () => void;
+  onProceed: (approval: UpgradeApproval) => void;
   onNotNow: () => void;
 }
 
-export function AppUpdateDialog({ open, update, phase, visibleStage, error, onProceed, onNotNow }: AppUpdateDialogProps) {
+const proceedButtonStyle = { padding: "7px 13px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap", flexShrink: 0 } as const;
+const noticeStyle = { marginTop: 14, padding: "10px 12px", border: "1px solid var(--status-error)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", fontSize: 12, lineHeight: 1.5 } as const;
+
+export function AppUpdateDialog({ open, update, phase, visibleStage, error, plan, planStatus, onRefreshPlan, onCheckStatus, onProceed, onNotNow }: AppUpdateDialogProps) {
   const { t } = useI18n();
   const prefersReducedMotion = usePrefersReducedMotion();
   const [releaseNotes, setReleaseNotes] = useState<AppUpdateReleaseNotes | null>(null);
@@ -203,10 +271,31 @@ export function AppUpdateDialog({ open, update, phase, visibleStage, error, onPr
 
     return () => controller.abort();
   }, [availableVersion, releaseNotes?.version, shouldLoadReleaseNotes]);
+  const [forceConfirmedPlanId, setForceConfirmedPlanId] = useState<string | null>(null);
+  const [expiredPlanId, setExpiredPlanId] = useState<string | null>(null);
+  const reviewing = phase === "idle" && planStatus === "ready" && plan !== null;
+  useEffect(() => {
+    if (!reviewing || !plan) return;
+    const remaining = Date.parse(plan.expiresAt) - Date.now();
+    // An unreadable expiry is treated as expired: approval must never outlive its plan.
+    if (!(remaining > 0)) {
+      setExpiredPlanId(plan.id);
+      return;
+    }
+    const timer = window.setTimeout(() => setExpiredPlanId(plan.id), Math.min(remaining, 2 ** 31 - 1));
+    return () => window.clearTimeout(timer);
+  }, [plan, reviewing]);
+  const expired = reviewing && expiredPlanId === plan.id;
+  const forceConfirmed = reviewing && forceConfirmedPlanId === plan.id;
+  const canApprove = reviewing && !expired && !plan.blockedReason && plan.state === "prepared" && (!plan.requiresForce || forceConfirmed);
+  // The server's live plan supersedes the reviewed one once it reports the same plan; a stale earlier plan never replaces it.
+  const progressPlan = plan !== null && update?.upgradePlan?.id !== plan.id ? plan : update?.upgradePlan ?? plan;
   const busy = phase === "preparing" || phase === "restarting" || phase === "completed";
   const command = update?.updateCommand || "npm install -g @kahme247/ompweb";
   const completedVersion = update?.selfUpdateStatus?.targetVersion ?? update?.availableVersion ?? update?.currentVersion ?? "?";
-  const versionTransition = getAppUpdateVersionTransition(update, phase);
+  const versionTransition = reviewing
+    ? { fromVersion: plan.fromVersion, targetVersion: plan.targetVersion }
+    : getAppUpdateVersionTransition(update, phase);
   const effectiveStage = visibleStage ?? update?.selfUpdateStatus?.stage;
   const currentStepIndex = getAppUpdateStepIndex(phase, effectiveStage);
   const drain = update?.appUpdateDrain;
@@ -226,6 +315,8 @@ export function AppUpdateDialog({ open, update, phase, visibleStage, error, onPr
       : t("appUpdateDialog.title");
   const dialogDescription = phase === "preparing"
     ? t("appUpdateDialog.preparing")
+    : phase === "stalled"
+      ? t("appUpdateDialog.stalledDescription")
     : phase === "restarting"
       ? t("appUpdateDialog.restarting")
       : phase === "completed"
@@ -236,7 +327,7 @@ export function AppUpdateDialog({ open, update, phase, visibleStage, error, onPr
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onNotNow(); }}>
-      <DialogContent ariaLabel={dialogTitle} style={{ width: 500, maxWidth: "min(94vw, 500px)", padding: 24 }}>
+      <DialogContent ariaLabel={dialogTitle} style={{ width: 500, maxWidth: "min(94vw, 500px)", maxHeight: "min(90vh, 820px)", overflowY: "auto", padding: 24 }}>
         <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
           <div style={{ width: 36, height: 36, flexShrink: 0, borderRadius: "var(--radius-control)", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg-subtle)", color: "var(--accent)" }}>
             {phase === "failed"
@@ -258,6 +349,36 @@ export function AppUpdateDialog({ open, update, phase, visibleStage, error, onPr
         {versionTransition && (
           <div style={{ marginTop: 18, padding: "11px 13px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
             <span>v{versionTransition.fromVersion}</span><span aria-hidden="true">→</span><span>v{versionTransition.targetVersion}</span>
+          </div>
+        )}
+
+        {phase === "idle" && error && <div role="alert" style={noticeStyle}>{error}</div>}
+        {phase === "idle" && (planStatus === "idle" || planStatus === "loading") && (
+          <div role="status" style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted)", fontSize: 12 }}>
+            <LoaderCircle size={14} aria-hidden="true" style={prefersReducedMotion ? undefined : { animation: "spin 1s linear infinite" }} /> {t("appUpdateDialog.planLoading")}
+          </div>
+        )}
+        {phase === "idle" && planStatus === "failed" && (
+          <div role="alert" style={{ ...noticeStyle, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <span>{t("appUpdateDialog.planFailed")}</span>
+            <button type="button" onClick={onRefreshPlan} style={{ padding: "5px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}>
+              {t("appUpdateDialog.retry")}
+            </button>
+          </div>
+        )}
+        {reviewing && <UpgradeHostList plan={plan} showStage={false} />}
+        {reviewing && plan.blockedReason && (
+          <div role="alert" style={noticeStyle}>
+            <strong>{t("appUpdateDialog.planBlockedTitle")}</strong>
+            <div style={{ marginTop: 4, overflowWrap: "anywhere" }}>{plan.blockedReason}</div>
+          </div>
+        )}
+        {expired && (
+          <div role="alert" style={{ ...noticeStyle, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <span>{t("appUpdateDialog.planExpired")}</span>
+            <button type="button" onClick={onRefreshPlan} style={{ padding: "5px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11, flexShrink: 0 }}>
+              {t("appUpdateDialog.planRefresh")}
+            </button>
           </div>
         )}
 
@@ -337,6 +458,8 @@ export function AppUpdateDialog({ open, update, phase, visibleStage, error, onPr
           </ol>
         )}
 
+        {phase !== "idle" && progressPlan && progressPlan.hosts.length > 0 && <UpgradeHostList plan={progressPlan} showStage />}
+
         {showDrain && drainSummary && (
           <section
             aria-label={drainSummary}
@@ -364,6 +487,19 @@ export function AppUpdateDialog({ open, update, phase, visibleStage, error, onPr
           </div>
         )}
 
+        {reviewing && plan.requiresForce && (
+          <div role="group" aria-label={t("appUpdateDialog.planForceTitle")} style={{ ...noticeStyle, display: "grid", gap: 8 }}>
+            <strong>{t("appUpdateDialog.planForceTitle")}</strong>
+            <div style={{ color: "var(--text-muted)" }}>{t("appUpdateDialog.planForceDescription")}</div>
+            <Check
+              label={t("appUpdateDialog.planForceConfirm")}
+              checked={forceConfirmed}
+              disabled={expired || plan.blockedReason !== null}
+              onChange={(checked) => setForceConfirmedPlanId(checked ? plan.id : null)}
+            />
+          </div>
+        )}
+
         {phase === "failed" && (
           <div role="alert" style={{ marginTop: 16, padding: "10px 12px", border: "1px solid var(--status-error)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", fontSize: 12, lineHeight: 1.5 }}>
             {error && <div>{error}</div>}
@@ -375,12 +511,24 @@ export function AppUpdateDialog({ open, update, phase, visibleStage, error, onPr
                 <span>{recoveryMessage}</span>
               </div>
             )}
+            {progressPlan?.state === "recovery-required" && (
+              <div style={{ marginTop: 8, display: "flex", alignItems: "flex-start", gap: 6, color: "var(--status-error)" }}>
+                <AlertTriangle size={14} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0 }} />
+                <span>{t("appUpdateDialog.planRecoveryRequired")}</span>
+              </div>
+            )}
             <div style={{ marginTop: error || recoveryMessage ? 10 : 0 }}>{t("appUpdateDialog.failedFallback")}</div>
             <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
-              <code style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", color: "var(--accent)", fontFamily: "var(--font-mono)" }}>{command}</code>
-              <button type="button" onClick={() => void copyText(command).then(() => toast.success(t("appShell.commandCopied"))).catch(() => toast.error(t("appShell.commandCopyFailed")))} style={{ padding: "5px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}>
-                {t("appShell.copyCommand")}
-              </button>
+              {update?.installMethod === "binary" ? (
+                <a href={command} target="_blank" rel="noopener noreferrer" style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", color: "var(--accent)", fontFamily: "var(--font-mono)" }}>{command}</a>
+              ) : (
+                <>
+                  <code style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", color: "var(--accent)", fontFamily: "var(--font-mono)" }}>{command}</code>
+                  <button type="button" onClick={() => void copyText(command).then(() => toast.success(t("appShell.commandCopied"))).catch(() => toast.error(t("appShell.commandCopyFailed")))} style={{ padding: "5px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}>
+                    {t("appShell.copyCommand")}
+                  </button>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -389,6 +537,10 @@ export function AppUpdateDialog({ open, update, phase, visibleStage, error, onPr
           <p role="note" style={{ margin: "16px 0 0", paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", alignItems: "flex-start", gap: 8, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
             <Info size={14} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0 }} /> <span>{t("appUpdateDialog.keepOpen")}</span>
           </p>
+        )}
+
+        {phase === "stalled" && (
+          <div role="status" style={{ ...noticeStyle, border: "1px solid var(--status-warning)" }}>{t("appUpdateDialog.timeout")}</div>
         )}
 
         {phase === "completed" && (
@@ -400,17 +552,27 @@ export function AppUpdateDialog({ open, update, phase, visibleStage, error, onPr
         <div style={{ marginTop: 22, display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}>
           {!busy && (
             <button type="button" onClick={onNotNow} style={{ padding: "7px 13px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>
-              {phase === "failed" ? t("appUpdateDialog.close") : t("appUpdateDialog.notNow")}
+              {phase === "failed" || phase === "stalled" ? t("appUpdateDialog.close") : t("appUpdateDialog.notNow")}
             </button>
           )}
           {phase === "idle" && (
-            <button type="button" onClick={onProceed} style={{ padding: "7px 13px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap", flexShrink: 0 }}>
-              <Download size={13} aria-hidden="true" /> {t("appUpdateDialog.proceed")}
+            <button
+              type="button"
+              disabled={!canApprove}
+              onClick={() => { if (canApprove) onProceed({ planId: plan.id, force: plan.requiresForce && forceConfirmed }); }}
+              style={{ ...proceedButtonStyle, ...(reviewing && plan.requiresForce ? { border: "1px solid var(--status-error)", background: "var(--status-error)" } : {}), opacity: canApprove ? 1 : 0.6, cursor: canApprove ? "pointer" : "not-allowed" }}
+            >
+              <Download size={13} aria-hidden="true" /> {t(reviewing && plan.requiresForce ? "appUpdateDialog.proceedForce" : "appUpdateDialog.proceed")}
             </button>
           )}
           {phase === "failed" && (
-            <button type="button" onClick={onProceed} style={{ padding: "7px 13px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap", flexShrink: 0 }}>
+            <button type="button" onClick={onRefreshPlan} style={proceedButtonStyle}>
               <RotateCcw size={13} aria-hidden="true" /> {t("appUpdateDialog.retry")}
+            </button>
+          )}
+          {phase === "stalled" && (
+            <button type="button" onClick={onCheckStatus} style={proceedButtonStyle}>
+              <RotateCcw size={13} aria-hidden="true" /> {t("appUpdateDialog.checkStatus")}
             </button>
           )}
         </div>

@@ -175,7 +175,7 @@ restart, without signing out of Windows.
 
 ### Behind a reverse proxy
 
-Forward WebSocket upgrades on `/api/events/link` (browsers) and `/api/hosts/link` (hosts); without the upgrade, a browser falls back to server-sent events after a few seconds. In nginx that means `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`, and a `proxy_read_timeout` well above 30 s.
+Forward WebSocket upgrades on `/api/events/link` (browsers), `/api/hosts/link` (application traffic) and `/api/hosts/maintenance` (host management and recovery); without the browser upgrade, the browser falls back to server-sent events after a few seconds. In nginx that means `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`, and a `proxy_read_timeout` well above 30 s.
 
 Hosts that [use the server's provider logins](#use-the-servers-provider-logins-on-a-host) also call `/api/hosts/broker/`, authenticated by their host token. That path must reach ompweb without the proxy's own authentication (a proxy login page or `auth_request` would block the daemon), without response buffering (it carries a long-lived event stream; in nginx, `proxy_buffering off;`) and without redirects.
 
@@ -188,29 +188,56 @@ linked to the web server over loopback. The service installers (`ompweb systemd 
 `ompweb launchd install`, `ompweb --install-tray`) install both: the web
 service and `ompweb-host`. Uninstall removes both.
 
-**Running ompweb in the foreground** (`ompweb` in a terminal, or `npx
-@kahme247/ompweb@latest`) installs no service, so nothing runs the daemon: keep
-`ompweb host` (with npx: `npx @kahme247/ompweb@latest host`) running in a
-second terminal. Without it "This machine" stays offline. The web server writes
-the daemon's link when it starts, so start the web server first.
+**Running ompweb in the foreground** (`ompweb` in a terminal, or
+`npx @kahme247/ompweb@latest`) installs no service. The production server prepares
+the local link and starts an independent `ompweb host` if none answers its private
+control endpoint. It reuses an existing daemon, including an older one awaiting
+recovery; concurrent starts cannot create two hosts.
 
 - **Restarting or redeploying the web server does not interrupt runs.** The daemon
   keeps the omp processes running; the restarted web server takes them over, with
   no resume prompt, and dialogs or tool calls omp was waiting on reappear.
 - **Restarting the daemon does end runs** (it owns the omp processes). With auto-resume
   on, sessions that were running resume once. `ompweb systemd restart` restarts the
-  web service only; upgrades restart the daemon only when its link protocol version
-  is outside the range the new release supports.
-- **First start after an upgrade:** if no daemon has linked after about 90 seconds,
-  ompweb shows a banner with the install command for your platform. It never installs
-  services itself. Until the daemon runs, "This machine" shows offline and new
-  sessions on it cannot start.
+  web service only. A coordinated upgrade shows any required daemon restart before
+  asking for approval.
+- **A failed local start stays visible.** The web server never installs services
+  itself. If the daemon cannot start or its endpoint cannot be verified, "This
+  machine" remains offline and the install/start guidance remains available.
 - **It is a host like any other.** Rename "This machine" in **Settings → Hosts**
   (clear the name to reset it); it cannot be revoked. The web server writes the
   daemon's link (`~/.omp/agent/omp-web/host.json`, mode `600`) at startup, only
   for a loopback bind address.
 - **Development:** `npm run dev` does not take the daemon (see
   [Development](#development)).
+
+### Coordinated upgrades
+
+**Settings → System → Update** updates the server, including an owned single-binary
+release. It first prepares a plan showing the target version, required host
+upgrades, affected sessions and any compatibility or recovery blocker. Compatible
+remote hosts keep running; the local host is included when its installation must
+be replaced or its protocol upgraded.
+
+Review the plan, then approve it. An update that must interrupt sessions or use
+legacy recovery requires a separate, unchecked **Force** confirmation. Force may
+terminate sessions and subagents; it never bypasses release digests, installation
+ownership, process identity, service permissions or the update-disable setting.
+An unreachable incompatible host blocks a server-only cutover instead of being
+silently left behind.
+
+**Settings → Hosts** retains per-host Update and offers **Force update** when a
+verified recovery path is available. For old daemons without the maintenance API,
+the server uses an isolated, fixed recovery bootstrap through their existing
+runner command channel. Windows uses native PowerShell and Windows process/service
+APIs; Linux and macOS use their own supervisor controls. A broken legacy runner or
+an uncontrollable service is reported, not treated as an updated host.
+
+Downloads and runner preflight happen before the relevant process stops. Progress
+survives web-server restarts; completion requires the expected release and health
+receipt. A failed cutover restores the previous installation where possible and
+reports any participant still requiring recovery. Closing the dialog does not
+cancel a committed update.
 
 ### Transparent host pools
 
@@ -458,7 +485,6 @@ built (for example `2026-11-01T10:30:00Z`), with the same five archives.
 ```bash
 tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
 ~/.local/share/ompweb-linux-x64/ompweb               # the web server: same options and environment variables as above
-~/.local/share/ompweb-linux-x64/ompweb host          # the local daemon, in a second terminal
 ```
 
 - **Keep `ompweb` in its directory.** It runs the `ompweb-omp` beside it and serves `dist/`, `public/` and the other
@@ -471,10 +497,11 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
   `curl` reaches it, allow your terminal (or `ompweb`) under System Settings →
   Privacy & Security → Local Network. A server reached over a VPN such as
   Tailscale, or a host started from an SSH session, is not affected.
-- **No tray, service installers or in-app update.** To update, stop `ompweb` and
-  `ompweb host`, replace the directory with the new release, and start both again;
-  **Settings → System** links the release page when a new version is out.
-  Your sessions and settings live in `~/.omp`, not in that directory.
+- **GUI updates, without a tray or service installer.** **Settings → System**
+  prepares and confirms an update of the owned release directory and any required
+  host migration. **Settings → Hosts** manages individual daemons. Keep the release
+  directory writable only by its owner and retain permission to control its service
+  or scheduled task. Sessions and settings live in `~/.omp`, outside that directory.
 - **As systemd user services**, write the two units yourself (adjust the paths):
 
 ```ini

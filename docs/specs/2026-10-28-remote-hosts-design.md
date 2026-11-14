@@ -407,12 +407,25 @@ the `spawn` op are gone).
 - **Application compatibility is separate from maintenance compatibility.**
   Dropping an application version raises `MIN_LINK_PROTOCOL_VERSION` without
   dropping maintenance API v1. The current application range is 12–12.
-  Legacy v10/v11 are admitted only by the update shim, not the session runtime.
-- **Upgrade order: web app first, then hosts.** The shim passes the new server's
-  application range to the old daemon's unchanged updater, while its `welcome`
-  echoes the old version. The updater can install Protocol v12 without needing
-  to understand it. Existing safety checks still refuse busy hosts and unsafe
-  supervisors; a shared installation uses restart-only after updating the server.
+  Legacy v10/v11 are admitted by the update shim, not the session runtime.
+- **Upgrade order is a coordinated plan, not a server-only cutover.** The GUI
+  verifies the candidate server's minimum and maximum application protocols,
+  inventories every registered host and identifies required migrations. An
+  incompatible host without a verified update/recovery path blocks the server
+  cutover. Compatible independent hosts keep their sessions. A shared local
+  installation is replaced by one worker that owns both process transitions.
+- **Force is explicit, scoped approval.** The confirmation names the plan and
+  separately authorizes session termination. Modern maintenance updates may waive
+  activity only; release integrity, install ownership, process identity, update
+  disablement, local maintenance drains and supervisor permissions remain enforced.
+- **Legacy recovery is an execution adapter, not an application adapter.** A
+  confirmed recovery may open one operation-bound legacy channel and send only
+  fixed bootstrap commands through the historical RPC/runner `bash` envelopes.
+  Ordinary sessions, workspace operations and application forwarding remain
+  rejected. The helper is pinned to the new server's exact published build,
+  verifies release digests and preflight, escapes the old process tree/supervisor,
+  and persists an operation receipt. Windows uses native PowerShell/.NET; shell
+  output never proves completion. A broken legacy runner fails visibly.
 - **v4 (the WebSocket link) dropped v3** before any release; from the next
   version on, main keeps N-1. A v3 daemon POSTs its hello to
   `/api/hosts/link`; main answers that POST 426 with both versions (and never
@@ -442,9 +455,12 @@ the `spawn` op are gone).
   WebSocket. Its `hello`/`welcome` negotiate `apiVersion: 1` independently of the
   advisory `protocolVersion`. Its codec and transport do not import the
   application protocol. A protocol mismatch cannot terminate this connection.
-  Requests have bounded IDs and explicit replies; disconnects and timeouts never
-  cause automatic replay of an update. The daemon remains authoritative for
-  whether it is safe to update.
+  Requests have bounded IDs and explicit replies. A lost update response is
+  reconciled with its durable operation ID; ordinary requests are never silently
+  replayed. Explicit force may interrupt activity, but not bypass the daemon's
+  integrity and process-ownership checks. A candidate awaiting a server cutover
+  acknowledges through an operation-bound preflight nonce and expected process
+  identity, not a bare maintenance connection.
   - `status`: software/API/protocol versions, capabilities, workspace-operation
     availability, session-process inventory and activity, drained/busy state and
     the durable update operation.

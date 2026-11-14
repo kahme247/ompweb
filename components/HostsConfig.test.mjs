@@ -335,9 +335,8 @@ test("reconnect polling is bounded and requires a status check before any retry"
   });
   await showHosts([hostRow()]);
   await screen.findByText("Updating ompweb host to 1.1.0…");
-  offset = 5 * 60 * 1000 + 1;
+  offset = 24 * 60 * 60 * 1000;
   await act(() => new Promise((resolve) => setTimeout(resolve, 1100)));
-  screen.getByText(/Stopped waiting after 5 minutes/);
   assert.ok(screen.getByRole("button", { name: "Update ompweb host" }).disabled);
   assert.equal(calls, 1);
   assert.ok(screen.getByRole("button", { name: "Retry" }));

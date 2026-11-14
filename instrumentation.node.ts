@@ -59,16 +59,19 @@ export async function register(): Promise<void> {
     }
   })();
 
-  // Add this server's local daemon link without moving any existing production link.
+  // Prepare this server's local link, then start this machine's host unless one already answers. Background: a cold
+  // start takes seconds and boot must not wait on it; a failure is logged, never reported as an online host.
   if (process.env.NODE_ENV !== "development") {
-    try {
-      const { ensureLocalHostLink, localLinkUrl } = await import("@/lib/hosts/local-bootstrap");
-      const target = localLinkUrl();
-      if ("url" in target) await ensureLocalHostLink({ url: target.url });
-      else console.warn(`[omp-web] local daemon link skipped: ${target.skip}`);
-    } catch (error) {
-      console.warn(`[omp-web] local daemon link not prepared: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    void (async () => {
+      try {
+        const { ensureLocalHostDaemon } = await import("@/lib/hosts/local-daemon-start");
+        const result = await ensureLocalHostDaemon();
+        if (result.skipped) console.warn(`[omp-web] local daemon not started: ${result.skipped}`);
+        else console.log(`[omp-web] local daemon ${result.started ? "started" : "already running"} (pid ${result.pid ?? "unknown"})`);
+      } catch (error) {
+        console.warn(`[omp-web] local daemon not started: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
   }
 
   // Each host daemon deletes sent uploads after the configured number of days: tell it the setting whenever it links.

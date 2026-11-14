@@ -2,9 +2,9 @@
 
 ## Goal
 
-Restarting or redeploying the ompweb web server never interrupts an omp run, on
-this machine or any linked host. That frees the web server to change and restart
-often.
+Ordinary restarts or redeployments of the ompweb web server do not interrupt an
+omp run. A coordinated upgrade may restart an incompatible or shared-installation
+daemon only after the GUI plan and any required session interruption are approved.
 
 Today the web server owns the local omp children (`LocalHost` spawns them over
 stdio), so every restart kills them, and auto-resume restarts them with a
@@ -17,8 +17,10 @@ restart still kills them as orphans.
 - **The local daemon is required.** This machine is reached only through a
   local `ompweb host` daemon, linked over loopback. `LocalHost`'s direct spawn
   path is removed; there is one code path for every host.
-- **The daemon is its own service** (systemd unit / launchd agent / Windows
-  service), installed next to the web service.
+- **The daemon is independent of the web process.** Service installers install
+  it next to the web service. A production server also starts an independent host
+  when its private control endpoint proves none is running; the host singleton
+  prevents concurrent starts from creating duplicates.
 - **Restarts adopt live children.** A restarted web server takes over the omp
   children the daemon still runs instead of killing them.
 - **Dev mode does not take the local daemon.** Only the production web server
@@ -130,9 +132,9 @@ or an adoption failure.
 | Web server restarts, daemon fine | Runs continue; adopted on `hello`; no resume prompt. |
 | Daemon restarts or upgrades | Children end; sessions that were running resume once (existing auto-resume). |
 | Daemon one link protocol version behind the web server (N-1) | The web server links a daemon one version behind: today a v4 daemon links beside v5 (no `part`, whole lines, no unacked window). It runs sessions, and its hello carries `pending`, so after a web restart its live children are adopted as a v5 daemon's are. From a later protocol bump on, a version whose hello lacks what adoption needs gets its live children killed and resumed on `hello` instead. The web server is upgraded first; the daemon catches up at its next restart. |
-| Daemon on a version the web server dropped, or newer than it | 426 (a pre-WebSocket daemon's POST) or close 4426 (a hello frame); "This machine" shows "needs upgrade"; new sessions there are disabled until the daemon is restarted on a supported version. From the first link protocol version released after the WebSocket experiments (N) on, no version N or newer is dropped: the web app keeps the handshake and an update op working for them (remote-hosts spec, "Decided: backward compatibility"). |
-| Dev server running | It never writes `host.json`, so the daemon stays linked to production; dev shows "This machine" offline. |
-| Daemon not installed or not running | "This machine" shows offline with "start the ompweb-host service"; new local sessions are disabled. |
+| Daemon on an application version the server dropped, or newer than it | Ordinary application traffic is rejected. Maintenance API v1 remains reachable; legacy v10/v11 retain update-only access and an explicitly approved, isolated recovery bootstrap. |
+| Dev server running | It never writes `host.json` or starts a daemon, so the host stays linked to production. |
+| Daemon not running | Production prepares the local link and starts an independent daemon, unless an update owns the transition or its existing endpoint cannot be safely verified. A failed start remains offline with guidance. |
 | `host.json` token stale (web regenerated it) | Daemon gets 401, re-reads `host.json`, redials. It exits only if the file still holds the rejected token. |
 | Web server moved to another port | The dial to the old port fails; the daemon re-reads `host.json` and dials the new URL. |
 
@@ -143,20 +145,18 @@ or an adoption failure.
   failure. Uninstall removes both.
 - Windows (`lib/windows-service.ts`, tray): the same split, a second service
   for the daemon. The tray shows both states.
-- **Existing installs:** on first start after the upgrade, if no local daemon
-  links within 90 s (well past the daemon's redial wait, at most 3 s on
-  loopback, so a restart does not trip it), the web server shows a one-time
-  banner with the exact command to install the daemon service (it does not
-  install services itself), and `ompweb host` for a foreground `ompweb`
-  (terminal or npx), which has no service: the user keeps it running in another
-  terminal. Not in dev mode, where this machine is offline by design.
-  Until then "This machine" is offline as above.
-- **Upgrades:** an upgrade replaces the package for both. The web unit restarts
-  as today. The daemon unit restarts only when the running daemon's link version
-  is outside the new release's `[MIN_LINK_PROTOCOL_VERSION,
-  LINK_PROTOCOL_VERSION]` range (it would get 426 and exit); otherwise the
-  running daemon keeps its live children and new code takes effect at its next
-  restart.
+- **Existing installs:** production startup prepares the loopback link, probes
+  the private control endpoint and reuses any answering daemon, including a legacy
+  or locally drained one. When absent, it launches the installed binary's `host`
+  or the package host entrypoint on Node, independently of the web process. It
+  installs no service and does not take a host linked primarily to another server.
+- **Upgrades:** Settings → System prepares an immutable server-and-host plan.
+  The local host participates in initial migration, and the server worker owns a
+  shared-installation replacement. Required interruption is explicit; Force may
+  end sessions and subagents only after staging and preflight. Compatible,
+  independently installed remote hosts keep running. Settings → Hosts manages
+  individual host updates and forced recovery. Windows helpers use native
+  process/service/task APIs and survive the caller's process tree being stopped.
 
 ### This machine's deployment
 

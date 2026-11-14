@@ -13,13 +13,13 @@ const info = {
 };
 
 /** Render the real host row and record every request it sends. */
-async function renderHost(t, host) {
+async function renderHost(t, host, ompweb = {}) {
   const requests = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body });
     if (init?.method === "POST") return Response.json({ accepted: true, operation: { state: "running", target: "ompweb", version: "0.7.1" } });
-    return Response.json(info);
+    return Response.json({ ...info, ompweb: { ...info.ompweb, ...ompweb } });
   };
   const container = document.createElement("div");
   document.body.append(container);
@@ -80,4 +80,90 @@ test("an offline host stays unavailable", async (t) => {
   assert.deepEqual(requests, []);
   assert.equal(button(container, "Check updates").disabled, true);
   assert.ok(container.textContent.includes("Updates unavailable while this host is offline."), container.textContent);
+});
+
+const modern = { id: "box", label: "Box", status: "online", apiVersion: 1, hostVersion: 12, ompwebVersion: "0.7.0" };
+const blocked = { canUpdate: false, canForceUpdate: true, blockedReason: "Sessions are running on this host" };
+const posts = (requests) => requests.filter((request) => request.method === "POST");
+// A closing dialog may linger briefly; the newest one is the one on screen.
+const dialogButton = (label) => [...document.querySelectorAll(".dialog-actions button")].filter((candidate) => candidate.textContent.trim() === label).at(-1);
+
+test("a normally blocked host offers a distinct Force update that posts nothing until confirmed", async (t) => {
+  const { container, requests } = await renderHost(t, modern, blocked);
+  assert.equal(button(container, "Update").disabled, true, "a blocked host cannot be updated normally");
+  const force = button(container, "Force update");
+  assert.ok(force && !force.disabled);
+
+  act(() => force.click());
+  assert.ok(dialogButton("Terminate sessions and update"), "the forced update asks for explicit termination consent");
+  assert.deepEqual(posts(requests), [], "opening the confirmation must not submit");
+
+  act(() => dialogButton("Cancel").click());
+  assert.deepEqual(posts(requests), [], "cancelling must not submit");
+
+  act(() => button(container, "Force update").click());
+  await act(async () => dialogButton("Terminate sessions and update").click());
+  await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  assert.equal(posts(requests).length, 1);
+  assert.deepEqual(JSON.parse(posts(requests)[0].body), { target: "ompweb", version: "0.7.1", force: true });
+});
+
+test("force is never inferred from a blocker's wording", async (t) => {
+  const { container } = await renderHost(t, modern, { canUpdate: false, blockedReason: "Sessions are running on this host" });
+  assert.equal(button(container, "Force update"), undefined);
+  assert.ok(container.textContent.includes("Blocked: Sessions are running on this host"));
+});
+
+test("a host that can be updated normally offers no force and the normal payload carries no force flag", async (t) => {
+  const { container, requests } = await renderHost(t, modern, { canForceUpdate: true });
+  assert.equal(button(container, "Force update"), undefined, "force is only offered when the normal update is blocked");
+  act(() => button(container, "Update").click());
+  await act(async () => dialogButton("Update").click());
+  await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  assert.deepEqual(JSON.parse(posts(requests)[0].body), { target: "ompweb", version: "0.7.1" });
+});
+
+test("a forced update outlives the old 5-minute wait, and giving up later only asks for a status check", async (t) => {
+  const realNow = Date.now;
+  let skewMs = 0;
+  Date.now = () => realNow() + skewMs;
+  const requests = [];
+  let posted = false;
+  const running = { id: "op", target: "ompweb", version: "0.7.1", state: "running", force: true };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body });
+    if (init?.method === "POST") { posted = true; return Response.json({ accepted: true, operation: running }); }
+    return Response.json({ ...info, ompweb: { ...info.ompweb, ...blocked }, operation: posted ? running : null });
+  };
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  t.after(() => {
+    act(() => root.unmount());
+    container.remove();
+    globalThis.fetch = originalFetch;
+    Date.now = realNow;
+  });
+  const settle = (ms) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
+  await act(async () => { root.render(createElement(HostUpdates, { host: modern })); });
+  await settle(20);
+
+  act(() => button(container, "Force update").click());
+  await act(async () => dialogButton("Terminate sessions and update").click());
+  await settle(20);
+  assert.equal(posts(requests).length, 1);
+
+  skewMs = 6 * 60_000; // past the old 5-minute limit, inside the 15-minute lease
+  await settle(1200);
+  assert.ok(container.textContent.includes("Updating ompweb host to 0.7.1"), container.textContent);
+  assert.ok(!container.textContent.includes("Stopped waiting"), "gave up inside the backend lease");
+
+  skewMs = 21 * 60_000; // beyond the wait
+  await settle(1200);
+  assert.ok(container.textContent.includes("Stopped waiting for this host to report"), container.textContent);
+  assert.ok(container.textContent.includes("Check status with Retry"));
+  assert.ok(button(container, "Force update").disabled, "no second Force until status is re-read");
+  assert.ok(button(container, "Update").disabled);
+  assert.equal(posts(requests).length, 1, "giving up never resubmits");
 });

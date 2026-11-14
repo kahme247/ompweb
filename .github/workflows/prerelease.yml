@@ -58,7 +58,14 @@ jobs:
       # Without GH_TOKEN: bun install runs the omp packages' scripts.
       - name: Pin the runner to it
         run: npx bun runner/scripts/use-omp-build.ts "$OMP_TAG" && (cd runner && npx bun x tsc -p .)
+      - name: Pin the binary release identity
+        run: |
+          now=$(date -u +%s)
+          echo "RELEASE_TITLE=$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$(date -u -d "@$now" +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=10 "$SHA")" >> "$GITHUB_ENV"
       - name: Build the release binaries
+        env:
+          OMP_WEB_RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: sh scripts/build-release-binaries.sh
       - run: npm run smoke -- --binary release/ompweb-linux-x64/ompweb
 
@@ -66,9 +73,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          now=$(date -u +%s)
-          title=$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)
-          tag=$(date -u -d "@$now" +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=10 "$SHA")
+          title="$RELEASE_TITLE"
+          tag="$RELEASE_TAG"
           subject=$(git log -1 --format=%s "$SHA")
           # A draft first, so a failed upload never leaves a published prerelease missing archives.
           gh release create "$tag" release/ompweb-*.tar.gz release/ompweb-*.zip \

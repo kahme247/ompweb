@@ -51,12 +51,16 @@ import type { SessionOps } from "./session-ops";
 import { confirmPooledChild, pooledStartForChild } from "./pool-starts";
 import { loadPools, type HostPool } from "./pools";
 import { validateHostTools } from "./shared-requests";
-import type { HostSoftwareUpdate, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
+import type { HostSoftwareUpdate, HostUpdateCompatibility, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
 import { isUpdateDisabled } from "../update-policy";
 import { WORKSPACE_OP_PARAMS, type WorkspaceFileEvent, type WorkspaceOps } from "../workspace-types";
 import { validWorkspaceResult } from "./workspace-results";
 import { closeMaintenanceHost, freezeMaintenance, getMaintenanceHost, MaintenanceError, onMaintenanceChange, requestMaintenance } from "./maintenance-hub";
 import type { MaintenanceHello } from "./maintenance-protocol";
+import { observeLegacyUpgrade, rejectLegacyBootstrap, startLegacyUpgrade } from "./legacy-upgrades";
+import { recoveryHelperRelease } from "../recovery-release";
+import { checkHostRecovery, HostRecoveryRefusal, startHostRecovery } from "./recovery";
+import { getHostUpdateOperation } from "./updates";
 
 /** Old daemons keep their updater, never their session protocol. */
 const legacyUpgradeVersion = (version: number | null): boolean => version === 10 || version === 11;
@@ -101,6 +105,7 @@ interface PendingOp {
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
   sessionId?: string | null;
+  recoveryId?: string;
   /** Result bytes from the binary frames sent ahead of their `res`, in order (views into those frames). */
   blob: Uint8Array[];
   blobBytes: number;
@@ -153,6 +158,9 @@ interface Link {
   workspaceOps: Set<string>;
   platform: string | null;
   lastSeenAt: string | null;
+  recoveryHome?: string;
+  recoveryInventory?: HelloChannel[];
+  recovery?: { id: string; channel?: string; lines: Set<string> };
   autoApprove: boolean;
   notifier: boolean;
   /** The socket whose hello this link took; null while the daemon has none. */
@@ -396,9 +404,10 @@ function flush(link: Link): void {
  * server must not reach the children. */
 function sendDown(link: Link, body: Unsequenced<DownMessage>, key: string): void {
   if (hub().frozen) return;
-  if (upgradeOnly(link) && (body.type !== "req" || !upgradeOp(body.op))) {
-    throw new HostOpError(426, "host_upgrade_required", "Update this host before using its application protocol");
-  }
+  if (upgradeOnly(link) && !(
+    body.type === "req" && (upgradeOp(body.op) || link.recovery && link.pending.get(body.id)?.recoveryId === link.recovery.id)
+    || body.type === "stdin" && link.recovery && body.ch === link.recovery.channel && link.recovery.lines.has(body.line)
+  )) throw new HostOpError(426, "host_upgrade_required", "Update this host before using its application protocol");
   const line = encodeQueued(body);
   const size = Buffer.byteLength(line);
   // Ahead of it: what is queued or unacked on this link (counters, no scan); fairness may send it before some of that.
@@ -760,6 +769,8 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   link.workspaceOps = new Set(upgradeOnly(link) ? [] : hello.workspaceOps ?? []);
   endWorkspaceWatches(link.id);
   link.platform = hello.platform;
+  link.recoveryHome = hello.home;
+  link.recoveryInventory = hello.channels;
   link.autoApprove = hello.autoApproveExtension;
   sawDaemon(link);
   persistLastSeen(link);
@@ -932,7 +943,13 @@ function configCurrent(link: Link): boolean {
 /** `whole`: for a `part` that completes a line, that line decoded. `joined`: that line itself, which gets no dedup of
  * its own (its parts were deduped). */
 function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMessage | UnknownMessage, joined = false): void {
-  if (upgradeOnly(link) && !["ping", "pong", "hello", "ack", "unknown", "part", "res"].includes(message.type)) {
+  if (upgradeOnly(link) && message.type === "channels_changed") {
+    if (link.up.applied(message.seq)) link.recoveryInventory = message.channels;
+    return;
+  }
+  const recoveryOutput = (message.type === "stdout" || message.type === "stderr" || message.type === "exit")
+    && message.ch === link.recovery?.channel;
+  if (upgradeOnly(link) && !recoveryOutput && !["ping", "pong", "hello", "ack", "unknown", "part", "res"].includes(message.type)) {
     if ("seq" in message && message.seq !== null) link.up.applied(message.seq);
     return;
   }
@@ -956,6 +973,24 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
   }
   // Already applied before a resend.
   if (!joined && !link.up.applied(message.seq)) return;
+  if (recoveryOutput && link.recovery) {
+    if (message.type === "stdout") {
+      let frame: unknown;
+      try { frame = JSON.parse(message.line); } catch { return; }
+      if (isRecord(frame) && String(frame.id) === "1" && (frame.t === "res" || frame.type === "response")) {
+        const recovery = link.recovery;
+        const data = isRecord(frame.data) ? frame.data : null;
+        if (frame.ok === false || frame.success === false || data && typeof data.exitCode === "number" && data.exitCode !== 0) {
+          rejectLegacyBootstrap(link.id, recovery.id, data && typeof data.exitCode === "number"
+            ? `The fixed recovery bootstrap exited with code ${data.exitCode}; the host did not acknowledge an upgrade`
+            : "The legacy runner refused the fixed recovery bootstrap; no upgrade was acknowledged");
+        }
+        void request(link.id, "close", { ch: recovery.channel }, linkTimings.opTimeoutMs, undefined, recovery.id)
+          .catch(() => {}).finally(() => { if (link.recovery === recovery) link.recovery = undefined; });
+      }
+    } else if (message.type === "exit") link.recovery = undefined;
+    return;
+  }
   switch (message.type) {
     case "part":
       return whole ? applyUp(link, whole, undefined, true) : undefined;
@@ -1020,11 +1055,11 @@ function settle(link: Link, message: Res): void {
   }
 }
 
-function request(hostId: string, op: HostOpName, args: Record<string, unknown>, timeoutMs = linkTimings.opTimeoutMs, accept?: (value: unknown) => unknown): Promise<unknown> {
+function request(hostId: string, op: HostOpName, args: Record<string, unknown>, timeoutMs = linkTimings.opTimeoutMs, accept?: (value: unknown) => unknown, recoveryId?: string): Promise<unknown> {
   const link = linkFor(hostId);
   const label = labelOf(hostId);
   if (hub().frozen) return Promise.reject(new HostOpError(503, "server_stopping", "omp-web is shutting down"));
-  if (upgradeOnly(link) && !upgradeOp(op)) {
+  if (upgradeOnly(link) && !upgradeOp(op) && !(recoveryId && recoveryId === link.recovery?.id)) {
     return Promise.reject(new HostOpError(426, "host_upgrade_required", "Update this host before using its application protocol"));
   }
   if (!link.socket || (!isLinkUp(link.status) && !upgradeOnly(link))) {
@@ -1038,7 +1073,7 @@ function request(hostId: string, op: HostOpName, args: Record<string, unknown>, 
   // Accept runs synchronously while applying `res`, before following stdout in the same frame.
   const pending: PendingOp = { op, resolve: (value) => {
     try { resolve(accept ? accept(value) : value); } catch (error) { reject(error); }
-  }, reject, timer, blob: [], blobBytes: 0, ...(op === "open" ? { sessionId: typeof args.sessionId === "string" ? args.sessionId : null } : {}) };
+  }, reject, timer, blob: [], blobBytes: 0, ...(recoveryId ? { recoveryId } : {}), ...(op === "open" ? { sessionId: typeof args.sessionId === "string" ? args.sessionId : null } : {}) };
   link.pending.set(id, pending);
   try {
     sendDown(link, { type: "req", id, op, args }, id);
@@ -1614,6 +1649,8 @@ function requireUpdateHost(id: string): void {
 function softwareUpdate(value: unknown): value is HostSoftwareUpdate & Record<string, unknown> {
   return isRecord(value) && nullableString(value.currentVersion) && nullableString(value.availableVersion)
     && typeof value.updateAvailable === "boolean" && typeof value.canUpdate === "boolean"
+    && (value.canForceUpdate === undefined || typeof value.canForceUpdate === "boolean")
+    && (value.forceMethod === undefined || value.forceMethod === "native" || value.forceMethod === "recovery")
     && nullableString(value.blockedReason) && typeof value.updateCommand === "string";
 }
 
@@ -1624,10 +1661,46 @@ function updateOperation(value: unknown): value is HostUpdateOperation {
     && (value.error === undefined || typeof value.error === "string");
 }
 
+export interface HostUpgradeInventory {
+  host: HostRow;
+  sessionProcesses: number | null;
+  activeTurns: number | null;
+  sessionIds: string[];
+  maintenance: boolean;
+}
+
+/** Inventory stays on the maintenance plane; legacy metadata is never adopted as application sessions. */
+export async function getHostUpgradeInventory(): Promise<HostUpgradeInventory[]> {
+  return Promise.all(hostsSnapshot().hosts.map(async (host) => {
+    const maintenance = getMaintenanceHost(host.id);
+    if (maintenance) {
+      const status = await requestMaintenance(host.id, "status", {});
+      if (!isRecord(status) || !Number.isSafeInteger(status.sessionProcesses) || Number(status.sessionProcesses) < 0
+        || !Number.isSafeInteger(status.activeTurns) || Number(status.activeTurns) < 0 || !Array.isArray(status.sessions)) {
+        throw new HostOpError(502, "host_bad_result", `${host.label || host.id} returned invalid maintenance inventory`);
+      }
+      const sessionIds: string[] = [];
+      for (const session of status.sessions) {
+        if (!isRecord(session) || !(session.id === null || typeof session.id === "string")) throw new HostOpError(502, "host_bad_result", "A host returned invalid session inventory");
+        if (typeof session.id === "string") sessionIds.push(session.id);
+      }
+      return { host, maintenance: true, sessionProcesses: Number(status.sessionProcesses), activeTurns: Number(status.activeTurns), sessionIds: sessionIds.sort() };
+    }
+    const link = hub().links.get(host.id);
+    const sessions = link?.socket ? link.recoveryInventory : undefined;
+    return {
+      host, maintenance: false, sessionProcesses: sessions?.length ?? null, activeTurns: null,
+      sessionIds: sessions?.flatMap((session) => session.sessionId ? [session.sessionId] : []).sort() ?? [],
+    };
+  }));
+}
+
 /** Every machine, including this one, checks on its daemon. Never fall back to the web server's installation. */
-export async function getHostSoftwareUpdates(id: string, force = false): Promise<HostUpdateInfo> {
+export async function getHostSoftwareUpdates(id: string, force = false, compatibility: HostUpdateCompatibility = updateCompatibility()): Promise<HostUpdateInfo> {
   requireUpdateHost(id);
-  const result = await requestHostUpdate(id, "checkUpdates", { compatibility: updateCompatibility(), force });
+  const current = updateCompatibility();
+  const targetCompatibility = compatibility.min === current.min && compatibility.max === current.max ? {} : { targetCompatibility: compatibility };
+  const result = await requestHostUpdate(id, "checkUpdates", { compatibility: current, force, ...targetCompatibility });
   if (!isRecord(result) || !softwareUpdate(result.ompweb) || !isRecord(result.omp) || !nullableString(result.omp.currentVersion)
     || !["npm", "bun", "binary"].includes(String(result.ompweb.installMethod))
     || !(result.ompweb.protocolVersion === null || (Number.isSafeInteger(result.ompweb.protocolVersion) && Number(result.ompweb.protocolVersion) > 0))
@@ -1637,21 +1710,82 @@ export async function getHostSoftwareUpdates(id: string, force = false): Promise
   // A daemon from before omp updated with ompweb reports a full update status for omp: keep only its version.
   const info = { ...result, omp: { currentVersion: result.omp.currentVersion } } as unknown as HostUpdateInfo;
   const protocol = info.ompweb.protocolVersion;
-  if (info.ompweb.updateAvailable && (protocol === null || protocol < MIN_LINK_PROTOCOL_VERSION || protocol > LINK_PROTOCOL_VERSION)) {
-    return { ...info, ompweb: { ...info.ompweb, canUpdate: false, blockedReason: protocol === null
+  if (info.ompweb.updateAvailable && (protocol === null || protocol < compatibility.min || protocol > compatibility.max)) {
+    return { ...info, ompweb: { ...info.ompweb, canUpdate: false, canForceUpdate: false, blockedReason: protocol === null
       ? "The target release's link protocol could not be verified. Update is blocked."
-      : `Update ompweb on this server first: this host update uses link protocol v${protocol}; the server supports v${MIN_LINK_PROTOCOL_VERSION}–v${LINK_PROTOCOL_VERSION}.` } };
+      : `Update ompweb on this server first: this host update uses link protocol v${protocol}; the server supports v${compatibility.min}–v${compatibility.max}.` } };
+  }
+  const recovery = observeLegacyUpgrade(id, info);
+  if (recovery && (recovery.state === "running" || info.operation?.id === recovery.id || !info.operation)) info.operation = recovery;
+  // Old daemons have no force contract. Only explicitly approved recovery may use their execution channel.
+  if (id === LOCAL_HOST_ID && info.ompweb.canForceUpdate === undefined && !info.operation) info.operation = getHostUpdateOperation(); // an old daemon cannot report the recovery that is replacing it
+  if (info.ompweb.canForceUpdate === undefined && info.ompweb.updateAvailable && info.operation?.state !== "running") {
+    if (id === LOCAL_HOST_ID) {
+      // This machine's daemon is recovered through its private control endpoint, never through its runner or a downloaded helper.
+      try {
+        await checkHostRecovery({ version: info.ompweb.availableVersion ?? "", compatibility });
+        info.ompweb.canForceUpdate = true;
+        info.ompweb.forceMethod = "recovery";
+      } catch (error) {
+        info.ompweb.canForceUpdate = false;
+        if (!info.ompweb.canUpdate && error instanceof Error) info.ompweb.blockedReason = error.message;
+      }
+    } else {
+      const link = linkFor(id);
+      if (link.socket && link.recoveryHome && ["linux", "darwin", "win32"].includes(link.platform || "")) {
+        try {
+          const helper = await recoveryHelperRelease();
+          info.ompweb.canForceUpdate = helper.assets.some((asset) => asset.name.startsWith(`ompweb-${link.platform === "win32" ? "windows" : link.platform}-`));
+          info.ompweb.forceMethod = "recovery";
+        } catch { info.ompweb.canForceUpdate = false; }
+      }
+    }
   }
   return info;
 }
 
-export async function updateHostSoftware(id: string, target: HostUpdateTarget, version: string): Promise<{ accepted: true; operation: HostUpdateOperation }> {
-  const checked = await getHostSoftwareUpdates(id, true);
+export async function updateHostSoftware(id: string, target: HostUpdateTarget, version: string, options: { force?: boolean; compatibility?: HostUpdateCompatibility; operationId?: string } = {}): Promise<{ accepted: true; operation: HostUpdateOperation }> {
+  const compatibility = options.compatibility ?? updateCompatibility();
+  const checked = await getHostSoftwareUpdates(id, true, compatibility);
   const candidate = checked[target];
-  if (!candidate.updateAvailable || !candidate.canUpdate || candidate.availableVersion !== version) {
+  if (!candidate.updateAvailable || !(options.force ? candidate.canForceUpdate || candidate.canUpdate : candidate.canUpdate) || candidate.availableVersion !== version) {
     throw new HostOpError(409, "host_update_blocked", candidate.blockedReason ?? "The available version changed; check for updates again");
   }
-  const result = await requestHostUpdate(id, "updateSoftware", { target, version, compatibility: updateCompatibility() });
+  const link = linkFor(id);
+  if (options.force && candidate.forceMethod === "recovery" && id === LOCAL_HOST_ID) {
+    try { return await startHostRecovery({ operationId: options.operationId ?? randomUUID(), version, compatibility, force: true }); }
+    catch (error) { throw error instanceof HostRecoveryRefusal ? new HostOpError(error.httpStatus, error.code, error.message) : error; }
+  }
+  if (options.force && candidate.forceMethod === "recovery") {
+    return startLegacyUpgrade({
+      hostId: id, version, compatibility, platform: link.platform || "",
+      operationId: options.operationId,
+      transport: {
+        async open(operationId) {
+          const home = link.recoveryHome;
+          if (!home || !(link.platform === "win32" ? win32.isAbsolute(home) : posix.isAbsolute(home))) throw new HostOpError(409, "recovery_unavailable", "The host did not advertise a usable recovery directory");
+          link.recovery = { id: operationId, lines: new Set() };
+          const result = await request(id, "open", { sessionId: null, launch: {
+            creationId: operationId, cwd: home, recordedCwd: null, sessionFile: "", toolNames: [], advisor: false,
+          } }, LINK_LIMITS.channelReadyMs + linkTimings.opTimeoutMs, undefined, operationId);
+          if (!isOpenResult(result)) throw new HostOpError(502, "host_bad_result", "The host returned an invalid recovery channel");
+          link.recovery.channel = result.ch;
+          return result.ch;
+        },
+        send(channel, lines) {
+          if (link.recovery?.channel !== channel) throw new HostOpError(409, "recovery_changed", "The recovery channel changed before bootstrap");
+          link.recovery.lines = new Set(lines);
+          for (const line of lines) sendDown(link, { type: "stdin", ch: channel, line }, channel);
+        },
+      },
+    });
+  }
+  const current = updateCompatibility();
+  const result = await requestHostUpdate(id, "updateSoftware", {
+    target, version, compatibility: current,
+    ...(compatibility.min !== current.min || compatibility.max !== current.max ? { targetCompatibility: compatibility } : {}),
+    ...(options.force ? { force: true } : {}), ...(options.operationId ? { operationId: options.operationId } : {}),
+  });
   if (!isRecord(result) || result.accepted !== true || !updateOperation(result.operation)
     || result.operation.target !== target || result.operation.version !== version) {
     throw new HostOpError(502, "host_bad_result", "The host returned an invalid update operation");

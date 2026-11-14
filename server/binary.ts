@@ -1,7 +1,7 @@
 // The compiled `ompweb` (scripts/build-binary.ts): the web server by default, with the npm launcher's flags and
 // password env, `ompweb host` (the session daemon) and `ompweb hash-password`. The server runs in this process: there
-// is no launcher, so no in-app update, tray or service installer. Static root: the directory the executable sits in
-// (dist/, public/, node_modules/katex/, lib/omp/session-edit-extension.mjs), unless OMP_WEB_PACKAGE_DIR names another.
+// is no launcher; standalone update workers run from private copies outside the release. Static root: the executable's
+// directory (dist/, public/, node_modules/katex/), unless OMP_WEB_PACKAGE_DIR names another.
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import packageJson from "../package.json";
@@ -11,6 +11,8 @@ import { runHashPasswordCommand } from "../bin/omp-web-hash-password";
 import { checkLaunchSecurity, parseLaunchOptions } from "../bin/omp-web-options";
 import { runHostCli } from "@/lib/hosts/host-cli";
 import { runHostUpdateWorker } from "../lib/hosts/update-worker";
+import { runHostRecoveryCli } from "../lib/hosts/recovery";
+import { runServerUpdateWorker } from "../lib/server-update-worker";
 
 // Before any server module loads: app/api/manifest reads public/ from it when it loads, and the daemon names
 // lib/omp/session-edit-extension.mjs in it to omp.
@@ -22,6 +24,8 @@ const command = process.argv[2];
 if (command === "host-update-worker") {
   process.exit(await runHostUpdateWorker(process.argv[3] || ""));
 }
+if (command === "server-update-worker") process.exit(await runServerUpdateWorker(process.argv[3] || ""));
+if (command === "recover-host") process.exit(await runHostRecoveryCli(process.argv.slice(3)));
 if (command === "host") process.exit(await runHostCli(process.argv.slice(3)));
 // The host updater finds this command in a release by PREFLIGHT_MARKER before it runs it: an older ompweb starts the web server instead.
 if (command === "preflight") process.exit(await (await import("../lib/hosts/preflight")).runPreflight());

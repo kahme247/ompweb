@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, RefreshCw } from "lucide-react";
+import { AlertTriangle, Download, RefreshCw } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/field";
 import type { HostRow } from "@/lib/hosts/hub";
 import type { HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "@/lib/hosts/update-types";
@@ -9,8 +9,10 @@ import { useI18n } from "@/lib/i18n";
 import { hostName } from "./host-status";
 
 const buttonStyle = { padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 } as const;
+const dangerButtonStyle = { ...buttonStyle, border: "1px solid var(--status-error)", color: "var(--status-error)" } as const;
 const POLL_MS = 1000;
-const RECONNECT_MS = 5 * 60 * 1000;
+// Longer than the host's 15-minute update/recovery lease. Expiry only stops waiting; it never resubmits.
+const RECONNECT_MS = 20 * 60 * 1000;
 
 export function HostUpdates({ host }: { host: HostRow }) {
   const { t } = useI18n();
@@ -21,7 +23,7 @@ export function HostUpdates({ host }: { host: HostRow }) {
   const [needsStatus, setNeedsStatus] = useState(false);
   const [unsupported, setUnsupported] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<HostUpdateTarget | null>(null);
+  const [confirm, setConfirm] = useState<{ target: HostUpdateTarget; force: boolean } | null>(null);
   const [check, setCheck] = useState(0);
   const [operationCheck, setOperationCheck] = useState(0);
   const watching = useRef(false);
@@ -115,9 +117,11 @@ export function HostUpdates({ host }: { host: HostRow }) {
   }, [endpoint, host.status, unavailable, check, operationCheck, t]);
 
   const update = async () => {
-    const target = confirm;
-    const software = target && info?.[target];
-    if (!target || !software?.canUpdate || !software.updateAvailable || !software.availableVersion || inFlight.current || watching.current || needsStatus || unavailable || unsupported || loading) return;
+    const target = confirm?.target;
+    const force = confirm?.force === true;
+    const software = target ? info?.[target] : undefined;
+    // Force is authorized only by the server's own flag, never inferred from a blocker's wording.
+    if (!target || !software || !(force ? software.canForceUpdate : software.canUpdate) || !software.updateAvailable || !software.availableVersion || inFlight.current || watching.current || needsStatus || unavailable || unsupported || loading) return;
     inFlight.current = true;
     setPosting(true);
     setConfirm(null);
@@ -128,7 +132,7 @@ export function HostUpdates({ host }: { host: HostRow }) {
     try {
       const response = await fetch(endpoint, {
         method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
-        body: JSON.stringify({ target, version: software.availableVersion }),
+        body: JSON.stringify(force ? { target, version: software.availableVersion, force: true } : { target, version: software.availableVersion }),
       });
       const data = await response.json();
       if (!mounted.current) return;
@@ -179,6 +183,7 @@ export function HostUpdates({ host }: { host: HostRow }) {
         const software = info?.[target];
         const label = t(`hostUpdates.${target}`);
         const updateDisabled = disabled || needsStatus || !software?.canUpdate;
+        const forceable = software?.updateAvailable === true && !software.canUpdate && software.canForceUpdate === true;
         return (
           <div key={target} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
             <div style={{ minWidth: 0, flex: "1 1 200px", fontSize: 12, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
@@ -187,9 +192,13 @@ export function HostUpdates({ host }: { host: HostRow }) {
               {software?.updateAvailable && software.availableVersion && <div style={{ color: "var(--accent)" }}>{t("hostUpdates.available", { version: software.availableVersion })}</div>}
               {software?.currentVersion && !software.updateAvailable && !software.blockedReason && !error && !busy && !unavailableReason && <div>{t("hostUpdates.upToDate")}</div>}
               {software?.blockedReason && <div style={{ marginTop: 3, color: "var(--status-warning)" }}>{t("hostUpdates.blocked", { reason: software.blockedReason })}</div>}
-              {software?.updateAvailable && !software.canUpdate && !software.blockedReason && <div>{t("hostUpdates.manualOnly")}</div>}
+              {software?.updateAvailable && !software.canUpdate && !software.blockedReason && !forceable && <div>{t("hostUpdates.manualOnly")}</div>}
+              {forceable && <div>{t("hostUpdates.forceAvailable")}</div>}
             </div>
-            {software?.updateAvailable && software.availableVersion && <button type="button" className="ui-focus-ring" aria-label={t("hostUpdates.updateAria", { software: label })} disabled={updateDisabled} style={{ ...buttonStyle, opacity: updateDisabled ? 0.6 : 1, cursor: updateDisabled ? "not-allowed" : "pointer" }} onClick={() => setConfirm(target)}><Download size={13} aria-hidden="true" />{t("hostUpdates.update")}</button>}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {software?.updateAvailable && software.availableVersion && <button type="button" className="ui-focus-ring" aria-label={t("hostUpdates.updateAria", { software: label })} disabled={updateDisabled} style={{ ...buttonStyle, opacity: updateDisabled ? 0.6 : 1, cursor: updateDisabled ? "not-allowed" : "pointer" }} onClick={() => setConfirm({ target, force: false })}><Download size={13} aria-hidden="true" />{t("hostUpdates.update")}</button>}
+              {forceable && software.availableVersion && <button type="button" className="ui-focus-ring" aria-label={t("hostUpdates.forceUpdateAria", { software: label })} disabled={disabled || needsStatus} style={{ ...dangerButtonStyle, opacity: disabled || needsStatus ? 0.6 : 1, cursor: disabled || needsStatus ? "not-allowed" : "pointer" }} onClick={() => setConfirm({ target, force: true })}><AlertTriangle size={13} aria-hidden="true" />{t("hostUpdates.forceUpdate")}</button>}
+            </div>
           </div>
         );
       })}
@@ -202,12 +211,13 @@ export function HostUpdates({ host }: { host: HostRow }) {
       <div aria-live="polite" style={{ fontSize: 12, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
         {unavailableReason && <div>{unavailableReason}</div>}
         {monitoring && <div role="status">{operation?.state === "running" ? t("hostUpdates.updating", { software: t(`hostUpdates.${operation.target}`), version: operation.version }) : t("hostUpdates.reconnecting")}</div>}
-        {!monitoring && !posting && !error && operation?.state === "succeeded" && <div role="status">{t("hostUpdates.succeeded")}</div>}
+        {!monitoring && !posting && !error && operation?.state === "succeeded" && <div role="status">{t(operation.awaitingServerCutover ? "hostUpdates.awaitingServerCutover" : "hostUpdates.succeeded")}</div>}
+        {!monitoring && operation?.force === true && operation.interruptedSessions !== undefined && operation.state !== "running" && <div>{t("hostUpdates.interruptedSessions", { count: operation.interruptedSessions })}</div>}
         {!monitoring && operation?.state === "failed" && <div role="alert" style={{ color: "var(--status-error)" }}>{t("hostUpdates.updateFailed", { error: operation.error || t("hostUpdates.unknownError") })}</div>}
         {error && <div role="alert" style={{ color: "var(--status-error)" }}>{error}</div>}
         {needsStatus && <div>{t("hostUpdates.statusRequired")}</div>}
       </div>
-      <ConfirmDialog open={confirm !== null} onOpenChange={(open) => { if (!open) setConfirm(null); }} title={t("hostUpdates.confirmTitle", { software: confirm ? t(`hostUpdates.${confirm}`) : "", host: hostName(t, host) })} description={t("hostUpdates.hostWarning", { host: hostName(t, host) })} confirmLabel={t("hostUpdates.update")} cancelLabel={t("hostsConfig.cancel")} busy={posting} onConfirm={() => void update()} />
+      <ConfirmDialog open={confirm !== null} onOpenChange={(open) => { if (!open) setConfirm(null); }} title={t(confirm?.force ? "hostUpdates.forceConfirmTitle" : "hostUpdates.confirmTitle", { software: confirm ? t(`hostUpdates.${confirm.target}`) : "", host: hostName(t, host) })} description={t(confirm?.force ? "hostUpdates.forceHostWarning" : "hostUpdates.hostWarning", { host: hostName(t, host) })} confirmLabel={t(confirm?.force ? "hostUpdates.forceConfirm" : "hostUpdates.update")} cancelLabel={t("hostsConfig.cancel")} danger={confirm?.force === true} busy={posting} onConfirm={() => void update()} />
     </div>
   );
 }

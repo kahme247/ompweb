@@ -3,10 +3,11 @@
 // (ompweb.exe for Windows) next to the files it serves, the omp runner it spawns (ompweb-omp; not with --no-runner,
 // where ompweb fetches it from its release, lib/omp/runner-fetch.ts) and the licenses of what it redistributes, then
 // archives that directory as release/ompweb-<os>-<arch>.tar.gz (.zip for Windows). Default target: this machine.
-import { cpSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { bundledPackageDirs, writeLicenses } from "./licenses";
+import packageJson from "../package.json";
 
 const root = path.join(import.meta.dir, "..");
 const { values } = parseArgs({ args: Bun.argv.slice(2), options: { target: { type: "string" }, "no-runner": { type: "boolean" } } });
@@ -49,6 +50,11 @@ if (!result.success) process.exit(1);
 // it spawns (`ompweb-omp`, lib/omp/omp-cli.ts), built first by runner/scripts/build-binary.ts.
 const copy = (from: string, to: string) => cpSync(from, path.join(out, to), { recursive: true });
 for (const file of ["dist", "public", "LICENSE"]) copy(path.join(root, file), file);
+const releaseTag = process.env.OMP_WEB_RELEASE_TAG || (process.env.GITHUB_REF_TYPE === "tag" ? process.env.GITHUB_REF_NAME : undefined);
+if (releaseTag) {
+  if (!/^(?:v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?|\d{8}T\d{6}Z-[a-f0-9]{7,40})$/.test(releaseTag)) throw new Error("Invalid binary release tag");
+  writeFileSync(path.join(out, "build-info.json"), JSON.stringify({ version: packageJson.version, releaseTag }) + "\n");
+}
 if (!values["no-runner"]) {
   const runnerTarget = name.slice("ompweb-".length);
   const runner = path.join(root, "runner", "release", `ompweb-omp-${runnerTarget}${windows ? ".exe" : ""}`);
