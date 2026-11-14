@@ -201,8 +201,8 @@ async function allThreadComments<T extends GqlComment>(
  * The first GraphQL page includes item state, comments, reviews, threads and
  * head checks. Outer connections page backwards; nested thread comments page
  * forward. Threads and their comments always page fully because replies to old
- * threads may be new. With `since`, outer comments and reviews stop at the
- * first page containing a known id, so a quiet item needs one request.
+ * threads may be new. Only outer comments stop at a known id with `since`.
+ * Reviews page fully because a draft submitted later can precede known reviews.
  */
 export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?: ReadonlySet<string>): Promise<ItemSnapshot> {
   const vars = { owner: target.owner, repo: target.repo, number: target.number };
@@ -239,7 +239,7 @@ export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?:
   };
   const [comments, reviews, threads] = await Promise.all([
     collect<GqlComment>("comments", "wc", "cc", true),
-    collect<GqlReview>("reviews", "wr", "rc", true),
+    collect<GqlReview>("reviews", "wr", "rc", false),
     collect<GqlThread>("reviewThreads", "wt", "tc", false),
   ]);
   for (const thread of threads) {
