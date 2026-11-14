@@ -1838,6 +1838,9 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                       {providers.map(([pName, pData]) => {
                         const models = pData.models ?? [];
+                        const configuredIds = new Set(models.map((model) => model.id));
+                        const discoveredModels = (runtimeModelsByProvider[pName] ?? [])
+                          .filter((model) => !configuredIds.has(model.id));
                         return (
                           <div key={pName} className="settings-card" style={{ flexDirection: "column", alignItems: "stretch", gap: 12 }}>
                             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -1886,7 +1889,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                             </div>
 
                             {/* Models chips */}
-                            {models.length > 0 ? (
+                            {models.length > 0 || discoveredModels.length > 0 ? (
                               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingTop: 6, borderTop: "1px solid var(--border)" }}>
                                 {models.map((m, i) => (
                                   <button
@@ -1903,10 +1906,24 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                     {m.reasoning && <span style={{ fontSize: 9, padding: "0 3px", borderRadius: 2, background: "var(--accent-strong)", color: "var(--on-accent)", fontWeight: 700 }}>T</span>}
                                   </button>
                                 ))}
+                                {discoveredModels.map((model) => (
+                                  <span
+                                    key={model.id}
+                                    title="Automatically discovered by OMP"
+                                    style={{
+                                      display: "inline-flex", alignItems: "center", padding: "3px 8px",
+                                      borderRadius: 5, background: "var(--bg)", border: "1px solid var(--border)",
+                                      color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11,
+                                      overflowWrap: "anywhere", minWidth: 0,
+                                    }}
+                                  >
+                                    {model.id}
+                                  </span>
+                                ))}
                               </div>
                             ) : (
                               <div style={{ fontSize: 11.5, color: "var(--text-dim)", paddingTop: 4, borderTop: "1px solid var(--border)" }}>
-                                No models defined yet. Click &quot;Add Model&quot; or &quot;Catalog&quot; above to configure models.
+                                {runtimeModelsLoading ? t("modelsConfig.loadingRuntimeModels") : <>No models configured or discovered. Click &quot;Add Model&quot; or &quot;Catalog&quot; above to configure models.</>}
                               </div>
                             )}
                           </div>
