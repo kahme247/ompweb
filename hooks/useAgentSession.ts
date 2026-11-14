@@ -1749,7 +1749,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return;
     }
     const { stored } = event;
-    // A Retry's copy is stored and its original retired with it: hide the original now, not when outbox_update arrives.
+    // Server confirmation or a locally proven browser-only root retires the original before outbox_update arrives.
     if (stored.replaces) markOutboxRepresented([stored.replaces]);
     const sid = sessionIdRef.current;
     if (stored.sessionId !== sid) return;
@@ -4412,12 +4412,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, markOutboxRepresented]);
 
   const heldRetriesRef = useRef(new Set<string>());
-  /** Retry of a failed held bubble (spec O1): hold a copy with the same text, images, files and mode that names the
-   * original in `replaces`. The server retires the original in the transaction that stores the copy, and the worker
-   * drops this browser's row of it in the commit that deletes the copy, so a refused copy leaves it in place and no
-   * state exists in which both can run. One rule keeps it to one copy: none while a copy of it waits in IndexedDB
-   * (`replaces` survives a remount, a reload and a closed page), none once a copy was stored (its receipt marks the
-   * original represented before its outbox_update arrives), and none while this tab's own add is still committing. */
+  /** Retry keeps the failed bubble's exact mode and payload, and records its lineage in IndexedDB. The server
+   * atomically retires a known root; for a browser-only root, acceptance retires only same-session exact-intent
+   * local lineage. A refused copy leaves the root intact, and the IDB transaction makes concurrent retries reuse one copy. */
   const retryHeldMessage = useCallback(async (id: string) => {
     const sid = sessionIdRef.current;
     const held = heldMessagesRef.current.find((entry) => entry.id === id);

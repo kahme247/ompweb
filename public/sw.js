@@ -94,8 +94,8 @@ function markOutboxFailed(db, id, error) {
   });
 }
 
-/** Remove the accepted local add and any server-confirmed retry lineage atomically. */
-function deleteOutboxEntry(db, id, replaces, sessionId) {
+/** Remove the accepted local add and its same-session, exact-intent retry lineage atomically. */
+function deleteOutboxEntry(db, id, replaces, sessionId, intent) {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction("entries", "readwrite");
     transaction.oncomplete = () => resolve();
@@ -105,20 +105,47 @@ function deleteOutboxEntry(db, id, replaces, sessionId) {
     request.onsuccess = () => {
       const entries = request.result;
       const byId = new Map(entries.map((entry) => [entry.id, entry]));
+      let lineageRoot = replaces;
+      if (lineageRoot === undefined && intent.replaces !== undefined) {
+        const root = replacementRoot(intent, byId);
+        const original = root === null ? undefined : byId.get(root);
+        if (original?.sessionId === sessionId && original.state === "failed" && sameOutboxIntent(original, intent)) lineageRoot = root;
+      }
       for (const entry of entries) {
-        if (entry.sessionId !== sessionId
-          || (entry.id !== id && (replaces === undefined || entry.id !== replaces && replacementRoot(entry, byId) !== replaces))) continue;
+        if (entry.sessionId !== sessionId) continue;
+        if (entry.id === id) {
+          store.delete(entry.id);
+          continue;
+        }
+        if (lineageRoot === undefined || !sameOutboxIntent(entry, intent)
+          || entry.id !== lineageRoot && replacementRoot(entry, byId) !== lineageRoot) continue;
         store.delete(entry.id);
       }
     };
   });
 }
 
-// Legacy rows predate every sequenced add; timestamp ties already lost their original ordering.
-function compareOutbox(a, b) {
-  return (a.enqueueOrder ?? 0) - (b.enqueueOrder ?? 0) || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+// The immutable intent used by the server's retry digest: mode, text, images and upload IDs.
+function sameOutboxIntent(a, b) {
+  if (a.mode !== b.mode || a.message !== b.message) return false;
+  const aImages = a.images;
+  const bImages = b.images;
+  const imageCount = aImages?.length ?? 0;
+  if (imageCount !== (bImages?.length ?? 0)) return false;
+  for (let index = 0; index < imageCount; index++) {
+    const left = aImages?.[index];
+    const right = bImages?.[index];
+    if (left?.type !== right?.type || left?.data !== right?.data || left?.mimeType !== right?.mimeType) return false;
+  }
+  const aUploads = a.uploads;
+  const bUploads = b.uploads;
+  const uploadCount = aUploads?.length ?? 0;
+  if (uploadCount !== (bUploads?.length ?? 0)) return false;
+  for (let index = 0; index < uploadCount; index++) if (aUploads?.[index] !== bUploads?.[index]) return false;
+  return true;
 }
-// Only a failed local parent proves refusal; missing or sending parents stay server anchors.
+
+// Only same-session failed parents with the exact intent prove a local retry lineage.
 function replacementRoot(entry, entries) {
   if (entry.replaces === undefined) return entry.id;
   const seen = new Set([entry.id]);
@@ -128,10 +155,16 @@ function replacementRoot(entry, entries) {
     if (seen.has(id)) return null;
     seen.add(id);
     const parent = entries.get(id);
-    if (!parent || parent.sessionId !== entry.sessionId || parent.state !== "failed" || parent.replaces === undefined) return id;
+    if (!parent || parent.sessionId !== entry.sessionId || parent.state !== "failed") return id;
+    if (!sameOutboxIntent(parent, entry)) return null;
+    if (parent.replaces === undefined) return id;
     id = parent.replaces;
     if (!id) return null;
   }
+}
+// Legacy rows predate every sequenced add; timestamp ties already lost their original ordering.
+function compareOutbox(a, b) {
+  return (a.enqueueOrder ?? 0) - (b.enqueueOrder ?? 0) || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
 function readOutboxForSync(db) {
@@ -232,7 +265,7 @@ async function flushOutbox() {
       }
       if (status >= 200 && status < 300) {
         const confirmedReplaces = accepted?.replaces === replaces ? accepted.replaces : undefined;
-        await deleteOutboxEntry(db, id, confirmedReplaces, sessionId);
+        await deleteOutboxEntry(db, id, confirmedReplaces, sessionId, head);
       } else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) waiting.add(sessionId);
       else await markOutboxFailed(db, id, error || `HTTP ${status}`);
     }

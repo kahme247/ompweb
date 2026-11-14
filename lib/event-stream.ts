@@ -78,7 +78,7 @@ export interface LocalOutboxEntry {
   images?: { type: "image"; data: string; mimeType: string }[];
   uploads?: string[];
   uploadProofs?: Record<string, string>;
-  /** A Retry's copy: the failed entry it replaces, retired when the server stores this one (spec O1). */
+  /** A Retry's copy: its exact-intent, same-session root; it may be browser-only. */
   replaces?: string;
   createdAt: number;
   /** Allocated atomically by IndexedDB acceptance; absent only on preexisting rows. */
@@ -92,7 +92,7 @@ export interface LocalOutboxEntry {
 /** Every local entry (on subscribe once known, then on every change), or one the server answered 200 for. */
 export type OutboxEvent = { entries: LocalOutboxEntry[] } | { stored: StoredOutboxEntry };
 
-/** The server's receipt for an add; `replaces` when it was a Retry's copy, whose original the add retired. */
+/** The server's receipt for an accepted add; `replaces` is server-confirmed or locally proven retry lineage. */
 export type StoredOutboxEntry = OutboxEntry & { replaces?: string };
 
 /** The worker about the outbox: an add committed, the whole list, or one the server stored. */
