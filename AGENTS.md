@@ -656,7 +656,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
     { state, owned }` is an unsequenced daemon report (like `capacity`, never replayed), at link up, on each
     change and after each `host.json` reload; one that finds the send window full is not dropped: the latest goes at
     the link's next flush (main's ack, or the poll of a full socket buffer). The
-    `clusterConfig` op is `{ action: "apply", version }` or `{ action: "restore" }` and answers `{ state, owned }`.
+    `clusterConfig` op is `{ action: "apply", version }` or `{ action: "restore" }` and answers `{ state, owned }`;
+    the hub keeps that answer's state only until the link's first `config_state` since it came up (a report goes
+    ahead of the sequenced answer, so it can be newer).
     **The version is never persisted in the resume manifest:** `ChannelTable.running()` drops it and
     `host-running.json` has no field for it, so a recovered session starts on the version already applied.
   - **Daemon.** Per version: manifest, then each file the member lacks by hash from the link's server
