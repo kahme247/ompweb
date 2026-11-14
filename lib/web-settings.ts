@@ -84,9 +84,10 @@ function freshSettingsRecord(): Record<string, unknown> | null {
   }
 }
 
-function settingsForSave(path: string): WebServerSettings {
+/** Permission reconciliation must use current disk state rather than another process's cached value. */
+export function readWebServerSettingsFromDisk(): WebServerSettings {
   try {
-    return normalizeSettings(parseSettingsRecord(readFileSync(path, "utf8")));
+    return normalizeSettings(parseSettingsRecord(readFileSync(settingsPath(), "utf8")));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return DEFAULTS;
     throw error;
@@ -124,7 +125,7 @@ export function readGithubWritesUnaskedFromDisk(): boolean {
 /** Atomic write (temp file + rename), like the project registry. Private to its user: it holds agentEnv. */
 export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebServerSettings {
   const path = settingsPath();
-  const settings = { ...settingsForSave(path), ...patch };
+  const settings = { ...readWebServerSettingsFromDisk(), ...patch };
   mkdirSync(resolve(path, ".."), { recursive: true });
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
