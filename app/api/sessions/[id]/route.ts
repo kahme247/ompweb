@@ -135,7 +135,7 @@ export async function DELETE(
     // owns the file and would clobber it on its next flush.
     const result = await resolved.host.sessionOps.deleteSession(id, getLiveRpcSessionIds());
     if (!result.ok) return opErrorResponse(result);
-    // Keep only the retry-lineage metadata scoped to the session just deleted.
+    // Remove only this deleted session's content-free retry-lineage metadata.
     try {
       forgetSessionReplacementMappings(id);
     } catch (error) {
