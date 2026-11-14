@@ -1696,6 +1696,22 @@ const OUTBOX_DB = "omp-web-outbox";
 const OUTBOX_STORE = "entries";
 /** The server keeps delivered ids 8 days: an older entry is never sent again, or a resend could deliver it twice. */
 const OUTBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Only a failed local parent proves refusal; missing or sending parents stay server anchors.
+function replacementRoot(entry: LocalOutboxEntry, entries: ReadonlyMap<string, LocalOutboxEntry>): string | null {
+  if (entry.replaces === undefined) return entry.id;
+  const seen = new Set([entry.id]);
+  let id = entry.replaces;
+  if (!id) return null;
+  while (true) {
+    if (seen.has(id)) return null;
+    seen.add(id);
+    const parent = entries.get(id);
+    if (!parent || parent.sessionId !== entry.sessionId || parent.state !== "failed" || parent.replaces === undefined) return id;
+    id = parent.replaces;
+    if (!id) return null;
+  }
+}
+
 
 interface OutboxItem {
   entry: LocalOutboxEntry;
@@ -1757,6 +1773,36 @@ function readOutbox(db: IDBDatabase | null): Promise<LocalOutboxEntry[] | null> 
     }
   });
 }
+/** Normalize legacy retry chains atomically before any sending row can reach the server. */
+function readOutboxForSend(db: IDBDatabase | null): Promise<LocalOutboxEntry[] | null> {
+  return new Promise((resolve) => {
+    if (!db) return resolve(null);
+    let entries: LocalOutboxEntry[] | null = null;
+    try {
+      const transaction = db.transaction(OUTBOX_STORE, "readwrite");
+      const store = transaction.objectStore(OUTBOX_STORE);
+      const request = store.getAll();
+      transaction.oncomplete = () => resolve(entries);
+      transaction.onerror = transaction.onabort = request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        entries = request.result as LocalOutboxEntry[];
+        const byId = new Map(entries.map((entry) => [entry.id, entry] as const));
+        for (let index = 0; index < entries.length; index++) {
+          const entry = entries[index];
+          if (entry.state !== "sending" || entry.replaces === undefined) continue;
+          const root = replacementRoot(entry, byId);
+          if (root === null || root === entry.replaces) continue;
+          const normalized = { ...entry, replaces: root };
+          entries[index] = normalized;
+          byId.set(entry.id, normalized);
+          store.put(normalized);
+        }
+      };
+    } catch {
+      resolve(null);
+    }
+  });
+}
 
 /** What an earlier worker (or tab) left: every unsent entry goes again. */
 async function loadOutbox(db: IDBDatabase | null): Promise<boolean> {
@@ -1808,22 +1854,35 @@ function tellOutbox(client: Client, always: boolean): void {
 function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
   void ensureOutboxReady().then(async (loaded) => {
     const item: OutboxItem = { entry: { ...entry, state: "sending" }, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS };
+    let invalidRetry = false;
     const committed = loaded && await writeOutbox((store) => {
       const request = store.getAll();
       request.onsuccess = () => {
-        // The store's readwrite lock serializes allocation with every other worker's acceptance.
-        item.entry.enqueueOrder = (request.result as LocalOutboxEntry[]).reduce((max, row) => Math.max(max, row.enqueueOrder ?? 0), 0) + 1;
+        const entries = request.result as LocalOutboxEntry[];
+        const byId = new Map(entries.map((saved) => [saved.id, saved] as const));
+        const root = replacementRoot(entry, byId);
+        if (root === null) {
+          invalidRetry = true;
+          return;
+        }
+        const normalized = entry.replaces === undefined ? entry : { ...entry, replaces: root };
+        item.entry = {
+          ...normalized,
+          state: "sending",
+          enqueueOrder: entries.reduce((max, row) => Math.max(max, row.enqueueOrder ?? 0), 0) + 1,
+        };
         store.add(item.entry);
       };
     });
-    if (!committed) {
-      post(client, { outboxAdded: n, error: "The message could not be saved to this browser. Send it again." });
+    if (!committed || invalidRetry) {
+      post(client, {
+        outboxAdded: n,
+        error: invalidRetry ? "This retry chain is invalid. Retry the original message instead." : "The message could not be saved to this browser. Send it again.",
+      });
       return;
     }
-    // Committed: the entry is accepted whatever follows, or a resend from the composer would duplicate it under a new id.
     outboxItems.set(item.entry.id, item);
-    // Include earlier entries from every worker before the tab can clear its composer or run pagehide keepalives; a failed
-    // read only delays the send (sendOutbox reads again before any network attempt).
+    // Refresh across workers before the tab can clear its composer or run pagehide keepalives.
     await refreshOutbox();
     broadcastOutbox();
     post(client, { outboxAdded: n });
@@ -1851,7 +1910,7 @@ function dropOutbox(client: Client, n: number, id: string): void {
 
 /** Refresh the whole shared list before exposing an add or choosing a session head; null means the read failed. */
 async function refreshOutbox(): Promise<boolean | null> {
-  const entries = await readOutbox(await outboxDb);
+  const entries = await readOutboxForSend(await outboxDb);
   if (!entries) {
     outboxPartial = true;
     return null;
@@ -1871,7 +1930,7 @@ async function refreshOutbox(): Promise<boolean | null> {
     if (!item) {
       outboxItems.set(entry.id, { entry, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS });
       changed = true;
-    } else if (item.entry.state !== entry.state || item.entry.error !== entry.error) {
+    } else if (item.entry.state !== entry.state || item.entry.error !== entry.error || item.entry.replaces !== entry.replaces) {
       item.entry = entry;
       changed = true;
     }
@@ -1899,9 +1958,13 @@ async function sendOutbox(sessionId: string): Promise<void> {
   clearTimeout(outboxReadRetry.get(sessionId)?.timer);
   outboxReadRetry.delete(sessionId);
   if (changed) broadcastOutbox();
-  const head = outboxList().find((entry) => entry.sessionId === sessionId && entry.state === "sending");
+  const entries = outboxList();
+  const head = entries.find((entry) => entry.sessionId === sessionId && entry.state === "sending");
   const item = head && outboxItems.get(head.id);
   if (!item || item.inFlight || item.retryTimer !== undefined || outboxDropping.has(item.entry.id)) return;
+  if (item?.entry.replaces !== undefined && replacementRoot(item.entry, new Map(entries.map((entry) => [entry.id, entry] as const))) === null) {
+    return failOutbox(item, "This retry chain is invalid; remove this message and retry its original.");
+  }
   if (Date.now() - item.entry.createdAt > OUTBOX_MAX_AGE_MS) return failOutbox(item, "Not sent within 7 days.");
   if (typeof item.entry.scope !== "string" || !item.entry.scope) return failOutbox(item, "This message has no saved installation or sign-in scope and cannot be sent.");
   item.inFlight = true;
@@ -1945,6 +2008,7 @@ function acceptedOutboxEntry(body: unknown, id: string): unknown {
     (entry.error === undefined || typeof entry.error === "string") &&
     (entry.mayHaveBeenSent === undefined || typeof entry.mayHaveBeenSent === "boolean") &&
     (entry.settlement === undefined || ["native", "none", "uncorrelated"].includes(entry.settlement as string)) &&
+    (entry.replaces === undefined || typeof entry.replaces === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(entry.replaces)) &&
     typeof entry.message === "string" && typeof entry.createdAt === "number" && Number.isFinite(entry.createdAt) && entry.createdAt >= 0
     ? entry : null;
 }
@@ -1960,15 +2024,28 @@ async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Pr
   const accepted = acceptedOutboxEntry(body, id);
   if (status >= 200 && status < 300 && !accepted) status = 0;
   if (status >= 200 && status < 300) {
-    // A Retry's copy: the server retired its original with this add, and the browser's copy of that goes with this commit.
+    // Commit the accepted ID and only the server-confirmed retry lineage together.
+    const confirmedReplaces = isRecord(accepted) && typeof accepted.replaces === "string" && accepted.replaces === replaces
+      ? accepted.replaces : undefined;
+    const removedIds = new Set([id]);
+    if (confirmedReplaces !== undefined) removedIds.add(confirmedReplaces);
     if (!(await writeOutbox((store) => {
-      store.delete(id);
-      if (replaces) store.delete(replaces);
+      const request = store.getAll();
+      request.onsuccess = () => {
+        const entries = request.result as LocalOutboxEntry[];
+        const byId = new Map(entries.map((entry) => [entry.id, entry] as const));
+        for (const entry of entries) {
+          if (entry.sessionId !== sessionId) continue;
+          if (entry.id !== id && (confirmedReplaces === undefined
+            || entry.id !== confirmedReplaces && replacementRoot(entry, byId) !== confirmedReplaces)) continue;
+          removedIds.add(entry.id);
+          store.delete(entry.id);
+        }
+      };
     }))) return outboxAnswer(item, 0, null);
-    outboxItems.delete(id);
-    if (replaces) {
-      clearTimeout(outboxItems.get(replaces)?.retryTimer);
-      outboxItems.delete(replaces);
+    for (const removedId of removedIds) {
+      clearTimeout(outboxItems.get(removedId)?.retryTimer);
+      outboxItems.delete(removedId);
     }
     const stored = isRecord(accepted) && accepted.state === "delivered"
       && (accepted.settlement === "native" || accepted.settlement === "uncorrelated")
@@ -1979,7 +2056,9 @@ async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Pr
           ...(item.entry.uploads ? { uploads: item.entry.uploads } : {}),
         }
       : accepted;
-    for (const client of clients) post(client, { outboxStored: replaces && isRecord(stored) ? { ...stored, replaces } : stored });
+    for (const client of clients) post(client, {
+      outboxStored: confirmedReplaces && isRecord(stored) ? { ...stored, replaces: confirmedReplaces } : stored,
+    });
   } else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
     item.inFlight = false;
     item.retryTimer = setTimeout(() => {

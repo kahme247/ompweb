@@ -36,7 +36,7 @@ const ENTRY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MODES: Record<OutboxMode, true> = { prompt: true, followUp: true, steer: true };
 
 
-const COLUMNS = "id, session_id, mode, message, images, uploads, owner, advisor, state, error, may_have_been_sent, created_at, upload_receipts, previous_entry_ids, source_session_id, settlement";
+const COLUMNS = "id, session_id, mode, message, images, uploads, owner, advisor, state, error, may_have_been_sent, created_at, upload_receipts, previous_entry_ids, source_session_id, settlement, replacement_id, replacement_digest, payload_bytes";
 
 /** `owner`: the web session whose uploads the entry attaches; `advisor`: the chat's spawn flag at Send. */
 interface Row {
@@ -56,7 +56,16 @@ interface Row {
   created_at: number;
   previous_entry_ids: string | null;
   settlement: string | null;
+  replacement_id: string | null;
+  replacement_digest: string | null;
+  payload_bytes: number;
 }
+type AddResult =
+  | { kind: "full" }
+  | { kind: "conflict" }
+  | { kind: "existing"; entry: Row; replaces?: string }
+  | { kind: "duplicate"; entry: Row; originalSession: string; replaces: string }
+  | { kind: "inserted"; entry: Row; replaced: Row | null };
 
 type NotificationProgress = { revision?: string; retryAt: number };
 type OutboxState = {
@@ -118,7 +127,7 @@ function db(): Database {
     database.transaction(() => {
       database.exec(OUTBOX_SCHEMA);
       const columns = database.prepare("PRAGMA table_info(entries)").all() as { name: string }[];
-      for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"], ["settlement", "TEXT"]]) {
+      for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"], ["settlement", "TEXT"], ["replacement_id", "TEXT"], ["replacement_digest", "TEXT"]]) {
         if (!columns.some((column) => column.name === name)) database.exec(`ALTER TABLE entries ADD COLUMN ${name} ${type}`);
       }
       database.exec("CREATE INDEX IF NOT EXISTS entries_source_session ON entries (source_session_id, state)");
@@ -398,8 +407,8 @@ function setState(id: string, state: OutboxEntry["state"], error: string | null 
 
 /** Delivered, or removed by the user: the id stays (without the message) so a late resend of it (keepalive, Background
  * Sync) is answered instead of added again. */
-function retire(id: string, settlement: "native" | "none" | "uncorrelated"): void {
-  db().prepare("UPDATE entries SET state = 'delivered', message = '', images = NULL, uploads = NULL, upload_receipts = NULL, previous_entry_ids = NULL, error = NULL, done_at = ?, settlement = ? WHERE id = ?").run(Date.now(), settlement, id);
+function retire(id: string, settlement: "native" | "none" | "uncorrelated", replacementId?: string, replacementDigest?: string): void {
+  db().prepare("UPDATE entries SET state = 'delivered', message = '', images = NULL, uploads = NULL, upload_receipts = NULL, previous_entry_ids = NULL, error = NULL, done_at = ?, settlement = ?, replacement_id = COALESCE(?, replacement_id), replacement_digest = COALESCE(?, replacement_digest) WHERE id = ?").run(Date.now(), settlement, replacementId ?? null, replacementDigest ?? null, id);
 }
 
 const invalid = (error: string) => Response.json({ error, code: "invalid_outbox_entry" }, { status: 400 });
@@ -413,10 +422,18 @@ export function outboxScope(): string {
     .digest("base64url");
 }
 
+function confirmedReplacementId(entry: Row, sessionId: string, value: unknown): string | undefined {
+  if (typeof value !== "string" || !ENTRY_ID_RE.test(value)) return undefined;
+  const original = row(value);
+  if (!original || !entryBelongsToSession(original, sessionId) || !original.replacement_id) return undefined;
+  return original.replacement_id === entry.id || (entry.replacement_id !== null && original.replacement_id === entry.replacement_id)
+    ? value : undefined;
+}
 /** `outbox_add` / `outbox_remove` for `sessionId`, as runAgentCommand answers them. */
 export async function runOutboxCommand(sessionId: string, command: Record<string, unknown>, advisor: boolean, owner: string): Promise<Response> {
   if (command.type === "outbox_scope") return Response.json({ success: true, data: { scope: outboxScope() } });
-  if (command.type === "outbox_add" && command.scope !== outboxScope()) {
+  const scope = outboxScope();
+  if (command.type === "outbox_add" && command.scope !== scope) {
     return Response.json({
       error: "This message belongs to another omp-web installation or sign-in configuration.",
       code: "outbox_scope_changed",
@@ -429,7 +446,9 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
   const known = row(id);
   if (known) {
     if (!entryBelongsToSession(known, sessionId)) return Response.json({ error: "This message id belongs to another session", code: "outbox_id_conflict" }, { status: 409 });
-    return Response.json({ success: true, data: { entry: toEntry(known) } });
+    const replaces = confirmedReplacementId(known, sessionId, command.replaces);
+    const entry = toEntry(known);
+    return Response.json({ success: true, data: { entry: replaces ? { ...entry, replaces } : entry } });
   }
   const { mode, message, images, uploads, replaces } = command;
   if (replaces !== undefined && (typeof replaces !== "string" || !ENTRY_ID_RE.test(replaces) || replaces === id)) {
@@ -452,6 +471,11 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
   )) {
     return invalid(`uploads must be at most ${MAX_UPLOADS_PER_MESSAGE} upload ids`);
   }
+  const imagePayload = Array.isArray(images) && images.length ? JSON.stringify(images) : null;
+  const uploadIds = Array.isArray(uploads) ? uploads as string[] : [];
+  const uploadPayload = uploadIds.length ? JSON.stringify(uploadIds) : null;
+  const digestKey = resolveWebAuthSecret().key;
+  const retryDigest = createHmac("sha256", digestKey).update(JSON.stringify([mode, message, imagePayload, uploadPayload])).digest("base64url");
   const resolved = await resolveSessionHostOr404(sessionId);
   // Unavailable host lists cannot prove absence: retain the entry until discovery can resolve its owner. An archived
   // session (on this machine or a linked host) is not gone either: its entries wait until it is restored (spec O6),
@@ -468,43 +492,99 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
   database.prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ?").run(now - KEEP_DELIVERED_MS);
   const keys = sessionKeys(sessionId);
   const entryBytes = Buffer.byteLength(JSON.stringify({ id, sessionId, mode, message, images, uploads, state: "waiting_host", createdAt: now })) + 8192;
-  let accepted: boolean;
-  let replaced: Row | null = null;
+  let result: AddResult;
   try {
-    accepted = database.transaction(() => {
-      if (row(id)) return true; // a concurrent repeat takes no capacity or renewed proof
-      const uploadReceipts = snapshotOutboxUploads(Array.isArray(uploads) ? uploads as string[] : [], owner, command.uploadProofs);
+    result = database.transaction((): AddResult => {
+      const concurrent = row(id);
+      if (concurrent) {
+        if (!entryBelongsToSession(concurrent, sessionId)) return { kind: "conflict" };
+        const confirmsReplacement = confirmedReplacementId(concurrent, sessionId, replaces);
+        return { kind: "existing", entry: concurrent, ...(confirmsReplacement ? { replaces: confirmsReplacement } : {}) };
+      }
+      const original = typeof replaces === "string" ? row(replaces) : null;
+      if (original && entryBelongsToSession(original, sessionId) && original.replacement_id) {
+        const winner = row(original.replacement_id);
+        if (winner) {
+          if (original.replacement_digest !== retryDigest) {
+            throw new UploadError(409, "outbox_replacement_conflict", "A retry must keep its original mode, message and attachments");
+          }
+          const settledAt = Date.now();
+          database.prepare("UPDATE entries SET done_at = ? WHERE id = ? AND replacement_id = ?").run(settledAt, original.id, winner.id);
+          // Persist a matching-ID terminal receipt so this browser can replay after a lost acknowledgement.
+          database.prepare(`INSERT INTO entries (${COLUMNS}, done_at) VALUES (?, ?, ?, '', NULL, NULL, ?, ?, 'delivered', NULL, 0, ?, NULL, NULL, ?, 'none', ?, NULL, 0, ?)`)
+            .run(id, winner.session_id, winner.mode, winner.owner, winner.advisor, settledAt, winner.source_session_id, winner.id, settledAt);
+          const entry = row(id);
+          if (!entry) throw new Error("The replacement receipt could not be read after commit");
+          return { kind: "duplicate", entry, originalSession: winner.session_id, replaces: original.id };
+        }
+      }
+      const replaceable = original && original.state === "failed" && entryBelongsToSession(original, sessionId) ? original : null;
+      const matchesOriginal = replaceable !== null
+        && createHmac("sha256", digestKey).update(JSON.stringify([replaceable.mode, replaceable.message, replaceable.images, replaceable.uploads])).digest("base64url") === retryDigest;
+      let uploadReceipts: OutboxUploadReceipt[];
+      let entryOwner = owner;
+      if (replaceable && matchesOriginal && uploadIds.length > 0 && owner !== replaceable.owner && command.uploadProofs === undefined) {
+        const receipts = replaceable.upload_receipts ? JSON.parse(replaceable.upload_receipts) as OutboxUploadReceipt[] : [];
+        const checkedAt = Date.now();
+        const validReceipts = checkedAt - replaceable.created_at <= STAGED_MAX_AGE_MS
+          && receipts.length === uploadIds.length
+          && receipts.every((receipt, index) => {
+            if (receipt.id !== uploadIds[index] || (receipt.owner ?? replaceable.owner) !== replaceable.owner) return false;
+            const stored = completedUpload(receipt.id);
+            if (!stored) return false;
+            return stored.owner === replaceable.owner && stored.scope === scope
+              && (receipt.completedAt === undefined || receipt.completedAt === stored.at)
+              && stored.receipt.hostId === receipt.hostId && stored.receipt.name === receipt.name
+              && stored.receipt.size === receipt.size && stored.receipt.type === receipt.type
+              && (stored.proof ? createHash("sha256").update(stored.proof).digest("hex") : undefined) === receipt.completionKey;
+          });
+        if (!validReceipts) throw new UploadError(404, "upload_missing", "The upload is gone: attach the file again");
+        uploadReceipts = receipts;
+        entryOwner = replaceable.owner;
+      } else uploadReceipts = snapshotOutboxUploads(uploadIds, owner, command.uploadProofs);
+      if (replaceable && !matchesOriginal) {
+        throw new UploadError(409, "outbox_replacement_conflict", "A retry must keep its original mode, message and attachments");
+      }
       const savedUploads = uploadReceipts.length ? JSON.stringify(uploadReceipts) : null;
       const payloadBytes = entryBytes + (savedUploads ? Buffer.byteLength(savedUploads) : 0);
+      const replacedBytes = replaceable?.payload_bytes ?? 0;
       const total = database.prepare(`SELECT COALESCE(SUM(payload_bytes), 0) AS bytes FROM entries WHERE ${entrySessionMatch(keys)} AND state != 'delivered'`).get(...keys, ...keys, ...keys) as { bytes: number };
-      if (total.bytes + payloadBytes > MAX_OUTBOX_BYTES - 64 * 1024) return false;
+      if (total.bytes - replacedBytes + payloadBytes > MAX_OUTBOX_BYTES - 64 * 1024) return { kind: "full" };
       const global = database.prepare("SELECT COALESCE(SUM(payload_bytes), 0) AS bytes, COUNT(*) AS count FROM entries WHERE state != 'delivered'").get() as { bytes: number; count: number };
-      if (global.bytes + payloadBytes > MAX_GLOBAL_OUTBOX_BYTES || global.count >= MAX_GLOBAL_OUTBOX_ENTRIES) return false;
-      database.prepare(`INSERT INTO entries (${COLUMNS}, payload_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', NULL, 0, ?, ?, NULL, ?, NULL, ?)`).run(
+      if (global.bytes - replacedBytes + payloadBytes > MAX_GLOBAL_OUTBOX_BYTES
+        || global.count - (replaceable ? 1 : 0) >= MAX_GLOBAL_OUTBOX_ENTRIES) return { kind: "full" };
+      database.prepare(`INSERT INTO entries (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', NULL, 0, ?, ?, NULL, ?, NULL, NULL, ?, ?)`).run(
         id, sessionId, mode, message,
-        Array.isArray(images) && images.length ? JSON.stringify(images) : null,
-        Array.isArray(uploads) && uploads.length ? JSON.stringify(uploads) : null,
-        owner, advisor ? 1 : 0, now,
+        imagePayload,
+        uploadPayload,
+        entryOwner, advisor ? 1 : 0, now,
         savedUploads,
-        sessionId, payloadBytes,
+        sessionId, retryDigest, payloadBytes,
       );
-      // A Retry's copy (spec O1): its failed original goes with this commit, so no state exists in which both can run.
-      const original = typeof replaces === "string" ? row(replaces) : null;
-      if (original && original.state === "failed" && entryBelongsToSession(original, sessionId)) {
-        retire(original.id, "none");
-        replaced = original;
-      }
-      return true;
+      if (replaceable) retire(replaceable.id, "none", id, retryDigest);
+      const entry = row(id);
+      if (!entry) throw new Error("The accepted outbox entry could not be read after commit");
+      return { kind: "inserted", entry, replaced: replaceable };
     }).immediate();
   } catch (error) {
     return commandErrorResponse(error);
   }
-  if (!accepted) return Response.json({ error: "The message outbox is full. It will accept more messages after held entries drain or are deleted.", code: "outbox_full" }, { status: 429 });
-  if (!entryBelongsToSession(row(id)!, sessionId)) return Response.json({ error: "This message id belongs to another session", code: "outbox_id_conflict" }, { status: 409 });
+  if (result.kind === "conflict") return Response.json({ error: "This message id belongs to another session", code: "outbox_id_conflict" }, { status: 409 });
+  if (result.kind === "full") return Response.json({ error: "The message outbox is full. It will accept more messages after held entries drain or are deleted.", code: "outbox_full" }, { status: 429 });
+  if (result.kind === "existing") {
+    const entry = toEntry(result.entry);
+    return Response.json({ success: true, data: { entry: result.replaces ? { ...entry, replaces: result.replaces } : entry } });
+  }
+  if (result.kind === "duplicate") {
+    publish(result.originalSession);
+    if (result.originalSession !== sessionId) publish(sessionId);
+    return Response.json({ success: true, data: { entry: { ...toEntry(result.entry), replaces: result.replaces } } });
+  }
   publish(sessionId);
-  if (replaced && (replaced as Row).session_id !== sessionId) publish((replaced as Row).session_id);
+  if (result.replaced && result.replaced.session_id !== sessionId) publish(result.replaced.session_id);
   pumpOutbox(sessionId);
-  return Response.json({ success: true, data: { entry: toEntry(row(id)!) } });
+  const entry = toEntry(result.entry);
+  return Response.json({ success: true, data: { entry: result.replaced ? { ...entry, replaces: result.replaced.id } : entry } });
 }
 
 function removeEntry(sessionId: string, id: string): Response {

@@ -451,7 +451,7 @@ function supportsOutboxSync(worker: ServiceWorker | null): Promise<boolean> {
       resolve(supported);
     };
     const timer = setTimeout(() => finish(false), 1_000);
-    channel.port1.onmessage = ({ data }) => finish(data?.type === "omp-outbox-capability" && data.version === 1);
+    channel.port1.onmessage = ({ data }) => finish(data?.type === "omp-outbox-capability" && data.version === 2);
     try {
       worker.postMessage({ type: "omp-outbox-capability" }, [channel.port2]);
     } catch {
