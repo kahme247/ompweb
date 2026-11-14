@@ -1,6 +1,6 @@
 # Message origin: messages from other sessions and tools
 
-Status: draft for approval (2026-11-14).
+Status: approved by the user (2026-11-14). A separate project, agent tool permissions (per-tool Allow / Ask / Off, independent of host location), follows it and replaces the confirm conditions below.
 
 ## Intent
 
@@ -163,7 +163,7 @@ Held outbox bubbles and queue chips use the same header in compact form: an icon
 // SessionRef = { id, name, hostId, hostLabel }
 ```
 
-The plain title stays as the fallback for clients without the payload. `ExtensionDialog` renders the payload:
+The plain title stays as the fallback for clients without the payload. The payload is a discriminated union keyed by `kind`, so the agent tool permissions project can add other tools' "Ask" cards to the same dialog. `ExtensionDialog` renders the payload:
 
 ```text
 Allow this session to send a message?
@@ -207,7 +207,7 @@ Show full message
 
 ### Decisions settled after review (author's calls)
 
-- **When the confirm dialog appears does not change.** Only the two existing prompts are enriched: `send_to_session` from a session on another host, and `new_session` on a host that does not allow agent starts. A target that cannot be resolved shows "Unknown session" and the send then fails as today.
+- **When the confirm dialog appears does not change in this project.** Only the two existing prompts are enriched: `send_to_session` from a session on another host, and `new_session` on a host that does not allow agent starts. The agent tool permissions project replaces these conditions with per-tool modes. A target that cannot be resolved shows "Unknown session" and the send then fails as today.
 - **Idempotent `new_session` replays.** The first prompt's `clientMessageId` is derived from the pooled path's `creationId`. When the runner reports the id as already journaled on a replay, that counts as delivered, not as an error. `send_to_session` gets a fresh random id per call.
 - **Capability gate.** The runner and the daemon ship in the same release, since each install fetches its runner from its own release. One hello capability on the host link (`messageOrigin`) gates sending `origin`. No link-protocol version bump is needed: the field is optional and ignored by readers that predate it.
 - **Internal entry point.** `AgentSessionWrapper.send(command, { origin })` takes the origin as an option. Command parsers (`POST /api/agent/[id]`, browser-link `cmd`, `outbox_add` from a browser) refuse an `origin` field with 400.
