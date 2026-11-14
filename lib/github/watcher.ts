@@ -4,7 +4,7 @@ import { readAgentToolsEnabledFromDisk } from "../web-settings";
 import { fetchSnapshot } from "./api";
 import { diffSnapshot, formatUpdate, splitUpdateEvents, updateEntryId } from "./events";
 import { checkGh, defaultGhRunner, formatTarget, GhUnavailableError, parseGithubTarget, type GhRunner } from "./gh";
-import { advanceCursor, advancePendingBatch, claimPending, closeWatchStore, commitUpdate, getPending, isPosting, listWatches, postedIds, removeSessionWatches, renameSession, type PendingUpdate, type Watch } from "./watch-store";
+import { advanceCursor, advancePendingBatch, claimPending, closeWatchStore, commitUpdate, getPending, isPosting, listWatches, pendingBatchEntryIds, postedIds, removeSessionWatches, renameSession, type PendingUpdate, type Watch } from "./watch-store";
 
 /**
  * Server-only poller: every watched item is fetched once per interval (items
@@ -86,21 +86,11 @@ async function reconcileOutboxReceiptPins(): Promise<void> {
   const { listOutboxReceiptPins, releaseOutboxReceipt } = await outboxReceipts();
   if (!readAgentToolsEnabledFromDisk()) return;
   const pins = listOutboxReceiptPins();
+  if (!readAgentToolsEnabledFromDisk()) return;
+  const pendingIds = pendingBatchEntryIds();
   for (const { entryId } of pins) {
     if (!readAgentToolsEnabledFromDisk()) return;
-    let pending = false;
-    for (const watch of listWatches()) {
-      const update = getPending(watch.sessionId, watch.itemKey, watch.registrationId);
-      if (!update) continue;
-      for (let index = update.batchIndex; index < update.batches.length; index++) {
-        if (update.batches[index].entryId === entryId) {
-          pending = true;
-          break;
-        }
-      }
-      if (pending) break;
-    }
-    if (!pending && readAgentToolsEnabledFromDisk()) releaseOutboxReceipt(entryId);
+    if (!pendingIds.has(entryId)) releaseOutboxReceipt(entryId);
   }
 }
 
