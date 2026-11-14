@@ -191,11 +191,13 @@ async function flushOutbox() {
   const db = await done(open);
   try {
     const entries = await readOutboxForSync(db);
+    // Oldest first, and a session's later entries wait while an earlier one fails: the server queues by arrival.
     entries.sort(compareOutbox);
     const waiting = new Set();
     for (const initial of entries) {
       const { id, sessionId } = initial;
       if (initial.state !== "sending" || waiting.has(sessionId)) continue;
+      // A running worker may have added or accepted an entry since our snapshot: only the shared session head can go.
       const current = await readOutboxForSync(db);
       const head = current.filter((entry) => entry.sessionId === sessionId && entry.state === "sending").sort(compareOutbox)[0];
       if (!head || head.id !== id) continue;
@@ -212,6 +214,7 @@ async function flushOutbox() {
       let accepted = null;
       let timer;
       try {
+        // Include the body read: a half-open POST must not keep every later sync entry waiting forever.
         const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs, replaces });
         const controller = new AbortController();
         timer = setTimeout(() => controller.abort(), 40_000 + Math.ceil(body.length / 2));

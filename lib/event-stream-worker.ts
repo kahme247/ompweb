@@ -1881,8 +1881,10 @@ function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
       });
       return;
     }
+    // Committed: the entry is accepted whatever follows, or a resend from the composer would duplicate it under a new id.
     outboxItems.set(item.entry.id, item);
-    // Refresh across workers before the tab can clear its composer or run pagehide keepalives.
+    // Include earlier entries from every worker before the tab can clear its composer or run pagehide keepalives; a failed
+    // read only delays the send (sendOutbox reads again before any network attempt).
     await refreshOutbox();
     broadcastOutbox();
     post(client, { outboxAdded: n });
