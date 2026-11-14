@@ -1970,12 +1970,17 @@ export class AgentSessionWrapper {
         result: { content: [{ type: "text", text }] },
       });
     };
+    if (this.restarting || !this._alive) {
+      sendResult(this.restarting ? RESTARTING_MESSAGE : "Session is no longer running", true);
+      return;
+    }
     const cancel = new AbortController();
     this.serverToolCalls.set(id, cancel);
     try {
       const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
+      const getSessionId = () => this.sessionId;
       const context: AgentToolContext = {
-        sourceSessionId: this.sessionId,
+        get sourceSessionId() { return getSessionId(); },
         sourceRequestId: id,
         sourceCwd: this.cwd,
         sourceHostId: this.host.id,
