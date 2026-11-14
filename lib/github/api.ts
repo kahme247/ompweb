@@ -54,10 +54,14 @@ interface GqlThread {
   id: string;
   path: string;
   line: number | null;
-  comments: { nodes: ((GqlComment & { state: string }) | null)[] };
+  comments: GqlForwardPage<GqlComment & { state: string }>;
 }
 interface GqlPage<T> {
   pageInfo: { hasPreviousPage: boolean; startCursor: string | null };
+  nodes: (T | null)[];
+}
+interface GqlForwardPage<T> {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
   nodes: (T | null)[];
 }
 interface GqlContext {
@@ -112,7 +116,7 @@ const SNAPSHOT_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $c
         reviews(last: 100, before: $rc) @include(if: $wr) { pageInfo { hasPreviousPage startCursor } nodes { ${COMMENT} state comments { totalCount } } }
         reviewThreads(last: 100, before: $tc) @include(if: $wt) {
           pageInfo { hasPreviousPage startCursor }
-          nodes { id path line comments(last: 100) { nodes { ${COMMENT} state } } }
+          nodes { id path line comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { ${COMMENT} state } } }
         }
         commits(last: 1) @include(if: $wh) {
           nodes { commit { oid statusCheckRollup { id contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes {
@@ -125,6 +129,12 @@ const SNAPSHOT_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $c
     }
   }
   rateLimit { remaining resetAt }
+}`;
+
+const SNAPSHOT_THREAD_COMMENTS_QUERY = `query($id: ID!, $after: String) {
+  node(id: $id) { ... on PullRequestReviewThread {
+    comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ${COMMENT} state } }
+  } }
 }`;
 
 const CONTEXTS_QUERY = `query($id: ID!, $after: String) {
@@ -149,12 +159,30 @@ function checkOf(node: GqlContext): { name: string; conclusion: string | null; s
 
 const present = <T>(nodes: (T | null)[]): T[] => nodes.filter((n): n is T => n !== null);
 
+async function allThreadComments<T extends GqlComment>(
+  run: GhRunner,
+  threadId: string,
+  first: GqlForwardPage<T>,
+  query: string,
+): Promise<T[]> {
+  const nodes = present(first.nodes);
+  let pageInfo = first.pageInfo;
+  while (pageInfo.hasNextPage) {
+    const data = await graphql<{ node: { comments: GqlForwardPage<T> } | null }>(run, query, { id: threadId, after: pageInfo.endCursor });
+    const page = data.node?.comments;
+    if (!page) throw new Error(`Review thread ${threadId} was not found.`);
+    nodes.push(...present(page.nodes));
+    pageInfo = page.pageInfo;
+  }
+  return nodes;
+}
+
 /**
- * One GraphQL request for state, comments, reviews, review-thread comments and
- * the head commit's checks; connections longer than 100 are paged backwards.
- * With `since` (ids already seen), comment and review paging stops at the first
- * page containing a known id, so a quiet item costs one request. Threads
- * always page fully: a reply to an old thread lives in an old page.
+ * The first GraphQL page includes item state, comments, reviews, threads and
+ * head checks. Outer connections page backwards; nested thread comments page
+ * forward. Threads and their comments always page fully because replies to old
+ * threads may be new. With `since`, outer comments and reviews stop at the
+ * first page containing a known id, so a quiet item needs one request.
  */
 export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?: ReadonlySet<string>): Promise<ItemSnapshot> {
   const vars = { owner: target.owner, repo: target.repo, number: target.number };
@@ -184,6 +212,9 @@ export async function fetchSnapshot(run: GhRunner, target: GithubTarget, since?:
     collect<GqlReview>("reviews", "wr", "rc", true),
     collect<GqlThread>("reviewThreads", "wt", "tc", false),
   ]);
+  for (const thread of threads) {
+    thread.comments.nodes = await allThreadComments(run, thread.id, thread.comments, SNAPSHOT_THREAD_COMMENTS_QUERY);
+  }
 
   // A draft (pending) review and its comments are left out, so their submission is new later.
   const snapshot: ItemSnapshot = {
@@ -264,8 +295,14 @@ const THREADS_READ_QUERY = `query($owner: String!, $repo: String!, $number: Int!
   repository(owner: $owner, name: $repo) { pullRequest(number: $number) {
     reviewThreads(first: 100, after: $after) {
       pageInfo { hasNextPage endCursor }
-      nodes { id isResolved isOutdated path line comments(first: 100) { nodes { ${COMMENT} body } } }
+      nodes { id isResolved isOutdated path line comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { ${COMMENT} body } } }
     }
+  } }
+}`;
+
+const THREAD_COMMENTS_READ_QUERY = `query($id: ID!, $after: String) {
+  node(id: $id) { ... on PullRequestReviewThread {
+    comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ${COMMENT} body } }
   } }
 }`;
 
@@ -275,7 +312,7 @@ interface ReadThread {
   isOutdated: boolean;
   path: string;
   line: number | null;
-  comments: { nodes: (GqlComment & { body: string })[] };
+  comments: GqlForwardPage<GqlComment & { body: string }>;
 }
 
 async function readThreads(run: GhRunner, target: GithubTarget): Promise<ReadThread[]> {
@@ -289,9 +326,13 @@ async function readThreads(run: GhRunner, target: GithubTarget): Promise<ReadThr
     );
     const { pageInfo, nodes } = data.repository.pullRequest.reviewThreads;
     out.push(...nodes);
-    if (!pageInfo.hasNextPage) return out;
+    if (!pageInfo.hasNextPage) break;
     after = pageInfo.endCursor;
   }
+  for (const thread of out) {
+    thread.comments.nodes = await allThreadComments(run, thread.id, thread.comments, THREAD_COMMENTS_READ_QUERY);
+  }
+  return out;
 }
 
 interface RestPull {
@@ -345,9 +386,8 @@ export async function readItem(run: GhRunner, target: GithubTarget, include: Rea
           .map((r) => ({ id: r.node_id, url: r.html_url, author: restActor(r.user, r.author_association), state: r.state, body: r.body ?? "", submittedAt: r.submitted_at }));
         break;
       case "threads":
-        // shortcut: first 100 comments per thread, when a longer thread needs paging
         out.threads = (await readThreads(run, target))
-          .filter((t) => !ids || keep(t.id) || t.comments.nodes.some((c) => keep(c.id)))
+          .filter((t) => !ids || keep(t.id) || present(t.comments.nodes).some((c) => keep(c.id)))
           .map((t) => ({
             id: t.id,
             resolved: t.isResolved,
@@ -397,20 +437,28 @@ const REPLY_MUTATION = `mutation($threadId: ID!, $body: String!) {
 }`;
 const RESOLVE_MUTATION = `mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }`;
 const THREAD_QUERY = `query($id: ID!) {
-  node(id: $id) { ... on PullRequestReviewThread { path line pullRequest { number repository { nameWithOwner } } } }
+  node(id: $id) {
+    ... on PullRequestReviewThread { id path line pullRequest { number repository { nameWithOwner } } }
+    ... on PullRequestReviewComment {
+      pullRequestReviewThread { id path line pullRequest { number repository { nameWithOwner } } }
+    }
+  }
 }`;
 
 /** Where a review thread lives, so a write names it and lands on the item it claims. */
-export async function fetchThread(run: GhRunner, threadId: string): Promise<{ target: GithubTarget; path: string; line: number | null }> {
-  const data = await graphql<{ node: { path?: string; line?: number | null; pullRequest?: { number: number; repository: { nameWithOwner: string } } } | null }>(
+export async function fetchThread(run: GhRunner, threadId: string): Promise<{ threadId: string; target: GithubTarget; path: string; line: number | null }> {
+  type ThreadNode = { id: string; path?: string; line?: number | null; pullRequest?: { number: number; repository: { nameWithOwner: string } } };
+  const data = await graphql<{ node: (ThreadNode | { pullRequestReviewThread: ThreadNode | null }) | null }>(
     run,
     THREAD_QUERY,
     { id: threadId },
   );
-  const pr = data.node?.pullRequest;
-  if (!pr) throw new Error(`Review thread ${threadId} was not found.`);
+  const node = data.node;
+  const thread = node && "pullRequestReviewThread" in node ? node.pullRequestReviewThread : node;
+  const pr = thread?.pullRequest;
+  if (!thread || !pr) throw new Error(`Review thread ${threadId} was not found.`);
   const [owner, repo] = pr.repository.nameWithOwner.split("/");
-  return { target: { owner, repo, number: pr.number }, path: data.node?.path ?? "", line: data.node?.line ?? null };
+  return { threadId: thread.id, target: { owner, repo, number: pr.number }, path: thread.path ?? "", line: thread.line ?? null };
 }
 
 /** The body always travels on stdin as JSON, never in argv. */
@@ -426,23 +474,6 @@ export async function postComment(run: GhRunner, target: GithubTarget, body: str
   return { id: posted.node_id, url: posted.html_url };
 }
 
-/**
- * The newest comment `login` posted on the item since `since` with exactly `body`, skipping ids in `skip`
- * (earlier agent posts). Finds a post whose `gh` call failed after GitHub had taken it.
- */
-export async function findOwnComment(
-  run: GhRunner,
-  target: GithubTarget,
-  { login, body, since, review, skip }: { login: string; body: string; since: string; review: boolean; skip: ReadonlySet<string> },
-): Promise<{ id: string; url: string } | undefined> {
-  const list = review ? "pulls" : "issues";
-  const comments = await restPages<{ node_id: string; html_url: string; body?: string; user?: { login: string } | null }>(
-    run,
-    `repos/${target.owner}/${target.repo}/${list}/${target.number}/comments?since=${encodeURIComponent(since)}`,
-  );
-  const found = comments.findLast((c) => c.user?.login === login && c.body === body && !skip.has(c.node_id));
-  return found && { id: found.node_id, url: found.html_url };
-}
 
 export async function resolveThread(run: GhRunner, threadId: string): Promise<void> {
   await graphql(run, RESOLVE_MUTATION, { threadId });
