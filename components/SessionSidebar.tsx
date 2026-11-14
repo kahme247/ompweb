@@ -34,6 +34,7 @@ import {
   INITIAL_RESTORE_MAX_ATTEMPTS,
   INITIAL_RESTORE_RETRY_MS,
   MAX_PROJECT_SESSIONS,
+  UNREAD_SESSIONS_STORAGE_KEY,
   buildSessionTree,
   livePlace,
   loadExpandedProjects,
@@ -499,6 +500,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     };
   }, [loadSessions]);
 
+  // The green check ("finished in the background, not opened yet") comes from
+  // this running-to-idle comparison, per browser. Two known boundaries:
+  // - A run that starts and finishes while every tab of this browser is closed
+  //   is never seen leaving the running set, so it gets no check.
+  // - When omp moves a running conversation to a new session id, the running
+  //   channel lists only the new id, so (by reading the code) the old id can
+  //   read as finished here and its preserved file get a check. Telling a move
+  //   from a finish needs the channel to carry the move, which it does not.
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
     const allCompleted = [...previous].filter((id) => !runningSessionIds.has(id));
@@ -546,6 +555,19 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       next.delete(selectedSessionId);
       return next;
     });
+  }, [selectedSessionId]);
+  // Keep this browser's other tabs in step: opening a finished session in one
+  // tab clears its check everywhere. The session open in this tab counts as
+  // seen, so it never adopts a check (dropping it is written back).
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== UNREAD_SESSIONS_STORAGE_KEY) return;
+      const stored = loadUnreadSessionIds();
+      if (selectedSessionId) stored.delete(selectedSessionId);
+      setUnreadSessionIds((prev) => (prev.size === stored.size && [...stored].every((id) => prev.has(id)) ? prev : stored));
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, [selectedSessionId]);
 
 
@@ -1828,7 +1850,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                   awaitingInputIds={awaitingInputIds}
                   unreadSessionIds={unreadSessionIds}
                   exitedSessions={exitedSessions}
-                  recentlyCompletedIds={effectiveRecentCompletedSet}
                   relativeTimeNow={relativeTimeNow}
                   onActivate={activateProject}
                   onToggleExpand={toggleProjectExpanded}
