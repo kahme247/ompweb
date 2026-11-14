@@ -1,4 +1,4 @@
-import type { GhRunner, GithubTarget } from "./gh";
+import { GhError, type GhRunner, type GithubTarget } from "./gh";
 
 /**
  * GitHub data layer over `gh api`. Snapshots carry metadata only (ids, urls,
@@ -437,6 +437,18 @@ const REPLY_MUTATION = `mutation($threadId: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id url pullRequestReview { id fullDatabaseId } } }
 }`;
 const RESOLVE_MUTATION = `mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }`;
+
+const UNKNOWN_WRITE_OUTCOME =
+  "The GitHub write outcome is unknown; check with github_read (include comments or threads) before retrying.";
+
+function writeOutcomeError(error: unknown): Error {
+  if (error instanceof GhError) {
+    const match = /\bHTTP(?:\/\d(?:\.\d)?)?\s+(\d{3})\b/i.exec(`${error.stderr}\n${error.message}`);
+    const status = Number(match?.[1]);
+    if (status >= 400 && status < 500 && status !== 408) return error;
+  }
+  return new Error(UNKNOWN_WRITE_OUTCOME);
+}
 const THREAD_QUERY = `query($id: ID!) {
   node(id: $id) { ... on PullRequestReviewThread { id path line pullRequest { number repository { nameWithOwner } } } }
 }`;
@@ -508,30 +520,53 @@ export async function postComment(
 ): Promise<{ id: string; url: string; reviewId?: string; reviewDatabaseId?: string }> {
   const base = `repos/${target.owner}/${target.repo}`;
   if (replyTo?.startsWith("PRRT_")) {
-    const data = await graphql<{
+    let data: {
       addPullRequestReviewThreadReply: {
-        comment: { id: string; url: string; pullRequestReview: { id: string; fullDatabaseId: string | null } | null };
-      };
-    }>(run, REPLY_MUTATION, { threadId: replyTo, body });
-    const { id, url, pullRequestReview } = data.addPullRequestReviewThreadReply.comment;
+        comment: { id: string; url: string; pullRequestReview: { id: string; fullDatabaseId: string | null } | null } | null;
+      } | null;
+    };
+    try {
+      data = await graphql<{
+        addPullRequestReviewThreadReply: {
+          comment: { id: string; url: string; pullRequestReview: { id: string; fullDatabaseId: string | null } | null } | null;
+        } | null;
+      }>(run, REPLY_MUTATION, { threadId: replyTo, body });
+    } catch (error) {
+      throw writeOutcomeError(error);
+    }
+    const comment = data.addPullRequestReviewThreadReply?.comment;
+    if (!comment || typeof comment.id !== "string" || !comment.id || typeof comment.url !== "string" || !comment.url) {
+      throw new Error(UNKNOWN_WRITE_OUTCOME);
+    }
+    const review = comment.pullRequestReview;
     return {
-      id,
-      url,
-      ...(pullRequestReview?.id && { reviewId: pullRequestReview.id }),
-      ...(typeof pullRequestReview?.fullDatabaseId === "string" && /^\d+$/.test(pullRequestReview.fullDatabaseId) && { reviewDatabaseId: pullRequestReview.fullDatabaseId }),
+      id: comment.id,
+      url: comment.url,
+      ...(typeof review?.id === "string" && review.id && { reviewId: review.id }),
+      ...(typeof review?.fullDatabaseId === "string" && /^\d+$/.test(review.fullDatabaseId) && { reviewDatabaseId: review.fullDatabaseId }),
     };
   }
   if (replyTo !== undefined && !/^\d+$/.test(replyTo)) throw new Error("replyTo must be a review comment id or a review thread id.");
   const path = replyTo === undefined ? `${base}/issues/${target.number}/comments` : `${base}/pulls/${target.number}/comments/${replyTo}/replies`;
-  const posted = JSON.parse(await run(["api", "-X", "POST", path, "--input", "-"], JSON.stringify({ body }))) as {
-    node_id: string;
-    html_url: string;
-    pull_request_review_id?: number | null;
-  };
+  let response: unknown;
+  try {
+    response = JSON.parse(await run(["api", "-X", "POST", path, "--input", "-"], JSON.stringify({ body })));
+  } catch (error) {
+    throw writeOutcomeError(error);
+  }
+  if (!response || typeof response !== "object" || Array.isArray(response)) throw new Error(UNKNOWN_WRITE_OUTCOME);
+  const posted = response as { node_id?: unknown; html_url?: unknown; pull_request_review_id?: unknown };
+  if (typeof posted.node_id !== "string" || !posted.node_id || typeof posted.html_url !== "string" || !posted.html_url) {
+    throw new Error(UNKNOWN_WRITE_OUTCOME);
+  }
   return {
     id: posted.node_id,
     url: posted.html_url,
-    ...(replyTo !== undefined && Number.isSafeInteger(posted.pull_request_review_id) && { reviewDatabaseId: String(posted.pull_request_review_id) }),
+    ...(replyTo !== undefined &&
+      typeof posted.pull_request_review_id === "number" &&
+      Number.isSafeInteger(posted.pull_request_review_id) && {
+        reviewDatabaseId: String(posted.pull_request_review_id),
+      }),
   };
 }
 
