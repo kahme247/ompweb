@@ -55,6 +55,13 @@ import type { HostSoftwareUpdate, HostUpdateInfo, HostUpdateOperation, HostUpdat
 import { isUpdateDisabled } from "../update-policy";
 import { WORKSPACE_OP_PARAMS, type WorkspaceFileEvent, type WorkspaceOps } from "../workspace-types";
 import { validWorkspaceResult } from "./workspace-results";
+import { closeMaintenanceHost, freezeMaintenance, getMaintenanceHost, MaintenanceError, onMaintenanceChange, requestMaintenance } from "./maintenance-hub";
+import type { MaintenanceHello } from "./maintenance-protocol";
+
+/** Old daemons keep their updater, never their session protocol. */
+const legacyUpgradeVersion = (version: number | null): boolean => version === 10 || version === 11;
+const upgradeOnly = (link: Link): boolean => legacyUpgradeVersion(link.hostVersion);
+const upgradeOp = (op: string): boolean => op === "checkUpdates" || op === "updateSoftware";
 
 /** Liveness and op timeouts from LINK_LIMITS; tests shorten them. */
 export const linkTimings = {
@@ -389,6 +396,9 @@ function flush(link: Link): void {
  * server must not reach the children. */
 function sendDown(link: Link, body: Unsequenced<DownMessage>, key: string): void {
   if (hub().frozen) return;
+  if (upgradeOnly(link) && (body.type !== "req" || !upgradeOp(body.op))) {
+    throw new HostOpError(426, "host_upgrade_required", "Update this host before using its application protocol");
+  }
   const line = encodeQueued(body);
   const size = Buffer.byteLength(line);
   // Ahead of it: what is queued or unacked on this link (counters, no scan); fairness may send it before some of that.
@@ -501,6 +511,7 @@ function endSocket(link: Link): void {
   failAllOps(link, () => new HostOpError(503, "host_offline", `${labelOf(link.id)} is offline`));
   notify(hub().uploadListeners, link.id, null);
   endWorkspaceWatches(link.id);
+  notify(hub().changeListeners);
 }
 
 function stopTimers(link: Link): void {
@@ -563,6 +574,7 @@ const stopping = () => json({ error: "omp-web is shutting down" }, 503);
  */
 export function freezeHostLinks(): void {
   hub().frozen = true;
+  freezeMaintenance();
   for (const link of hub().links.values()) {
     link.capacity = null;
     recordDropped(link);
@@ -683,7 +695,11 @@ function onFirstFrame(ws: LinkSocket, data: string | Uint8Array): void {
   } catch {
     return refuse();
   }
-  if (versionMismatch(link, raw)) return ws.close(LINK_CLOSE.versionMismatch, JSON.stringify({ serverVersion: LINK_PROTOCOL_VERSION }));
+  const version = helloVersion(raw);
+  const legacy = legacyUpgradeVersion(version);
+  if ((!legacy && versionMismatch(link, raw)) || (legacy && link.socket && !upgradeOnly(link))) {
+    return ws.close(LINK_CLOSE.versionMismatch, JSON.stringify({ serverVersion: LINK_PROTOCOL_VERSION }));
+  }
   let hello: UpMessage | UnknownMessage;
   try {
     hello = decodeUp(data);
@@ -697,6 +713,14 @@ function onFirstFrame(ws: LinkSocket, data: string | Uint8Array): void {
 
 function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   // One link per host: the newest wins and the previous daemon exits.
+  if (legacyUpgradeVersion(hello.v) || upgradeOnly(link)) {
+    // Nothing from another protocol, or an uncertain previous update, is replayed through the shim.
+    failAllOps(link, () => new HostOpError(503, "transport_lost", "The host update connection was replaced"));
+    link.sender = new LinkSender();
+    link.outbox = new Outbox();
+    link.outboxBytes = 0;
+    link.unacked = 0;
+  }
   const previous = link.socket;
   link.socket = ws;
   link.capacity = null;
@@ -723,8 +747,8 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   released(link, link.outbox.ack(hello.ack));
   link.unknownLog.reset();
   link.hostVersion = hello.v;
-  link.shared = true;
-  link.notifier = hello.link?.notifier === true;
+  link.shared = !upgradeOnly(link);
+  link.notifier = !upgradeOnly(link) && hello.link?.notifier === true;
   enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id }));
   // Resend what the daemon has not applied, in order and paced, before anything new.
   link.sentSeq = hello.ack;
@@ -733,7 +757,7 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   flush(link);
   link.ompVersion = hello.ompVersion;
   link.ompwebVersion = hello.ompwebVersion ?? null;
-  link.workspaceOps = new Set(hello.workspaceOps ?? []);
+  link.workspaceOps = new Set(upgradeOnly(link) ? [] : hello.workspaceOps ?? []);
   endWorkspaceWatches(link.id);
   link.platform = hello.platform;
   link.autoApprove = hello.autoApproveExtension;
@@ -742,6 +766,11 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   clearInterval(link.pingTimer);
   link.pingTimer = setInterval(() => enqueue(link, encodeLine({ type: "ping" })), linkTimings.pingMs);
   link.pingTimer.unref?.();
+  if (upgradeOnly(link)) {
+    link.listedSessions = new Set();
+    setStatus(link, "needs-upgrade");
+    return;
+  }
   setStatus(link, hello.ompVersion === null ? "omp-missing" : "online");
   reattach(link, hello.channels);
   notify(hub().helloListeners, link.id, hello.channels);
@@ -903,6 +932,10 @@ function configCurrent(link: Link): boolean {
 /** `whole`: for a `part` that completes a line, that line decoded. `joined`: that line itself, which gets no dedup of
  * its own (its parts were deduped). */
 function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMessage | UnknownMessage, joined = false): void {
+  if (upgradeOnly(link) && !["ping", "pong", "hello", "ack", "unknown", "part", "res"].includes(message.type)) {
+    if ("seq" in message && message.seq !== null) link.up.applied(message.seq);
+    return;
+  }
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
   if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
   if (message.type === "capacity") {
@@ -991,7 +1024,10 @@ function request(hostId: string, op: HostOpName, args: Record<string, unknown>, 
   const link = linkFor(hostId);
   const label = labelOf(hostId);
   if (hub().frozen) return Promise.reject(new HostOpError(503, "server_stopping", "omp-web is shutting down"));
-  if (!link.socket || !isLinkUp(link.status)) {
+  if (upgradeOnly(link) && !upgradeOp(op)) {
+    return Promise.reject(new HostOpError(426, "host_upgrade_required", "Update this host before using its application protocol"));
+  }
+  if (!link.socket || (!isLinkUp(link.status) && !upgradeOnly(link))) {
     return Promise.reject(new HostOpError(503, "host_offline", `${label} is offline`));
   }
   const { promise, resolve, reject } = Promise.withResolvers<unknown>();
@@ -1560,6 +1596,16 @@ export function getHost(id: string): Host | null {
 
 const updateCompatibility = () => ({ min: MIN_LINK_PROTOCOL_VERSION, max: LINK_PROTOCOL_VERSION });
 
+async function requestHostUpdate(id: string, op: "checkUpdates" | "updateSoftware", args: Record<string, unknown>): Promise<unknown> {
+  if (!getMaintenanceHost(id)) return request(id, op, args);
+  try {
+    return await requestMaintenance(id, op, args);
+  } catch (error) {
+    if (error instanceof MaintenanceError) throw new HostOpError(error.status, error.code, error.message);
+    throw error;
+  }
+}
+
 function requireUpdateHost(id: string): void {
   if (!getHost(id)) throw new HostOpError(404, "host_not_found", "Unknown host");
   if (isUpdateDisabled()) throw new HostOpError(403, "updates_disabled", "Updates are disabled on this web server");
@@ -1581,7 +1627,7 @@ function updateOperation(value: unknown): value is HostUpdateOperation {
 /** Every machine, including this one, checks on its daemon. Never fall back to the web server's installation. */
 export async function getHostSoftwareUpdates(id: string, force = false): Promise<HostUpdateInfo> {
   requireUpdateHost(id);
-  const result = await request(id, "checkUpdates", { compatibility: updateCompatibility(), force });
+  const result = await requestHostUpdate(id, "checkUpdates", { compatibility: updateCompatibility(), force });
   if (!isRecord(result) || !softwareUpdate(result.ompweb) || !isRecord(result.omp) || !nullableString(result.omp.currentVersion)
     || !["npm", "bun", "binary"].includes(String(result.ompweb.installMethod))
     || !(result.ompweb.protocolVersion === null || (Number.isSafeInteger(result.ompweb.protocolVersion) && Number(result.ompweb.protocolVersion) > 0))
@@ -1605,7 +1651,7 @@ export async function updateHostSoftware(id: string, target: HostUpdateTarget, v
   if (!candidate.updateAvailable || !candidate.canUpdate || candidate.availableVersion !== version) {
     throw new HostOpError(409, "host_update_blocked", candidate.blockedReason ?? "The available version changed; check for updates again");
   }
-  const result = await request(id, "updateSoftware", { target, version, compatibility: updateCompatibility() });
+  const result = await requestHostUpdate(id, "updateSoftware", { target, version, compatibility: updateCompatibility() });
   if (!isRecord(result) || result.accepted !== true || !updateOperation(result.operation)
     || result.operation.target !== target || result.operation.version !== version) {
     throw new HostOpError(502, "host_bad_result", "The host returned an invalid update operation");
@@ -1619,6 +1665,9 @@ export interface LinkedHostRow {
   status: HostStatus;
   ompVersion: string | null;
   ompwebVersion?: string | null;
+  /** A connected maintenance API or legacy shim can update an incompatible application peer. */
+  upgradeOnly?: boolean;
+  apiVersion?: number;
   platform: string | null;
   lastSeenAt: string | null;
   allowAgentStart: boolean;
@@ -1632,20 +1681,31 @@ export interface LinkedHostRow {
   clusterConfig?: ConfigState & { owned: boolean; current: boolean };
 }
 
+function hostConnectionFields(link: Link | undefined, maintenance: MaintenanceHello | null): Pick<LinkedHostRow, "status" | "upgradeOnly" | "apiVersion"> {
+  const applicationUp = !!link?.socket && isLinkUp(link.status);
+  const mismatch = !!maintenance && (maintenance.protocolVersion < MIN_LINK_PROTOCOL_VERSION || maintenance.protocolVersion > LINK_PROTOCOL_VERSION);
+  return {
+    status: maintenance && !applicationUp ? mismatch ? "needs-upgrade" : "offline" : link?.status ?? "offline",
+    ...(!applicationUp && ((link?.socket && upgradeOnly(link)) || mismatch) ? { upgradeOnly: true } : {}),
+    ...(maintenance ? { apiVersion: maintenance.apiVersion } : {}),
+  };
+}
+
 export function listHosts(): LinkedHostRow[] {
   return loadHosts().filter((record) => record.id !== LOCAL_HOST_ID).map((record) => {
     const link = hub().links.get(record.id);
+    const maintenance = getMaintenanceHost(record.id);
     return {
       id: record.id,
       label: record.label,
-      status: link?.status ?? "offline",
-      ompVersion: link?.ompVersion ?? null,
-      ompwebVersion: link?.ompwebVersion ?? null,
-      platform: link?.platform ?? null,
+      ...hostConnectionFields(link, maintenance),
+      ompVersion: maintenance?.ompVersion ?? link?.ompVersion ?? null,
+      ompwebVersion: maintenance?.ompwebVersion ?? link?.ompwebVersion ?? null,
+      platform: maintenance?.platform ?? link?.platform ?? null,
       lastSeenAt: link?.lastSeenAt ?? record.lastSeenAt,
       allowAgentStart: record.allowAgentStart,
       shareCredentials: record.shareCredentials,
-      hostVersion: link?.hostVersion ?? null,
+      hostVersion: link?.hostVersion ?? maintenance?.protocolVersion ?? null,
       serverVersion: LINK_PROTOCOL_VERSION,
       workspaceOps: [...(link?.workspaceOps ?? [])],
       ...(link?.configState ? { clusterConfig: { ...link.configState, owned: link.configOwned, current: configCurrent(link) } } : {}),
@@ -1763,6 +1823,8 @@ export interface LocalHostRow {
   status: HostStatus;
   ompVersion: string | null;
   ompwebVersion?: string | null;
+  upgradeOnly?: boolean;
+  apiVersion?: number;
   platform: string | null;
   lastSeenAt: null;
   hostVersion: number | null;
@@ -1781,15 +1843,16 @@ export type HostRow = LocalHostRow | LinkedHostRow;
  * the members cannot get this machine's configuration. */
 export function hostsSnapshot(): { hosts: HostRow[]; pools?: HostPool[]; masterConfigError?: MasterConfigError } {
   const link = hub().links.get(LOCAL_HOST_ID);
+  const maintenance = getMaintenanceHost(LOCAL_HOST_ID);
   const local: LocalHostRow = {
     id: "local",
     label: customLocalLabel(),
-    status: link?.status ?? "offline",
-    ompVersion: link?.ompVersion ?? null,
-    ompwebVersion: link?.ompwebVersion ?? null,
-    platform: link?.platform ?? null,
+    ...hostConnectionFields(link, maintenance),
+    ompVersion: maintenance?.ompVersion ?? link?.ompVersion ?? null,
+    ompwebVersion: maintenance?.ompwebVersion ?? link?.ompwebVersion ?? null,
+    platform: maintenance?.platform ?? link?.platform ?? null,
     lastSeenAt: null,
-    hostVersion: link?.hostVersion ?? null,
+    hostVersion: link?.hostVersion ?? maintenance?.protocolVersion ?? null,
     serverVersion: LINK_PROTOCOL_VERSION,
     workspaceOps: [...(link?.workspaceOps ?? [])],
     serverPlatform: process.platform,
@@ -1840,8 +1903,10 @@ export function getHostOmpVersion(hostId: string): string | null {
 export function onHostsChange(listener: () => void): () => void {
   const listeners = hub().changeListeners;
   listeners.add(listener);
+  const detachMaintenance = onMaintenanceChange(listener);
   return () => {
     listeners.delete(listener);
+    detachMaintenance();
   };
 }
 
@@ -1934,7 +1999,7 @@ export function setHostUploadRetention(hostId: string, days: number | null): Pro
 /** Queue upload bytes (at most pieceBytes) for `hostId`'s daemon, fair with its other traffic; false when it has no socket. */
 export function sendUploadFrame(hostId: string, id: string, bytes: Uint8Array): boolean {
   const link = hub().links.get(hostId);
-  if (!link?.socket || hub().frozen) return false;
+  if (!link?.socket || hub().frozen || upgradeOnly(link)) return false;
   link.sender.push(`up:${id}`, { id, blob: bytes });
   flush(link);
   return true;
@@ -1956,6 +2021,7 @@ export function onUploadEvent(listener: (hostId: string, ack: UploadAck | null) 
 
 /** End a host's link now (revoke). Its daemon gets 401 when it redials and stops its children. */
 export function closeHostLink(id: string): void {
+  closeMaintenanceHost(id);
   const link = hub().links.get(id);
   if (!link) return;
   hub().links.delete(id);

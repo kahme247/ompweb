@@ -315,15 +315,15 @@ that upload's file.
   ops; 9: `open.launch.shareCredentials`; 10: `open.launch.configVersion`,
   `config_state`, the `clusterConfig` op; 11: channel lines are the omp
   runner's `{t}` frames, not omp RPC frames). Main links daemons from
-  `MIN_LINK_PROTOCOL_VERSION` (11) up to its own `LINK_PROTOCOL_VERSION` (11);
-  its `welcome` carries the version the link speaks (see "Protocol versions and
-  compatibility"). A hello whose `v` is outside that range (checked on the raw
-  JSON before decoding) gets close 4426 with reason `{"serverVersion":11}`; the
-  daemon exits 1, telling which side to
-  update ("update ompweb on this host", or "this host's ompweb is newer than
-  the server's: update ompweb on the server" when `serverVersion` is below its
-  own); Settings → Hosts shows "needs upgrade (host vN, server vM)" unless the
-  host has a healthy socket.
+  `MIN_LINK_PROTOCOL_VERSION` (12) up to its own `LINK_PROTOCOL_VERSION` (12).
+  A v10 or v11 daemon is welcomed with its own version by an upgrade-only shim,
+  outside that application range. The shim only sends `checkUpdates` and
+  `updateSoftware`; it acknowledges and discards application activity, never
+  adopts or kills sessions, and never starts cluster configuration synchronization.
+  All other incompatible versions get close 4426 with `{"serverVersion":12}`.
+  New daemons retain their separate maintenance API connection while an
+  application mismatch is retried. Old daemons may exit on rejection; an
+  already-exited daemon needs starting once.
 - **Identity.** The host is the record whose `tokenHash` matches. Nothing the
   daemon sends selects or changes its identity.
 - **One link per host.** A hello on a new socket with the same token closes the
@@ -404,21 +404,15 @@ the `spawn` op are gone).
     message being understood unless the version (or, later, a capability) says
     so. Tolerance starts with v3: a daemon older than that is strict (an
     unknown type or op makes it refuse the line).
-- **Older versions stay supported** from the next version on, until supporting
-  one becomes too much of a maintenance burden; dropping one is an explicit
-  decision (raising `MIN_LINK_PROTOCOL_VERSION`, which is 11 today). In
-  practice main keeps at least version N-1. For an older daemon main decodes
-  its hello into today's shape and sends only messages that version
-  understands (to a v4 daemon: no `part`, every line whole, and no unacked
-  window, since it acks only inside its next uplink frame).
-  A daemon on a dropped version gets 426
-  (a POST) or close 4426 (a hello frame). Dropping versions ends with the
-  decision below.
-- **Upgrade order: web app first, then hosts.** Main supports older daemons; a
-  daemon is not required to support a newer main, and one newer than main gets
-  close 4426.
-  `hostVersion` (Settings → Hosts) is the version a linked daemon speaks,
-  so Settings can later show "update available" for one behind the server.
+- **Application compatibility is separate from maintenance compatibility.**
+  Dropping an application version raises `MIN_LINK_PROTOCOL_VERSION` without
+  dropping maintenance API v1. The current application range is 12–12.
+  Legacy v10/v11 are admitted only by the update shim, not the session runtime.
+- **Upgrade order: web app first, then hosts.** The shim passes the new server's
+  application range to the old daemon's unchanged updater, while its `welcome`
+  echoes the old version. The updater can install Protocol v12 without needing
+  to understand it. Existing safety checks still refuse busy hosts and unsafe
+  supervisors; a shared installation uses restart-only after updating the server.
 - **v4 (the WebSocket link) dropped v3** before any release; from the next
   version on, main keeps N-1. A v3 daemon POSTs its hello to
   `/api/hosts/link`; main answers that POST 426 with both versions (and never
@@ -443,16 +437,26 @@ the `spawn` op are gone).
   a channel; both sides refuse one with 426 / close 4426 instead of hanging.
   Prerelease builds already shipped v10 with omp RPC frames, so the runner could
   not reuse 10.
-- **Decided: backward compatibility becomes enforced once the WebSocket
-  experiments end.** Until then (the browser transport experiment and the
-  host-link measurements), versions may still be dropped as above. Call N the
-  first link protocol version released after them. From N on the guarantees
-  are enforced, so the web app can always update an old host from Settings →
-  Hosts: the handshake (`hello`/`welcome` and the version close codes), the
-  version report, and an update op form a fixed core that every later web app
-  keeps working with every daemon on N or newer. `MIN_LINK_PROTOCOL_VERSION`
-  never goes above N. This replaces the update-only mode that was planned
-  for dropped versions.
+- **Maintenance API v1 is a separate, stable contract.** New daemons discover
+  `/api/hosts/maintenance` with the same bearer token, then open a separate
+  WebSocket. Its `hello`/`welcome` negotiate `apiVersion: 1` independently of the
+  advisory `protocolVersion`. Its codec and transport do not import the
+  application protocol. A protocol mismatch cannot terminate this connection.
+  Requests have bounded IDs and explicit replies; disconnects and timeouts never
+  cause automatic replay of an update. The daemon remains authoritative for
+  whether it is safe to update.
+  - `status`: software/API/protocol versions, capabilities, workspace-operation
+    availability, session-process inventory and activity, drained/busy state and
+    the durable update operation.
+  - `listSessions`: session metadata, including `processRunning` and `active`;
+    no transcript or application frame decoding.
+  - `checkUpdates` and `updateSoftware`: the native updater and its safeguards.
+  - The web-authenticated `GET /api/hosts/[id]/maintenance` exposes status;
+    `?sessions=1` exposes inventory. Existing host update routes prefer API v1
+    when available, otherwise use the legacy shim.
+  - Revoke and shutdown close both connections. API v1 remains supported across
+    future application-protocol changes; incompatible maintenance changes need
+    a separately negotiated API version.
 
 ## Host ops (this sub-project)
 

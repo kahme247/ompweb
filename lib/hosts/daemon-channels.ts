@@ -81,6 +81,12 @@ export class ChannelTable {
     for (const channel of this.channels.values()) if (channel.lifecycle?.activeTurn ?? channel.pending.activeTurn) active++;
     return active;
   }
+  maintenanceSessions(): { id: string | null; cwd: string; active: boolean }[] {
+    return [...this.channels.values()].map(channel => ({
+      id: channel.pending.sessionId, cwd: channel.cwd,
+      active: (channel.lifecycle?.isRunning ?? channel.pending.activeTurn) || channel.resuming === true,
+    }));
+  }
   cwdForSession(id: string): string | undefined {
     for (const channel of this.channels.values()) if (channel.pending.sessionId === id) return channel.cwd;
     return undefined;

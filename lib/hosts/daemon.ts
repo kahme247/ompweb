@@ -11,6 +11,8 @@ import { sampleHostCapacity } from "./capacity";
 import type { HostControlCommand, HostControlStatus } from "./host-control";
 import { readHostLinks, readHostLogin, type HostLink } from "./host-login";
 import { DaemonLink, dialable, nextRedialDelay } from "./daemon-link";
+import { DaemonMaintenance } from "./daemon-maintenance";
+import { MAINTENANCE_API_VERSION, type MaintenanceOp } from "./maintenance-protocol";
 import { ChannelTable } from "./daemon-channels";
 import { credentialsEnv, serverFetch, startBrokerForwarder } from "./daemon-broker";
 import { createClusterConfig } from "./daemon-cluster-config";
@@ -91,6 +93,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
   for (const link of initial) if (!dialable(link.url, options.allowHttp)) throw new Error("ompweb host needs an https:// server URL (http:// only for loopback, or with --allow-http)");
   const primaryUrl = (explicit?.[0]?.url ?? readHostLogin()?.url ?? initial[0]?.url)?.replace(/\/+$/, "");
   const links = new Map<string, DaemonLink>();
+  const maintenanceLinks = new Map<string, DaemonMaintenance>();
   const ended = new Map<string, string>();
   const services = new Map<string, WorkspaceService>();
   const uploadOwners = new Map<string, { link: DaemonLink; attempt: string }>();
@@ -252,13 +255,18 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
   }
   /** Stops a removed link's workspace service (tracked so shutdown awaits it) and frees its upload ownership so other servers can take those uploads. */
   function dropLink(link: DaemonLink): void {
+    const maintenance = maintenanceLinks.get(link.id); maintenanceLinks.delete(link.id);
+    if (maintenance) {
+      const stop = maintenance.stop().finally(() => stops.delete(stop));
+      stops.add(stop);
+    }
     const service = services.get(link.id); services.delete(link.id);
     if (service) { const stop: Promise<void> = service.stop().catch(error => log("could not stop a workspace service: " + reason(error))).finally(() => stops.delete(stop)); stops.add(stop); }
     for (const [id, owner] of uploadOwners) if (owner.link === link) uploadOwners.delete(id);
     for (const [key, owner] of uploadAttempts) if (owner === link) uploadAttempts.delete(key);
   }
   function makeLink(login: HostLink, primary: boolean): DaemonLink {
-    const link = new DaemonLink(login, "l" + ++linkId, { allowHttp: options.allowHttp, primary, log,
+    const link = new DaemonLink(login, "l" + ++linkId, { allowHttp: options.allowHttp, primary, log, keepOnVersionMismatch: true,
       hello: (link, replay) => encodeLine({ type: "hello", v: link.version, ompVersion, ompwebVersion: packageJson.version,
         workspaceOps: Object.keys(WORKSPACE_OP_PARAMS), platform: process.platform, home: homedir(), autoApproveExtension: localHost.autoApproveExtension(),
         ack: link.ackedDown, channels: channels.listing(link, replay),
@@ -295,7 +303,18 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
       },
     });
     services.set(link.id, createWorkspaceService(uploads, (id, epoch, event) => link.queue({ type: "workspace_file", id, epoch, event }, "watch:" + id)));
-    links.set(login.url, link); return link;
+    links.set(login.url, link);
+    const maintenance = new DaemonMaintenance(login, {
+      hello: () => ({ type: "hello", apiVersion: MAINTENANCE_API_VERSION, protocolVersion: LINK_PROTOCOL_VERSION,
+        ompwebVersion: packageJson.version, ompVersion, platform: process.platform,
+        capabilities: ["status", "listSessions", "checkUpdates", "updateSoftware"] }),
+      handleRequest: (op, args) => runMaintenance(link, op, args),
+      reload: () => { reconcile(link, true); },
+      log,
+    });
+    maintenanceLinks.set(link.id, maintenance);
+    maintenance.start();
+    return link;
   }
 
   function reconcile(source?: DaemonLink, unauthorized = false): boolean {
@@ -315,7 +334,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     for (const [url, link] of links) {
       const login = wanted.get(url);
       if (login?.token === link.login.token) continue;
-      if (login) { link.rekey(login.token); continue; }
+      if (login) { link.rekey(login.token); maintenanceLinks.get(link.id)?.rekey(login.token); continue; }
       links.delete(url); channels.linkGone(link); dropLink(link); void link.stop();
     }
     for (const login of wanted.values()) {
@@ -325,6 +344,32 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     }
     // Who holds the configuration follows host.json (holds()): a removed holder hands it to the links that remain.
     reportConfig(); electNotifier(); return source ? links.get(source.login.url) !== source || source.login.token !== previousToken : true;
+  }
+
+  async function runMaintenance(link: DaemonLink, op: MaintenanceOp, args: Record<string, unknown>): Promise<unknown> {
+    if (stopped) throw new HostOpError(503, "host_stopping", "This host is stopping");
+    const update = op === "checkUpdates" || op === "updateSoftware";
+    if (update) nativeUpdatesInFlight++;
+    try {
+      if (op === "status") return {
+        apiVersion: MAINTENANCE_API_VERSION, protocolVersion: LINK_PROTOCOL_VERSION,
+        ompwebVersion: packageJson.version, ompVersion, platform: process.platform,
+        capabilities: ["status", "listSessions", "checkUpdates", "updateSoftware"],
+        workspaceOps: Object.keys(WORKSPACE_OP_PARAMS), sessionProcesses: channels.size,
+        activeTurns: channels.activeTurns, sessions: channels.maintenanceSessions(),
+        drained, busyReason: busyReason(), operation: getHostUpdateOperation(),
+      };
+      if (op === "listSessions") {
+        const states = new Map(channels.maintenanceSessions().map(session => [session.id, session]));
+        return (await sessionOps.listSessions()).map(session => ({
+          id: session.id, title: session.name ?? null, cwd: session.cwd, modified: session.modified,
+          processRunning: states.has(session.id), active: states.get(session.id)?.active ?? false,
+        }));
+      }
+      return await runOp(link, op, args);
+    } finally {
+      if (update) nativeUpdatesInFlight--;
+    }
   }
 
   function handleDown(link: DaemonLink, message: DownMessage | UnknownMessage): void {
@@ -453,7 +498,7 @@ export function runHostDaemon(options: DaemonOptions): HostDaemon {
     resume.freeze();
     // The configuration first: its requests to a server are aborted at once, so no start waiting on them holds the stop.
     const configStopped = config.stop();
-    stopping = (async () => { await Promise.all([...links.values()].map(link => link.stop())); await Promise.all([...stops, ...[...services.values()].map(service => service.stop())]); await (await hostSocket)?.close(); await channels.stop(); await configStopped; await forwarder.stop(); resume.dispose(); finish(code); })();
+    stopping = (async () => { await Promise.all([...links.values()].map(link => link.stop())); await Promise.all([...maintenanceLinks.values()].map(link => link.stop())); await Promise.all([...stops, ...[...services.values()].map(service => service.stop())]); await (await hostSocket)?.close(); await channels.stop(); await configStopped; await forwarder.stop(); resume.dispose(); finish(code); })();
     return stopping;
   }
   // Links first: a recovered sharing session needs its link to start.

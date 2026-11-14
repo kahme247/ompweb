@@ -30,7 +30,8 @@ export function HostUpdates({ host }: { host: HostRow }) {
   const mounted = useRef(true);
   const postController = useRef<AbortController | null>(null);
   const endpoint = `/api/hosts/${encodeURIComponent(host.id)}/updates`;
-  const unavailable = host.status === "offline" || host.status === "needs-upgrade";
+  const upgradeOnly = host.status === "needs-upgrade" && host.upgradeOnly === true;
+  const unavailable = (host.status === "offline" || host.status === "needs-upgrade") && !upgradeOnly && host.apiVersion !== 1;
 
   useEffect(() => {
     mounted.current = true;
@@ -164,7 +165,7 @@ export function HostUpdates({ host }: { host: HostRow }) {
 
   const busy = loading || posting || monitoring;
   const disabled = busy || unavailable || unsupported;
-  const unavailableReason = host.status === "needs-upgrade" || unsupported ? t("hostUpdates.unsupported") : host.status === "offline" ? t("hostUpdates.offline") : null;
+  const unavailableReason = (host.status === "needs-upgrade" && unavailable) || unsupported ? t("hostUpdates.unsupported") : host.status === "offline" && unavailable ? t("hostUpdates.offline") : null;
   const operation = info?.operation;
   return (
     <div style={{ flexBasis: "100%", minWidth: 0, borderTop: "1px solid var(--border)", paddingTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>

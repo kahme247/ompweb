@@ -24,7 +24,8 @@ import {
 // /api/hosts/cluster-config/manifest and /api/hosts/cluster-config/file/<64 hex digits> (exactly: hosts/[id]/cluster and
 // hosts/[id]/updates answer to id "cluster-config" and stay gated) check it before serving the master's configuration
 // to a cluster member (app/api/hosts/cluster-config/).
-export const UNGATED = /^\/(?:assets\/|(?:favicon\.ico|icon\.svg|icon\.png|icon-192\.png|badge-96\.png|sw\.js)$|api\/hosts\/link$|api\/hosts\/broker\/v1\/|api\/hosts\/cluster-config\/(?:manifest|file\/[0-9a-f]{64})$)/;
+// /api/hosts/maintenance is the independent maintenance API; its bearer gate also covers discovery.
+export const UNGATED = /^\/(?:assets\/|(?:favicon\.ico|icon\.svg|icon\.png|icon-192\.png|badge-96\.png|sw\.js)$|api\/hosts\/(?:link|maintenance)$|api\/hosts\/broker\/v1\/|api\/hosts\/cluster-config\/(?:manifest|file\/[0-9a-f]{64})$)/;
 
 // Relative: request.url is always http:// under Bun, so an absolute Location would leave https behind a TLS proxy.
 const redirect = (location: string) => new Response(null, { status: 307, headers: { location } });

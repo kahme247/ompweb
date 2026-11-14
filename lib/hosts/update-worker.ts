@@ -43,8 +43,8 @@ export interface HostUpdateDescriptor {
   managerPath?: string;
   restartOnly?: boolean;
   systemd: { unit: string; user: boolean } | null;
-  /** `owner/name` whose releases the binary comes from (lib/release-repo.ts; this file stays self-contained). */
-  releaseRepo: string;
+  /** Binary release source; absent only on a legacy restart-only descriptor, which downloads nothing. */
+  releaseRepo?: string;
 }
 
 export function hostUpdateRoot(): string {
@@ -576,7 +576,9 @@ function validateDescriptor(path: string): HostUpdateDescriptor {
   const root = ensureHostUpdateRoot();
   assertOwnedPath(path);
   const d = JSON.parse(readFileSync(path, "utf8")) as HostUpdateDescriptor;
-  if (!/^[a-zA-Z0-9-]{1,80}$/.test(d.id) || resolve(path) !== join(root, d.id, "descriptor.json") || !HOST_VERSION_PATTERN.test(d.version) || !HOST_VERSION_PATTERN.test(d.fromVersion) || d.target !== "ompweb" || !["npm", "bun", "binary"].includes(d.installMethod) || !isAbsolute(d.installDir) || !isAbsolute(d.runtime) || !isAbsolute(d.cwd) || !Number.isSafeInteger(d.daemonPid) || d.daemonPid <= 1 || !Array.isArray(d.hostArgs) || d.hostArgs.some((arg) => arg !== "--allow-http") || typeof d.releaseRepo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(d.releaseRepo)) throw new Error("Invalid host update descriptor");
+  if (!/^[a-zA-Z0-9-]{1,80}$/.test(d.id) || resolve(path) !== join(root, d.id, "descriptor.json") || !HOST_VERSION_PATTERN.test(d.version) || !HOST_VERSION_PATTERN.test(d.fromVersion) || d.target !== "ompweb" || !["npm", "bun", "binary"].includes(d.installMethod) || !isAbsolute(d.installDir) || !isAbsolute(d.runtime) || !isAbsolute(d.cwd) || !Number.isSafeInteger(d.daemonPid) || d.daemonPid <= 1 || !Array.isArray(d.hostArgs) || d.hostArgs.some((arg) => arg !== "--allow-http")) throw new Error("Invalid host update descriptor");
+  // A v10 daemon copies this new worker after the shared web installation has already been replaced.
+  if (d.releaseRepo === undefined ? d.restartOnly !== true : typeof d.releaseRepo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(d.releaseRepo)) throw new Error("Invalid host update descriptor");
   if (d.restartOnly !== undefined && typeof d.restartOnly !== "boolean") throw new Error("Invalid host restart-only descriptor");
   if (!d.systemd && (typeof d.daemonIdentity !== "string" || !d.daemonIdentity || d.daemonIdentity.length > 200)) throw new Error("Invalid host update descriptor: the daemon's process identity is missing");
   assertOwnedPath(dirname(path), true);
