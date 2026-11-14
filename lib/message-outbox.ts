@@ -391,9 +391,10 @@ function notifyListeners(sessionId: string): void {
   }
 }
 
+/** One attempt's transition. A claim another live server holds is its delivery (spec O5): never reset or failed here. */
 function setState(id: string, state: OutboxEntry["state"], error: string | null = null, mayHaveBeenSent = false): boolean {
-  return db().prepare("UPDATE entries SET state = ?, error = ?, may_have_been_sent = ?, previous_entry_ids = CASE WHEN ? = 'delivering' THEN previous_entry_ids ELSE NULL END WHERE id = ? AND state IN ('held', 'waiting_host', 'delivering')")
-    .run(state, error?.slice(0, 1024) ?? null, mayHaveBeenSent ? 1 : 0, state, id).changes > 0;
+  return db().prepare("UPDATE entries SET state = ?, error = ?, may_have_been_sent = ?, previous_entry_ids = CASE WHEN ? = 'delivering' THEN previous_entry_ids ELSE NULL END WHERE id = ? AND (state IN ('held', 'waiting_host') OR (state = 'delivering' AND dispatch_pid = ?))")
+    .run(state, error?.slice(0, 1024) ?? null, mayHaveBeenSent ? 1 : 0, state, id, process.pid).changes > 0;
 }
 
 /** Delivered, or removed by the user: the id stays (without the message) so a late resend of it (keepalive, Background
@@ -735,8 +736,10 @@ function recoverDelivering(sessionId?: string, startup = false): void {
         if ((error as NodeJS.ErrnoException).code === "EPERM") continue;
       }
     }
-    setState(entry.id, "failed", "omp-web restarted while this message was being delivered", true);
-    publish(entry.session_id);
+    // The orphaned claim exactly as inspected: a row that moved on since then is left alone.
+    const orphaned = db().prepare("UPDATE entries SET state = 'failed', error = ?, may_have_been_sent = 1, previous_entry_ids = NULL WHERE id = ? AND state = 'delivering' AND dispatch_pid IS ?")
+      .run("omp-web restarted while this message was being delivered", entry.id, entry.dispatch_pid);
+    if (orphaned.changes) publish(entry.session_id);
   }
 }
 
@@ -937,8 +940,9 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
   const error = typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
   // Nothing reached omp: the session's entries wait for the host's next hello.
   if (body.hostOffline === true && (!sent || body.delivery === "refused")) return "offline";
+  // A timed-out status read (`session_state_timeout`, e.g. omp busy streaming) is the preflight, not the message.
   if (body.code === "session_busy" || body.code === "session_restarting"
-    || (!sent && (body.code === "host_timeout" || body.code === "host_sessions_unavailable"))) return retry(entry);
+    || (!sent && (body.code === "host_timeout" || body.code === "host_sessions_unavailable" || body.code === "session_state_timeout"))) return retry(entry);
   // Only a missing session can be an archived one; any other 404 (an upload that is gone, say) is that refusal.
   if (!sent && response.status === 404 && body.code === "session_not_found") {
     const archive = await archiveState(entry.session_id);
