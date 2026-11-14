@@ -1733,6 +1733,20 @@ function replacementRoot(entry: LocalOutboxEntry, entries: ReadonlyMap<string, L
     if (!id) return null;
   }
 }
+function replacementDescendsFrom(entry: LocalOutboxEntry, ancestorId: string, entries: ReadonlyMap<string, LocalOutboxEntry>): boolean {
+  const seen = new Set([entry.id]);
+  let id = entry.replaces;
+  while (id) {
+    if (id === ancestorId) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const parent = entries.get(id);
+    if (!parent || parent.sessionId !== entry.sessionId || parent.state !== "failed"
+      || !sameOutboxIntent(parent, entry) || parent.replaces === undefined) return false;
+    id = parent.replaces;
+  }
+  return false;
+}
 
 
 interface OutboxItem {
@@ -1958,6 +1972,55 @@ function dropOutbox(client: Client, n: number, id: string): void {
     post(client, { outboxDropped: n });
     broadcastOutbox();
     if (item) sendOutbox(item.entry.sessionId);
+  });
+}
+/** Server identity snapshots can prove a browser's local copy was accepted even when its POST reply was lost. */
+function reconcileOutbox(client: Client, n: number, sessionId: string, value: unknown): void {
+  void ensureOutboxReady().then(async (loaded) => {
+    if (!loaded || !Array.isArray(value) || !value.every((id) => typeof id === "string")) {
+      post(client, { outboxReconciled: n, error: "The browser outbox could not be reconciled. Retry again." });
+      return;
+    }
+    const confirmed = new Set(value as string[]);
+    const removedIds = new Set<string>();
+    const committed = await writeOutbox((store) => {
+      const request = store.getAll();
+      request.onsuccess = () => {
+        const entries = request.result as LocalOutboxEntry[];
+        const byId = new Map(entries.map((entry) => [entry.id, entry] as const));
+        for (const entry of entries) {
+          if (entry.sessionId !== sessionId || !confirmed.has(entry.id) || entry.replaces === undefined) continue;
+          removedIds.add(entry.id);
+          store.delete(entry.id);
+          if (entry.replaces === undefined) continue;
+          const root = replacementRoot(entry, byId);
+          if (root === null) continue;
+          const original = byId.get(root);
+          if (!original || original.sessionId !== sessionId || original.state !== "failed" || !sameOutboxIntent(original, entry)) continue;
+          for (const candidate of entries) {
+            if (candidate.id === entry.id || candidate.sessionId !== sessionId || candidate.state !== "failed"
+              || !sameOutboxIntent(candidate, entry) || replacementDescendsFrom(candidate, entry.id, byId)) continue;
+            if (candidate.id !== root && replacementRoot(candidate, byId) !== root) continue;
+            removedIds.add(candidate.id);
+            store.delete(candidate.id);
+          }
+        }
+      };
+    });
+    if (!committed) {
+      post(client, { outboxReconciled: n, error: "The browser outbox could not be reconciled. Retry again." });
+      return;
+    }
+    for (const id of removedIds) {
+      clearTimeout(outboxItems.get(id)?.retryTimer);
+      outboxItems.delete(id);
+    }
+    if (removedIds.size > 0) {
+      await refreshOutbox();
+      broadcastOutbox();
+    }
+    post(client, { outboxReconciled: n });
+    if (removedIds.size > 0) sendOutbox(sessionId);
   });
 }
 
@@ -2237,6 +2300,9 @@ function attach(port: Port): void {
         break;
       case "outbox_drop":
         dropOutbox(client, Number(data.n), String(data.id));
+        break;
+      case "outbox_reconcile":
+        reconcileOutbox(client, Number(data.n), typeof data.sessionId === "string" ? data.sessionId : "", data.confirmedIds);
         break;
       case "lock":
         // MessagePort has no close event. The tab holds this lock for its

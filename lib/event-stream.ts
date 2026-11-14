@@ -96,7 +96,7 @@ export type OutboxEvent = { entries: LocalOutboxEntry[] } | { stored: StoredOutb
 export type StoredOutboxEntry = OutboxEntry & { replaces?: string };
 
 /** The worker about the outbox: an add committed, the whole list, or one the server stored. */
-type OutboxMessage = { outboxAdded: number; error?: string } | { outboxDropped: number; error?: string } | { outbox: LocalOutboxEntry[]; partial?: true } | { outboxStored: StoredOutboxEntry };
+type OutboxMessage = { outboxAdded: number; error?: string } | { outboxDropped: number; error?: string } | { outboxReconciled: number; error?: string } | { outbox: LocalOutboxEntry[]; partial?: true } | { outboxStored: StoredOutboxEntry };
 
 type WakeReason = "init" | "visible" | "hidden" | "online" | "network";
 
@@ -142,8 +142,8 @@ class Transport {
       else if ("cmd" in message) this.answer(message);
       else if ("up" in message) this.uploads.get(message.up)?.(message);
       else if ("diag" in message) this.diagnostics.get(message.diag)?.(message.data);
-      else if ("outboxAdded" in message || "outboxDropped" in message) {
-        const n = "outboxAdded" in message ? message.outboxAdded : message.outboxDropped;
+      else if ("outboxAdded" in message || "outboxDropped" in message || "outboxReconciled" in message) {
+        const n = "outboxAdded" in message ? message.outboxAdded : "outboxDropped" in message ? message.outboxDropped : message.outboxReconciled;
         const pending = this.outboxWrites.get(n);
         if (message.error !== undefined) pending?.reject(new Error(message.error));
         else pending?.resolve();
@@ -218,6 +218,13 @@ class Transport {
       const n = this.nextId++;
       this.outboxWrites.set(n, { resolve, reject });
       this.port.postMessage({ op: "outbox_drop", n, id });
+    });
+  }
+  reconcileOutbox(sessionId: string, confirmedIds: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const n = this.nextId++;
+      this.outboxWrites.set(n, { resolve, reject });
+      this.port.postMessage({ op: "outbox_reconcile", n, sessionId, confirmedIds });
     });
   }
 
@@ -438,6 +445,11 @@ export async function addToOutbox(entry: Omit<LocalOutboxEntry, "state" | "error
   addedHere.add(entry.id);
   await transport.addToOutbox(entry);
   void registerOutboxSync();
+}
+/** Removes local copies whose server acceptance is authoritative for this session. */
+export async function reconcileOutbox(sessionId: string, confirmedIds: string[]): Promise<void> {
+  transport ??= connectTransport();
+  await transport.reconcileOutbox(sessionId, confirmedIds);
 }
 
 function supportsOutboxSync(worker: ServiceWorker | null): Promise<boolean> {
